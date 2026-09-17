@@ -1,0 +1,265 @@
+{
+  "version": "6.0.0",
+  "name": "letian-qms-task-matrix",
+  "description": "乐天质量管理系统 (Letian QMS) 11 任务矩阵（涵盖工程基建、DDD分层、真实数据库迁移、种子数据、API、前端、后台运维与生产部署全流程）",
+  "tasks": [
+    {
+      "id": "QMS-000",
+      "title": "开发环境容器基建与运行时配置管理 (infra)",
+      "category": "infra",
+      "status": "completed",
+      "dependencies": ["QMS-001"],
+      "description": "基于 QMS-001 建立的工程规范，提供本地与 CI 容器化 PostgreSQL 14+ 实例编排基建，配置统一环境变量模板（.env.example），规范服务端口、JWT 密钥、数据库连接池与测试沙箱凭据。在根 package.json 中集成一键数据库生命周期指令（pnpm db:up / pnpm db:down），消除本地与云端环境差异。",
+      "inputs": ["QMS-001 (根 package.json 与工程脚手架)"],
+      "deliverables": [
+        "docker-compose.yml (PostgreSQL 14-alpine 容器编排，带健康检查探针)",
+        ".env.example (数据库、JWT、MES/ERP沙箱与告警WebHook配置规范)",
+        "package.json 中的一键数据库容器管理脚本 (db:up / db:down)"
+      ],
+      "acceptanceCriteria": [
+        "本地执行 pnpm db:up 能一键拉起 PG 14 容器并自检健康状态",
+        ".env.example 字段完备，覆盖生产与开发全部必要凭据"
+      ]
+    },
+    {
+      "id": "QMS-001",
+      "title": "项目规范、Monorepo 脚手架与 CI 质量门禁 (infra)",
+      "category": "infra",
+      "status": "completed",
+      "dependencies": [],
+      "description": "配置 pnpm workspace 多包管理工程，建立 packages/contracts、packages/domain、packages/application、packages/infrastructure、apps/api、apps/web 的分层架构。配置根目录构建脚本、严格强类型 tsconfig.base.json（启用 strict, noImplicitAny, exactOptionalPropertyTypes 等）、统一 ESLint/Prettier 规则。配置 CI 质量门禁流程，确保依赖引用采用 workspace:* 规范，严禁跨包私有引用，保障整体工程健康度。",
+      "inputs": [],
+      "deliverables": [
+        "pnpm-workspace.yaml、package.json、tsconfig.base.json",
+        "packages/ 与 apps/ 各子包基础配置与 package.json",
+        "CI 自动化质量门禁脚本 (typecheck, lint, test)"
+      ],
+      "acceptanceCriteria": [
+        "根目录下执行 pnpm -r run typecheck 全部通过，无任何类型错误",
+        "依赖统一采用 workspace:* 管理，严禁跨包相对源码引用",
+        "一键构建与单测指令全量通过"
+      ]
+    },
+    {
+      "id": "QMS-002",
+      "title": "共享契约源头与 Zod 模式生成器 (packages/contracts)",
+      "category": "contracts",
+      "status": "completed",
+      "dependencies": ["QMS-001"],
+      "description": "作为全系统单一数据源（Single Source of Truth）。手写核心 Zod Schema：覆盖质检方案版本库与指标公差、检验工单与快照、检验实测公差带、四类不合格 MRB 会签与超时催办、可配置评审流程引擎（ReviewFlowDefinition）、物料分类/编码/供应商三维 PBAC 规则、ERP 6类基础档案 DTO、MES 集成配置与同步日志模型、审计统计卡片模型、以及 RFC 7807 统一错误模型（遵循小写短横线 URI 规范）。基于 Zod Schema 自动推导并导出全量 TypeScript DTO 与 OpenAPI 3.1 规范。",
+      "inputs": [
+        "docs/letian-qms-prd.md (v2.2.0)",
+        "docs/api/letian-qms-openapi.yaml"
+      ],
+      "deliverables": [
+        "packages/contracts/src/schemas/ (Zod 模式校验器)",
+        "packages/contracts/src/dtos/ (由 z.infer 导出的强类型 DTO，杜绝手写重复类型)",
+        "packages/contracts/src/errors/ (RFC 7807 ProblemDetails 契约与小写短横线错误码字典)"
+      ],
+      "acceptanceCriteria": [
+        "全量业务入参、出参和公差规则均有对应的 Zod 验证器",
+        "导出的 TypeScript 类型 100% 自动由 z.infer 推导，保证契约单一数据源",
+        "契约完整包含物料分类/编码/供应商三维 PBAC、ERP 6类档案与可配置流程引擎模型"
+      ]
+    },
+    {
+      "id": "QMS-003",
+      "title": "纯业务领域模型、端口定义与状态机引擎 (packages/domain)",
+      "category": "domain",
+      "status": "completed",
+      "dependencies": ["QMS-002"],
+      "description": "严格零外部 I/O 与零框架依赖的纯领域模型。输入输出直接复用继承 packages/contracts 的 DTO。实现质检方案聚合根 (InspectionPlan) 与版本状态机；实现检验单状态机与方案快照深拷贝绑定；实现指标公差自动判定算法（数值公差、上下限、百分比文本区间）、AQL 抽样算法；实现可配置评审流程引擎模型 (ReviewFlowDefinition) 与 MRB 四类处置决策会签（特采需客户代表签核，返工触发回边生成复检轮次）；实现纯内存 PBAC 规则评估器（支持物料分类、特定编码与供应商三维匹配）；定义六边形架构端口接口（ErpPort 涵盖6类档案, MesPort 含放行校验与锁定端口, 仓储接口）与 DAG 批次追溯数据结构。",
+      "inputs": [
+        "packages/contracts (复用所有 DTO、枚举与 Schema)"
+      ],
+      "deliverables": [
+        "packages/domain/src/models/ (InspectionPlan 聚合、InspectionOrder 聚合、ReviewFlowDefinition 聚合、DAG 批次模型)",
+        "packages/domain/src/state-machines/ (检验单、MRB会签及方案版本受控有限状态机)",
+        "packages/domain/src/services/ (公差自动判定、AQL抽样计算、三维纯内存 PBAC 评估器)",
+        "packages/domain/src/ports/ (六边形端口接口定义：ErpPort 6类档案, MesPort 放行校验与锁定端口, Repository 接口)",
+        "纯内存单元测试套件（覆盖状态流转、特采签核、返工回边、公差判定与三维PBAC命中）"
+      ],
+      "acceptanceCriteria": [
+        "领域层严禁引入任何数据库驱动（pg/kysely）、Fastify 等网络与存储依赖",
+        "检验方案具备完整版本生命周期，检验单必须实现深拷贝方案快照的不变式校验",
+        "PBAC 物料权限规则在 domain 中支持分类、编码与供应商维度的纯内存评估",
+        "状态机覆盖 FAILED 阻断、MRB 4类处置（含特采签核）及 REWORK 返工生成复检轮次的流转",
+        "单元测试覆盖率 > 90%，包含所有非法状态转移与公差超标用例"
+      ]
+    },
+    {
+      "id": "QMS-004",
+      "title": "应用服务编排、PBAC 上下文装配与事务边界 (packages/application)",
+      "category": "application",
+      "status": "pending",
+      "dependencies": ["QMS-003"],
+      "description": "实现应用用例服务（Use Cases）。负责跨聚合业务编排：检验单创建时拉取并快照生效方案版本；检验实测判定不合格时自动匹配可配置流程引擎创建 MRB 并通过 Outbox 触发 MesPort 批次锁定；MRB 返工决策触发复检任务生成；管理事务生命周期（Unit of Work）与成品放行并发排他控制（pg_advisory_xact_lock）；装配当前用户的三维 PBAC 过滤上下文（物料/分类/供应商）注入仓储；实现基于 exceljs 与 @react-pdf/renderer 的统一导出编排服务（PDF/CSV/Excel）；输出标准 DTO 给 API 控制器，严禁领域实体外泄。",
+      "inputs": [
+        "packages/domain (聚合根、状态机、PBAC规则评估器、端口接口)",
+        "packages/contracts (输入输出 DTO 类型)"
+      ],
+      "deliverables": [
+        "packages/application/src/use-cases/inspections/ (创建检验快照绑定、实测录入判定、草稿保存、复检用例)",
+        "packages/application/src/use-cases/plans/ (方案创建、修订升版、启用与停用用例)",
+        "packages/application/src/use-cases/mrb/ (不合格自动触发 MRB、可配置多级流程流转、特采客户签核编排、4类处置决策)",
+        "packages/application/src/use-cases/release-gates/ (成品检强制放行校验与排他锁用例)",
+        "packages/application/src/use-cases/traceability/ (批次全链路正反向穿透追踪与报告导出用例)",
+        "packages/application/src/use-cases/export/ (检验进度明细 exceljs 与追溯报告 @react-pdf/renderer 导出用例)",
+        "packages/application/src/security/ (装配 CurrentUser 三维 PBAC 上下文)",
+        "packages/application/src/tx/ (事务管理单元与 Unit of Work 编排)"
+      ],
+      "acceptanceCriteria": [
+        "application 层统揽事务边界与排他锁调度，输出结果 100% 映射为 contracts 的 DTO",
+        "完成跨聚合业务流测试：创建检验单绑定方案快照 -> 实测不合格 -> 触发 MRB 锁定批次 -> 返工决策生成复检单",
+        "成品放行用例中排他锁成功包裹判定与状态变更全过程，阻断未检与不合格批次",
+        "应用服务集成测试覆盖三维 PBAC 权限未命中时的安全拦截与多格式文件流式导出"
+      ]
+    },
+    {
+      "id": "QMS-005",
+      "title": "数据库表设计、仓储适配与集成端口实现 (packages/infrastructure)",
+      "category": "infrastructure",
+      "status": "pending",
+      "dependencies": ["QMS-004"],
+      "description": "使用 Kysely Migration 落地 PostgreSQL 14+ 迁移，配置 CamelCasePlugin 统一驼峰映射，约定 JSONB 内部键统一为 camelCase。实现 domain/application 定义的仓储与集成端口：落实方案快照主表 JSONB 与明细行 (order_id, item_code) 唯一约束表设计；实现 authorization_logs 与 integration_configs 表 DDL；将物料/分类/供应商三维 PBAC 规则翻译为 SQL WHERE 子句；为批次追溯 DAG 建立联合索引并实现基于递归 CTE（带 PG14+ CYCLE 语法）查询仓储；实现 ErpAdapter（6类基础档案映射同步）与 MesAdapter（集成配置表、生产数据拉取、放行校验与 Outbox 异步批次锁定事件）；落实复合键幂等表（24h TTL、SHA-256 哈希校验）以及单表行级防篡改触发器 trg_audit_immutable 的不可变审计流水线。",
+      "inputs": [
+        "packages/domain/src/ports/ (端口接口定义)",
+        "packages/application (事务与仓储抽象)",
+        "packages/contracts"
+      ],
+      "deliverables": [
+        "packages/infrastructure/src/migrations/ (Kysely 迁移脚本：方案库、检验单与快照、可配置流程表、DAG追溯边索引、MES配置表、authorization_logs、audit_logs标准表、幂等表)",
+        "packages/infrastructure/src/repositories/ (实现仓储端口，含三维 PBAC SQL 翻译器与批次递归 CTE 仓储)",
+        "packages/infrastructure/src/adapters/ (ErpAdapter 6类档案同步与 MesAdapter 双向中枢，Outbox 事务记录)",
+        "packages/infrastructure/src/audit/ (JSON Diff Patch 计算、失败拒绝动作审计、敏感字段脱敏掩蔽与标准表行级防篡改触发器)",
+        "packages/infrastructure/src/idempotency/ (复合键幂等拦截器与 24h TTL 清理策略)"
+      ],
+      "acceptanceCriteria": [
+        "Kysely 迁移一键执行成功，外键、复合唯一约束、TIMESTAMPTZ 时区及 CamelCasePlugin 映射生效",
+        "批次追溯表基于 PG 14+ CYCLE 递归查询完整保留 is_cycle 与 path，支持 10 万级节点毫秒级展开",
+        "PBAC 规则正确转换为物料、分类、供应商 SQL 过滤子句，集成测试验证行级越权访问被底层拦截",
+        "审计表采用标准单表 + BEFORE UPDATE/DELETE 行级触发器防篡改，杜绝分区表触发器报错硬伤",
+        "ErpAdapter 支持供应商/客户/物料/分类/车间/职员 6类档案映射，MES 集成配置表支持动态维护"
+      ]
+    },
+    {
+      "id": "QMS-006",
+      "title": "Fastify API 服务端、统一鉴权与契约校验测试 (apps/api)",
+      "category": "api",
+      "status": "pending",
+      "dependencies": ["QMS-005"],
+      "description": "实现 Fastify REST API 引擎。作为纯协议适配层：请求与响应校验直接调用 packages/contracts 的 Zod Schema，实现单一数据源校验；集成 RFC 7807 统一错误响应拦截（小写短横线 URI 规范，对齐 trace_id 与 requestId）；挂载身份认证（JWT/Session）中间件并将当前用户注入 Application 层；暴露方案管理、检验单录入、进度明细流式导出（PDF/CSV/Excel）、成品检强制放行纯读校验接口（GET /release-gates/{batchNo}）、可配置评审流程、MRB会签处置、MES集成配置、审计汇总统计卡片与批次追溯端点；编写基于 contracts Zod schema 的自动化契约测试套件。",
+      "inputs": [
+        "packages/contracts (运行时 Zod 校验器与 RFC 7807 错误定义)",
+        "packages/application (应用用例服务入口)",
+        "packages/infrastructure (容器装配与依赖注入)"
+      ],
+      "deliverables": [
+        "apps/api/src/plugins/ (Fastify Zod 契约校验插件、RFC 7807 错误捕获、JWT 认证插件)",
+        "apps/api/src/controllers/ (方案库、质量总览、检验单、工序录入、成品检放行校验、MRB处置、流程设置、MES配置、导出服务端点、审计统计卡片端点)",
+        "apps/api/test/contract/ (直接基于 contracts Zod schema 自动断言的契约测试)",
+        "apps/api/test/integration/ (端到端 HTTP 集成测试套件)"
+      ],
+      "acceptanceCriteria": [
+        "所有 API 控制器直接调用 contracts 的 Zod schema 校验入参，无任何手写断言",
+        "控制器层严禁出现数据库事务与 SQL 代码，纯粹充当 HTTP 协议适配器",
+        "未授权访问返回标准 RFC 7807 401 结构体，三维 PBAC 权限未命中返回 403",
+        "MES 调用放行接口为纯只读，未检验完成批次严格返回 409 阻断错误（GATE_BLOCKED 生效并给出精确原因码）",
+        "自动化契约测试直接以 packages/contracts 的 Schema 为期望验证真实响应体"
+      ]
+    },
+    {
+      "id": "QMS-007",
+      "title": "React 工业级质量工作台与 Mock 契约先行协同 (apps/web)",
+      "category": "web",
+      "status": "pending",
+      "dependencies": ["QMS-002"],
+      "description": "搭建 React + Vite + TailwindCSS 现代化工业前端。基于 packages/contracts 共享类型与 Mock Service Worker (MSW) 实现契约先行解耦开发，无需等待后端 API 完成。所有 MSW Mock 数据必须在构建/测试阶段通过 contracts 的 Zod schema .parse() 强校验。严格按照 21 张设计图高保真实现方案管理配置、质量总览看板、检验明细多维导出、IQC录入、IPQC下料/滚丝/成品检三卡片、OQC三大Tab委外、MRB处置列表与可配置评审流程设置页、MES集成管理配置页及批次全链路追溯图。",
+      "inputs": [
+        "packages/contracts (共享 DTO 类型与 API 契约)",
+        "D:\\乐天\\图片 (21张高保真原型设计稿)"
+      ],
+      "deliverables": [
+        "apps/web/src/mocks/ (基于 contracts 类型的 MSW 模拟数据服务，构建期自动执行 Zod parse 校验)",
+        "apps/web/src/pages/plans/ (质检方案版本维护、指标公差与抽样方案配置界面) [WPS图片(15)]",
+        "apps/web/src/pages/dashboard/ (ECharts 质量环形图、趋势折线图、不良物料柱状图) [WPS图片(1)]",
+        "apps/web/src/pages/inspections/ (下料检验 11列表格、弹窗实测录入、异常红标高亮、成品检强制标识、明细导出按钮) [WPS图片(5),(7),(11)]",
+        "apps/web/src/pages/traceability/ (批次追溯 DAG 关系全链路展示与报告导出) [WPS图片(12)]",
+        "apps/web/src/pages/mrb/ (MRB 5大卡片4Tab处置列表、可配置评审流程设置工作台、特采签核与返工回退展示) [WPS图片(13),(14)]",
+        "apps/web/src/pages/integration/ (MES 集成管理配置中心、状态监控与手动同步) [确认文档第21项]",
+        "apps/web/src/pages/master-data/ (ERP 供应商/客户/存货/车间/职员档案总览与物料分类树) [WPS图片(16)-(20)]"
+      ],
+      "acceptanceCriteria": [
+        "基于 contracts 定义的 DTO 开发，前端代码全生命周期拥有完整 TypeScript 类型提示",
+        "MSW 的全部 Mock 示例数据均通过 contracts 的 Zod schema .parse() 校验，杜绝数据漂移",
+        "阶段验收（独立）：在无真实后端环境下，可依托 Mock 服务完整跑通 21 项业务页面的交互与图表渲染",
+        "终极验收（契约无缝对接）：前端组件与 API 请求参数完全遵循 packages/contracts 共享定义，与 QMS-006 后端在契约层实现零返工无缝对接",
+        "页面视觉、字段命名、状态药丸（4色）与操作按钮像素级还原设计截图"
+      ]
+    },
+    {
+      "id": "QMS-008",
+      "title": "生产基础档案与质检方案初始化种子数据 (infra)",
+      "category": "infra",
+      "status": "pending",
+      "dependencies": ["QMS-005"],
+      "description": "基于确认文档与 21 张原型图中的生产场景，编写一套干净库初始化种子数据脚本。涵盖供应商档案、客户档案、存货分类树、原材料与紧固件物料清单、车间工序档案、系统质检人员与角色权限，以及 IQC、IPQC、OQC、委外 4 套带指标公差与 AQL 抽样的正式质检方案，消除空库启动导致的测试与联调困难。",
+      "inputs": [
+        "packages/infrastructure/src/mocks/mock-data.ts",
+        "packages/contracts (业务 DTO 与 Schema)"
+      ],
+      "deliverables": [
+        "packages/infrastructure/src/seeds/ (标准数据种子定义与注入工具)",
+        "package.json 中的一键入库指令 (pnpm db:seed)"
+      ],
+      "acceptanceCriteria": [
+        "在全新执行完迁移的干净库上执行 pnpm db:seed，零错误初始化全量基础档案",
+        "初始化后的方案与工单数据可直接供 QMS-006 后端与 QMS-007 前端无缝查询"
+      ]
+    },
+    {
+      "id": "QMS-009",
+      "title": "后台运维守护进程与自动化调度中心 (infra)",
+      "category": "infra",
+      "status": "pending",
+      "dependencies": ["QMS-005"],
+      "description": "实现系统后台任务调度与可靠运维组件：实现 Outbox 事务事件高可靠投递（指数退避重试、超过 5 次自动流转 DEAD_LETTER 死信并触发 WebHook 告警）；实现 MRB 审批超过 24h 未裁决的自动超时催办与标红告警；实现 authorization_logs 超过 180 天的滚动清理与 idempotency_keys 超过 24h 的过期清除作业。",
+      "inputs": [
+        "packages/infrastructure (仓储与数据库事务连接)",
+        "packages/application (领域事件与催办用例)"
+      ],
+      "deliverables": [
+        "packages/infrastructure/src/jobs/ (Outbox 投递、MRB催办、日志与幂等键清理调度器)",
+        "死信告警 WebHook 通知适配器"
+      ],
+      "acceptanceCriteria": [
+        "模拟失败消息 5 次后，outbox 状态严格置为 DEAD_LETTER 并发出告警",
+        "过期 24h 的幂等键被定时作业准确清理，无残留膨胀"
+      ]
+    },
+    {
+      "id": "QMS-010",
+      "title": "生产容器化构建、反向代理与全链路交付验收 (deploy)",
+      "category": "deploy",
+      "status": "pending",
+      "dependencies": ["QMS-006", "QMS-007", "QMS-008", "QMS-009"],
+      "description": "提供生产级打包构建流水线、多阶段 Dockerfile、Nginx 反向代理配置（带 API 代理、静态资源缓存与 gzip 压缩）。在 Staging 环境中执行全链路端到端集成验证与 UAT 场景演练（包含从原材料 IQC、IPQC 滚丝下料、成品检 409 阻断拦截、MRB 特采会签归档到批次 DAG 追溯 PDF 导出的全业务闭环）。",
+      "inputs": [
+        "apps/api (生产编译产物)",
+        "apps/web (Vite 生产打包产物)",
+        "docker-compose.yml"
+      ],
+      "deliverables": [
+        "Dockerfile.api、Dockerfile.web (多阶段轻量安全容器镜像定义)",
+        "nginx.conf (反向代理、路由转发与安全头部配置)",
+        "docker-compose.prod.yml (生产全栈一键编排启动)",
+        "docs/UAT_ACCEPTANCE_REPORT.md (全流程验收报告)"
+      ],
+      "acceptanceCriteria": [
+        "执行 docker compose -f docker-compose.prod.yml up 可完整拉起 PG、API、Web 全套系统",
+        "外部 MES 调用 release-gates 接口能够真实收到 409 阻断状态码",
+        "UAT 演练 100% 覆盖 21 项业务能力且追溯 PDF 成功下载无中文乱码"
+      ]
+    }
+  ]
+}

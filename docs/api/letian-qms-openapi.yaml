@@ -1,0 +1,781 @@
+openapi: 3.1.0
+info:
+  title: Letian QMS API Specification
+  version: 2.5.0
+  description: 乐天紧固件质量管理系统契约规范，完全对齐 21 项业务能力、DDD 四层架构与 PostgreSQL 14+ 数据实体。
+servers:
+  - url: /api/v1
+    description: 默认 API 网关基础路径
+
+paths:
+  /dashboard/overview:
+    get:
+      summary: 获取质量总览看板核心数据（卡片统计、ECharts环形图、趋势折线图与不良排行）
+      operationId: getDashboardOverview
+      responses:
+        '200':
+          description: 看板汇总数据
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardOverviewResponse'
+
+  /release-gates/{batchNo}:
+    get:
+      summary: 成品检强制关卡放行状态纯读校验（MES过站前调用，纯读幂等无副作用）
+      operationId: checkReleaseGate
+      parameters:
+        - name: batchNo
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 批次已完成成品检且合格，允许放行过站
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReleaseGateSuccessResponse'
+        '409':
+          description: 强制关卡阻断，禁止放行
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReleaseGateBlockedResponse'
+
+  /inspections:
+    get:
+      summary: 获取检验单列表（支持多维度组合筛选与 PBAC 行级数据隔离）
+      operationId: listInspectionOrders
+      parameters:
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH]
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, INSPECTING, DRAFT, PASSED, FAILED, IN_MRB_REVIEW, RE_INSPECTING, COMPLETED]
+        - name: batchNo
+          in: query
+          schema:
+            type: string
+        - name: materialCode
+          in: query
+          schema:
+            type: string
+        - name: supplierCode
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: 检验单分页列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedInspectionOrders'
+    post:
+      summary: 创建或录入检验单（绑定并深拷贝当前激活的方案版本快照）
+      operationId: createInspectionOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInspectionOrderRequest'
+      responses:
+        '201':
+          description: 创建成功，已固化方案快照与明细指标行
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionOrder'
+
+  /inspections/{id}:
+    get:
+      summary: 获取检验单详情（含快照元数据、公差基准与明细指标实测）
+      operationId: getInspectionOrder
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 检验单详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionOrder'
+
+  /inspections/{id}/submit-measurements:
+    post:
+      summary: 录入检验指标实测值、检验备注并自动公差判定（支持保存草稿与正式提交）
+      operationId: submitMeasurements
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitMeasurementsRequest'
+      responses:
+        '200':
+          description: 判定完成并更新单据
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionOrder'
+
+  /mrb/records:
+    get:
+      summary: 查询 MRB 不合格评审记录列表（支持四大分类 Tab 与 5 项统计指标）
+      operationId: listMRBRecords
+      parameters:
+        - name: categoryTab
+          in: query
+          schema:
+            type: string
+            enum: [ALL, IQC_DEFECT, IPQC_DEFECT, OQC_DEFECT]
+            default: ALL
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING_REVIEW, UNDER_REVIEW, DISPOSED, REJECTED]
+      responses:
+        '200':
+          description: MRB 列表与统计数据
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedMRBRecords'
+
+  /mrb/records/{id}/dispose:
+    post:
+      summary: 执行 MRB 评审处置决策（退货/返工/让步接收特采/报废，支持多方联合签核与客户凭证）
+      operationId: disposeMRBRecord
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DisposeMRBRequest'
+      responses:
+        '200':
+          description: 处置完成并触发回边或结单
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MRBRecord'
+
+  /traceability/{batchNo}:
+    get:
+      summary: 根据批次号获取全链路端到端追溯图谱（基于 PostgreSQL 14+ 递归 CTE 生成的真实 DAG）
+      operationId: getTraceabilityGraph
+      parameters:
+        - name: batchNo
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 批次溯源 DAG 图结构数据（包含节点、边及环路预警）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TraceabilityGraphResponse'
+
+  /integration/sync:
+    post:
+      summary: 触发 ERP 6类基础档案或 MES 车间工序在制品批次同步
+      operationId: triggerIntegrationSync
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SyncRequest'
+      responses:
+        '200':
+          description: 同步执行结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncResponse'
+
+  /audit/stats:
+    get:
+      summary: 获取系统操作日志汇总统计卡片（总数、成功数、失败数、今日操作数）
+      operationId: getAuditStats
+      responses:
+        '200':
+          description: 操作审计统计数据
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditStatsResponse'
+
+  /audit/logs:
+    get:
+      summary: 分页获取系统关键操作审计日志列表（防篡改流）
+      operationId: getAuditLogs
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [SUCCESS, REJECTED, FAILED]
+      responses:
+        '200':
+          description: 操作日志明细列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total, page, pageSize]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AuditLog'
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  pageSize:
+                    type: integer
+
+components:
+  schemas:
+    DashboardOverviewResponse:
+      type: object
+      required: [totalInspections, passRate, pendingCount, inMRBCount, stageDistribution, trendSeries, topDefects, recentActivities]
+      properties:
+        totalInspections:
+          type: integer
+        passRate:
+          type: number
+        pendingCount:
+          type: integer
+        inMRBCount:
+          type: integer
+        stageDistribution:
+          type: object
+          properties:
+            iqcCount:
+              type: integer
+            ipqcCount:
+              type: integer
+            oqcCount:
+              type: integer
+        trendSeries:
+          type: array
+          items:
+            type: object
+            required: [date, totalCount, passRate]
+            properties:
+              date:
+                type: string
+              totalCount:
+                type: integer
+              passRate:
+                type: number
+        topDefects:
+          type: array
+          items:
+            type: object
+            required: [materialName, defectCount]
+            properties:
+              materialName:
+                type: string
+              defectCount:
+                type: integer
+        recentActivities:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              batchNo:
+                type: string
+              materialName:
+                type: string
+              result:
+                type: string
+              operator:
+                type: string
+              createdAt:
+                type: string
+                format: date-time
+
+    ReleaseGateSuccessResponse:
+      type: object
+      required: [batchNo, gateStatus, inspectionOrderId, verifiedAt]
+      properties:
+        batchNo:
+          type: string
+        gateStatus:
+          type: string
+          enum: [RELEASED]
+        inspectionOrderId:
+          type: string
+          format: uuid
+        verifiedAt:
+          type: string
+          format: date-time
+
+    ReleaseGateBlockedResponse:
+      type: object
+      required: [batchNo, gateStatus, reasonCode, message]
+      properties:
+        batchNo:
+          type: string
+        gateStatus:
+          type: string
+          enum: [BLOCKED]
+        reasonCode:
+          type: string
+          enum: [GATE_NOT_INSPECTED, GATE_INSPECTING, GATE_FAILED, GATE_UNDER_MRB]
+        message:
+          type: string
+
+    InspectionOrder:
+      type: object
+      required: [id, orderNo, inspectionType, status, materialCode, materialName, batchNo, planVersionId, sampleQty, createdAt, items]
+      properties:
+        id:
+          type: string
+          format: uuid
+        orderNo:
+          type: string
+        inspectionType:
+          type: string
+          enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH]
+        status:
+          type: string
+          enum: [PENDING, INSPECTING, DRAFT, PASSED, FAILED, IN_MRB_REVIEW, RE_INSPECTING, COMPLETED]
+        overallDecision:
+          type: string
+          enum: [PASSED, FAILED, CONCESSION]
+        materialCode:
+          type: string
+        materialName:
+          type: string
+        batchNo:
+          type: string
+        supplierCode:
+          type: string
+        supplierName:
+          type: string
+        customerCode:
+          type: string
+        customerName:
+          type: string
+        isMandatoryGate:
+          type: boolean
+        inspectorId:
+          type: string
+          format: uuid
+        inspectorName:
+          type: string
+        inspectionNotes:
+          type: string
+        planVersionId:
+          type: string
+          format: uuid
+        planSnapshot:
+          type: object
+          description: 检验单创建时深拷贝固化的方案快照元数据与判定基准
+        sampleQty:
+          type: number
+        passQty:
+          type: number
+        failQty:
+          type: number
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/InspectionOrderItem'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    InspectionOrderItem:
+      type: object
+      required: [id, itemCode, itemName, metricCategory, dataType, decision]
+      properties:
+        id:
+          type: string
+          format: uuid
+        itemCode:
+          type: string
+        itemName:
+          type: string
+        metricCategory:
+          type: string
+          enum: [DIMENSION, APPEARANCE, HARDNESS, COATING_THICKNESS, TENSILE_STRENGTH, CHEMICAL_COMPOSITION, TEXT_INTERVAL]
+          description: 业务分类维度（尺寸、外观、硬度、镀层膜厚、抗拉强度、化学成分、文本区间）
+        dataType:
+          type: string
+          enum: [NUMERIC, TEXT, QUALITATIVE]
+          description: 判定算法数据维度（数值比较、文本包含/区间解析、定性判定）
+        targetVal:
+          type: number
+        upperTolerance:
+          type: number
+        lowerTolerance:
+          type: number
+        unit:
+          type: string
+        measuredVal:
+          type: number
+        measuredText:
+          type: string
+        decision:
+          type: string
+          enum: [PENDING, PASSED, FAILED]
+        defectReason:
+          type: string
+
+    CreateInspectionOrderRequest:
+      type: object
+      required: [inspectionType, materialCode, materialName, batchNo, sampleQty]
+      properties:
+        inspectionType:
+          type: string
+          enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH]
+        materialCode:
+          type: string
+        materialName:
+          type: string
+        batchNo:
+          type: string
+        supplierCode:
+          type: string
+        supplierName:
+          type: string
+        customerCode:
+          type: string
+        customerName:
+          type: string
+        sampleQty:
+          type: number
+        isMandatoryGate:
+          type: boolean
+
+    SubmitMeasurementsRequest:
+      type: object
+      required: [inspectorId, isDraft, items]
+      properties:
+        inspectorId:
+          type: string
+          format: uuid
+        isDraft:
+          type: boolean
+        inspectionNotes:
+          type: string
+        items:
+          type: array
+          items:
+            type: object
+            required: [itemCode]
+            properties:
+              itemCode:
+                type: string
+              measuredVal:
+                type: number
+              measuredText:
+                type: string
+
+    MRBRecord:
+      type: object
+      required: [id, mrbNo, inspectionOrderId, batchNo, materialCode, materialName, defectDescription, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        mrbNo:
+          type: string
+        inspectionOrderId:
+          type: string
+          format: uuid
+        sourceType:
+          type: string
+          enum: [IQC, IPQC, OQC]
+        batchNo:
+          type: string
+        materialCode:
+          type: string
+        materialName:
+          type: string
+        defectDescription:
+          type: string
+        status:
+          type: string
+          enum: [PENDING_REVIEW, UNDER_REVIEW, DISPOSED, REJECTED]
+        decision:
+          type: string
+          enum: [RETURN_TO_VENDOR, REWORK, CONCESSION, SCRAP]
+        approvers:
+          type: array
+          items:
+            type: object
+            required: [role, reviewerName, decision, reviewComment, reviewedAt]
+            properties:
+              role:
+                type: string
+              reviewerName:
+                type: string
+              decision:
+                type: string
+              reviewComment:
+                type: string
+              reviewedAt:
+                type: string
+                format: date-time
+        concessionAttachmentUrl:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    DisposeMRBRequest:
+      type: object
+      required: [decision, approvers]
+      properties:
+        decision:
+          type: string
+          enum: [RETURN_TO_VENDOR, REWORK, CONCESSION, SCRAP]
+        approvers:
+          type: array
+          description: 多方联合会签数组（涵盖质量部、技术部、生产部、厂长）
+          items:
+            type: object
+            required: [role, reviewerId, reviewerName, reviewComment]
+            properties:
+              role:
+                type: string
+              reviewerId:
+                type: string
+                format: uuid
+              reviewerName:
+                type: string
+              reviewComment:
+                type: string
+        concessionAttachmentUrl:
+          type: string
+          description: 特采让步接收时强制上传的客户书面签署凭证地址
+
+    TraceabilityGraphResponse:
+      type: object
+      required: [rootBatchNo, nodes, edges, hasCycleWarning]
+      properties:
+        rootBatchNo:
+          type: string
+        hasCycleWarning:
+          type: boolean
+          description: 是否检测到循环流转引用，由应用层安全闭合
+        nodes:
+          type: array
+          items:
+            type: object
+            required: [batchNo, stageName, materialName, status]
+            properties:
+              batchNo:
+                type: string
+              stageName:
+                type: string
+                description: 工序节点名称（如 原材料来料检、下料检验、滚丝检验、委外镀锌、成品检★ 等）
+              materialName:
+                type: string
+              status:
+                type: string
+                description: 节点流转判定状态（PASSED, FAILED, INSPECTING, PENDING, STORED）
+              isDefective:
+                type: boolean
+        edges:
+          type: array
+          items:
+            type: object
+            required: [sourceBatchNo, targetBatchNo, relationType, depth]
+            properties:
+              sourceBatchNo:
+                type: string
+              targetBatchNo:
+                type: string
+              relationType:
+                type: string
+                enum: [RAW_TO_PROCESS, PROCESS_TO_PROCESS, PROCESS_TO_OUTSOURCE, OUTSOURCE_TO_FINISH, FINISH_TO_SHIPMENT]
+              depth:
+                type: integer
+              isCycle:
+                type: boolean
+
+    SyncRequest:
+      type: object
+      required: [target]
+      properties:
+        target:
+          type: string
+          enum:
+            - ERP_SUPPLIERS
+            - ERP_CUSTOMERS
+            - ERP_INVENTORY
+            - ERP_CATEGORIES
+            - ERP_WAREHOUSES
+            - ERP_WORKSHOPS
+            - ERP_EMPLOYEES
+            - MES_PRODUCTION_BATCHES
+
+    SyncResponse:
+      type: object
+      required: [syncLogId, target, status, recordsCount, syncedAt]
+      properties:
+        syncLogId:
+          type: string
+          format: uuid
+          description: 本次触发数据同步的任务/日志唯一ID
+        target:
+          type: string
+        status:
+          type: string
+          enum: [SUCCESS, PARTIAL_FAIL, FAILED]
+        recordsCount:
+          type: integer
+        syncedAt:
+          type: string
+          format: date-time
+
+    PaginatedInspectionOrders:
+      type: object
+      required: [total, page, pageSize, list]
+      properties:
+        total:
+          type: integer
+        page:
+          type: integer
+        pageSize:
+          type: integer
+        list:
+          type: array
+          items:
+            $ref: '#/components/schemas/InspectionOrder'
+
+    PaginatedMRBRecords:
+      type: object
+      required: [total, pendingCount, underReviewCount, totalReviewedCount, disposedCount, monthlyReviewRate, list]
+      properties:
+        total:
+          type: integer
+        pendingCount:
+          type: integer
+          description: 待评审数量
+        underReviewCount:
+          type: integer
+          description: 评审中数量
+        totalReviewedCount:
+          type: integer
+          description: 累计已评审数量
+        disposedCount:
+          type: integer
+          description: 已处置完成数量
+        monthlyReviewRate:
+          type: number
+          description: 本月评审完成率 (0~100 百分比)
+        list:
+          type: array
+          items:
+            $ref: '#/components/schemas/MRBRecord'
+
+    AuditStatsResponse:
+      type: object
+      required: [totalLogs, successCount, failedCount, todayCount]
+      properties:
+        totalLogs:
+          type: integer
+        successCount:
+          type: integer
+        failedCount:
+          type: integer
+        todayCount:
+          type: integer
+
+    AuditLog:
+      type: object
+      required: [traceId, userId, userName, action, resourceType, resourceId, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        traceId:
+          type: string
+        userId:
+          type: string
+          format: uuid
+        userName:
+          type: string
+        action:
+          type: string
+          enum: [CREATE, UPDATE, STATUS_CHANGE, DISPOSE, GATE_BLOCKED, AUTH_FAILED, VALIDATION_REJECTED, SYNC_TRIGGER]
+        resourceType:
+          type: string
+        resourceId:
+          type: string
+        status:
+          type: string
+          enum: [SUCCESS, REJECTED, FAILED]
+        diffPatch:
+          type: object
+        createdAt:
+          type: string
+          format: date-time
+

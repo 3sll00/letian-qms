@@ -1,0 +1,27 @@
+{
+  "name": "@letian/api",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "dev": "tsx src/server.ts",
+    "test": "tsx test/contract/schemas.contract.test.ts && tsx test/api.test.ts && tsx test/integration/e2e.test.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "@letian/application": "workspace:*",
+    "@letian/contracts": "workspace:*",
+    "@letian/domain": "workspace:*",
+    "@letian/infrastructure": "workspace:*",
+    "@types/jsonwebtoken": "^9.0.10",
+    "fastify": "^5.12.4",
+    "fastify-plugin": "^6.0.0",
+    "jsonwebtoken": "^9.0.3",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "tsx": "^4.7.2",
+    "typescript": "^5.4.5"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "letian-qms-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "packageManager": "pnpm@9.0.0",
+  "description": "乐天紧固件质量管理系统 (Letian QMS) - 工业级质量管控与放行阻断中枢",
+  "scripts": {
+    "build": "pnpm --filter @letian/contracts run build && pnpm --filter @letian/domain run build && pnpm --filter @letian/application run build && pnpm --filter @letian/infrastructure run build && pnpm --filter @letian/api run build && pnpm --filter @letian/web run build",
+    "test": "pnpm -r --no-bail run test",
+    "typecheck": "pnpm -r --no-bail run typecheck",
+    "lint": "eslint . --ext .ts,.tsx",
+    "db:up": "docker compose up -d postgres",
+    "db:down": "docker compose down",
+    "db:migrate": "pnpm --filter @letian/infrastructure run migrate:up",
+    "db:seed": "pnpm --filter @letian/infrastructure run seed",
+    "dev": "pnpm --filter @letian/web dev",
+    "dev:web": "pnpm --filter @letian/web dev",
+    "dev:api": "pnpm --filter @letian/api dev",
+    "dev:all": "pnpm --parallel --filter @letian/api --filter @letian/web dev",
+    "dev:mock": "pnpm --filter @letian/web dev:mock"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5",
+    "tsx": "^4.7.2",
+    "eslint": "^8.57.0",
+    "@typescript-eslint/parser": "^7.8.0",
+    "@typescript-eslint/eslint-plugin": "^7.8.0",
+    "prettier": "^3.2.5"
+  }
+}

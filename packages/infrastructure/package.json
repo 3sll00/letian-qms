@@ -1,0 +1,27 @@
+{
+  "name": "@letian/infrastructure",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --force",
+    "test": "tsx src/__tests__/audit-diff.test.ts && tsx src/__tests__/idempotency.test.ts && tsx src/__tests__/pbac-translator.test.ts && tsx src/__tests__/jsonb-shape.test.ts",
+    "migrate:up": "tsx src/migrations/runner.ts up",
+    "migrate:down": "tsx src/migrations/runner.ts down",
+    "seed": "tsx src/seeds/runner.ts"
+  },
+  "dependencies": {
+    "@letian/contracts": "workspace:*",
+    "@letian/domain": "workspace:*",
+    "@letian/application": "workspace:*",
+    "kysely": "^0.27.3",
+    "pg": "^8.11.5",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.4",
+    "typescript": "^5.4.5",
+    "tsx": "^4.7.2"
+  }
+}

@@ -1,0 +1,25 @@
+# 依赖
+node_modules/
+
+# 构建产物与增量编译缓存
+dist/
+*.tsbuildinfo
+
+# 环境变量（.env.example 为模板，需保留）
+.env
+.env.local
+.env.*.local
+
+# 日志与临时文件
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# 测试与覆盖率产物
+coverage/
+
+# 编辑器与系统文件
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
