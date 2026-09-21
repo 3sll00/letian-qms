@@ -1,9 +1,9 @@
 {
   "note": "基线 = 允许存在的违规上限；`--update-baseline` 后才可上调（需评审）。",
-  "updatedAt": "2026-09-21T00:47:41.870Z",
+  "updatedAt": "2026-09-21T03:30:28.337Z",
   "counts": {
-    "any": 177,
+    "any": 138,
     "tsIgnore": 0,
-    "interface": 235
+    "interface": 256
   }
 }

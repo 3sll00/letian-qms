@@ -11,8 +11,14 @@
 ```bash
 node scripts/testing/oqc-verify.cjs           # 出货检验（OQC）台账
 node scripts/testing/inspections-verify.cjs  # 来料检验（IQC）+ 委外检验台账
+node scripts/testing/mrb-verify.cjs          # MRB 不合格品处置（离线 Mock 模式）
+node scripts/testing/mrb-wiring-verify.cjs   # MRB 字段 / 契约 / API 打通验收（真实库 + 真实 HTTP）
 node scripts/testing/audit_check.js          # 源码静态审计
 ```
+
+前三个脚本需要后端 `:3100` 与前端 `:5200` 已启动；`mrb-wiring-verify.cjs` 需要**后端 API 已启动**（默认 `:3101`）
+且数据库已迁移至 `015` 并执行过 `pnpm db:seed`（脚本按演示数据断言，跑完会还原数据）。
+根脚本入口：`pnpm run verify:oqc` / `verify:inspections` / `verify:mrb` / `verify:mrb-wiring` / `audit:code`。
 
 退出码 `0` = 通过，非 `0` = 存在 FAIL / 超预算（明细见输出与 `scripts/logs/`，该目录已 gitignore）。
 
@@ -28,6 +34,7 @@ node scripts/testing/audit_check.js          # 源码静态审计
 |:---|:---|:---|
 | `oqc-verify.cjs` | 出货检验台账 | 8 |
 | `inspections-verify.cjs` | 来料检验 + 委外检验台账 | 10 |
+| `mrb-verify.cjs` | MRB 不合格品处置单页（离线 Mock） | 15 |
 
 ## 输出
 
@@ -37,6 +44,16 @@ node scripts/testing/audit_check.js          # 源码静态审计
 | `iqc-list-after-wiring.png` | 来料检验台账截图 |
 | `outsource-list-after-wiring.png` | 委外检验台账截图 |
 | `oqc-verify.log` / `inspections-verify.log` | 逐条 PASS / FAIL 明细 |
+| `mrb-list-light.png` / `mrb-list-under-review.png` / `mrb-pool-drawer.png` / `mrb-review-drawer.png` | MRB 页面与两个抽屉截图 |
+| `mrb-mock-verify.log` | MRB 逐条 PASS / FAIL 明细 |
+
+### MRB 走查为什么跑在离线 Mock 模式
+
+`mrb-verify.cjs` 校验的是「页面结构 + 抽屉取数链路」，不依赖数据库，因此跑在 `pnpm --filter @letian/web run dev:mock`
+（MSW 离线 Mock）上，且把 `VITE_API_TARGET` 指向未监听端口——否则未被 mock 的接口会打到真实后端并返回 401，
+前端的安全登出逻辑会把会话清掉、页面退回登录页，走查结果不可信。断言覆盖：页头标题/副标题、十列表头（第 5 列为
+「不合格原因」）、4 个状态页签与默认选中项、5 张 KPI 卡、浅色主题（页面子树无深色容器）、
+「发起评审」抽屉的待审核池取数、行内「评审」抽屉的四方会签席位。
 
 ## 断言口径（为什么这么测）
 
@@ -49,7 +66,33 @@ node scripts/testing/audit_check.js          # 源码静态审计
 
 ---
 
-# 二、源码静态审计（`audit_check.js`）
+# 二、MRB 字段 / 契约 / API 打通验收（`mrb-wiring-verify.cjs`）
+
+（等价入口：`pnpm run verify:mrb-wiring`）
+
+回答的是「MRB 不合格品处置页的每个字段，是不是真的落到了 PostgreSQL 物理列、由 Fastify 接口读写」——
+**真实数据库 + 真实 HTTP**（不使用 Mock），20 条断言覆盖：
+
+1. `GET /mrb/pending-pool` 回吐 015 新增列（供应商 / 客户 / 不合格指标项 / 检验人 / 受检数量 / 不良率）与环节前缀筛选；
+2. `GET /mrb/records` 回吐派生 `inspectorName` 与新增 `urgencyLevel` / `reviewFlowId`；
+3. `POST /mrb/pending-pool/initiate` 的 `flowId` / `urgencyLevel` / `reviewNotes` / `pendingDefectId` **逐列落库**，池条目转 `INITIATED` 并回填 MRB 单；
+4. `POST /mrb/records/{id}/sign` 会签转 `UNDER_REVIEW`；
+5. 特采无客户凭证必须 `400 CONCESSION_NOT_SIGNED_OFF`（不得有伪造兜底）；带凭证处置返回**裸 `MRBRecord`** 且 `disposed_at` / `disposed_by` / 附件按提交值落库。
+
+```bash
+# 前置：数据库已迁移到 015 且执行过 pnpm db:seed；目标 API 已启动
+pnpm run verify:mrb-wiring
+
+# 指定非默认端口的 API（默认 http://127.0.0.1:3101/api/v1）
+MRB_WIRING_BASE=http://127.0.0.1:3102/api/v1 node scripts/testing/mrb-wiring-verify.cjs
+```
+
+脚本自带清理：跑完把验收产生的 MRB 删除、池条目回 `PENDING_INITIATE`、工单回 `FAILED`，可反复执行。
+完整口径见 `docs/21-MRB不合格品处置数据字段与接口打通设计.md` §7。
+
+---
+
+# 三、源码静态审计（`audit_check.js`）
 
 （等价入口：`pnpm run audit:code`）
 
@@ -95,3 +138,39 @@ node scripts/testing/audit_check.js --json
 `scripts/testing/audit-baseline.json` 记录「允许存在的存量违规上限」。
 默认模式的语义是**不得新增**，而不是「假装没有」；只有评审后才可用 `--update-baseline` 上调。
 明细报告输出到 `scripts/logs/audit-report.txt`（已 gitignore）。
+
+---
+
+# 四、七大业务流程走查（`cdp-runner.js`）
+
+（等价入口：`pnpm run verify:smoke`）
+
+真实前后端联动下用 CDP 无头浏览器依次走查 7 条业务流，并覆盖 `docs/screenshots/` 下的验收截图。
+
+```bash
+# 前置：Web dev server 与 API 均已启动（自动探测 5200 / 5201 / 5202）
+node scripts/testing/cdp-runner.js
+
+# 指定前端地址与调试端口（默认 9222）
+WEB_BASE=http://127.0.0.1:5201/ CDP_PORT=9222 node scripts/testing/cdp-runner.js
+```
+
+若 `9222` 上没有已打开的 Chrome，脚本会自行以无头模式拉起一个，跑完自动关闭。
+
+| 退出码 | 含义 |
+|:---|:---|
+| `0` | 7 项全部通过，且无未捕获运行时异常 |
+| `1` | 存在失败项或未捕获异常 |
+| `2` | 环境不可用（前端未监听 / Chrome 无法连接） |
+
+## 走查项
+
+系统导航与主骨架、检验进度总览 KPI 与 ECharts、来料检验台账、出货检验台账、
+MRB 不合格品处置、质量追溯看板、质检方案设计。
+
+## 为什么改过一版
+
+旧版 `cdp-runner.js`（仓库外）在用例失败时**仍以 0 退出**，因此「7 大业务流全部 PASSED」不可证伪；
+其历史 6 张截图中有 5 张只有 2163 字节（空白/未渲染页）却标注 `PASSED`。
+现版把判定与退出码绑定、把控制台未捕获异常纳入判定，并把导航关键词同步到当前 UI 标签
+（如 `MRB评审工单` → `MRB不合格品处置`）。
