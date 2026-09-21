@@ -1,431 +1,365 @@
 import React, { useEffect, useState } from 'react';
-import {
-  TrendingUp,
-  ShieldAlert,
-  CheckCircle,
-  Cpu,
-  ArrowUpRight,
-  AlertTriangle,
-  Flame,
-  Activity,
-  Zap,
-} from 'lucide-react';
 import type { EChartsOption } from 'echarts';
 import { EChart } from '../../components/EChart';
 import { api, errorMessage } from '../../lib/api';
 
-interface DefectDistributionItem {
-  name: string;
-  value: number;
-  percentage: string;
+import kpiTotal from '../../assets/kpi_total.png';
+import kpiPending from '../../assets/kpi_pending.png';
+import kpiPassed from '../../assets/kpi_passed.png';
+import kpiFailed from '../../assets/kpi_failed.png';
+import kpiRate from '../../assets/kpi_rate.png';
+
+/** 与后端 /dashboard/overview 响应对齐（packages/infrastructure dashboard-repository） */
+interface DashboardOverview {
+  totalInspections: number;
+  passRate: number;
+  pendingCount: number;
+  inspectingCount: number;
+  failedCount: number;
+  inMRBCount: number;
+  stageDistribution: { iqcCount: number; ipqcCount: number; oqcCount: number };
+  trendSeries: Array<{ date: string; iqcCount: number; ipqcCount: number; oqcCount: number; passRate: number }>;
+  topDefects: Array<{ defectName: string; category: string; count: number }>;
+  recentActivities: Array<{ id: string; type: string; title: string; status: string; timestamp: string }>;
 }
 
-interface WeeklyTrend {
-  dates: string[];
-  yieldRates: number[];
-  inspectionCounts: number[];
-  defectCounts: number[];
-}
-
-interface InterceptionEvent {
+interface PendingTask {
   id: string;
-  time: string;
-  station: string;
-  batch: string;
-  item: string;
-  mesStatus: string;
-}
-
-/** GET /api/v1/dashboard/stats 响应（后端 KyselyDashboardRepository.getStats） */
-interface DashboardStats {
-  todayInspections: number;
-  yieldRate: number;
-  interceptedBatches: number;
-  pendingMrb: number;
-  defectDistribution: DefectDistributionItem[];
-  weeklyTrend: WeeklyTrend;
-  interceptionEvents: InterceptionEvent[];
-}
-
-/** GET /api/v1/integration/equipment 单条设备（设备清单为进程内 MES 网关目录，无数据库表） */
-interface EquipmentItem {
-  id: string;
-  equipmentCode: string;
+  orderNo: string;
+  type: string;
+  material: string;
+  qty: number;
   status: string;
 }
 
+interface InspectionListResult {
+  total: number;
+  items: Array<{
+    id?: string;
+    orderNo: string;
+    inspectionType: string;
+    materialName: string;
+    sampleQty: number;
+    status: string;
+  }>;
+}
+
+const TYPE_LABEL: Record<string, string> = {
+  IQC: '来料检验',
+  IPQC_CT: '下料检验',
+  IPQC_RL: '滚丝检验',
+  IPQC_FN: '成品检验',
+  OQC_SF: '出货检验',
+  OQC_SH: '发货检验',
+};
+
+const STATUS_LABEL: Record<string, string> = {
+  PENDING: '待检验',
+  INSPECTING: '检验中',
+  DRAFT: '暂存草稿',
+  RE_INSPECTING: '复检中',
+  PASSED: '已合格',
+  FAILED: '不合格',
+  IN_MRB_REVIEW: 'MRB评审中',
+  COMPLETED: '已结单',
+};
+
 export function DashboardPage() {
-  const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [equipment, setEquipment] = useState<{ online: number; total: number } | null>(null);
+  const [overview, setOverview] = useState<DashboardOverview | null>(null);
+  const [pendingTasks, setPendingTasks] = useState<PendingTask[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
-    api
-      .get<DashboardStats>('/dashboard/stats')
-      .then((data) => {
-        setStats(data);
-        setLoadError(null);
-      })
-      .catch((err) => {
-        setLoadError(errorMessage(err));
-        console.error('Failed to load dashboard stats:', err);
-      });
-
-    // 机台联网率取自真实设备清单，而不是统计接口里的固定值
-    api
-      .get<EquipmentItem[]>('/integration/equipment')
-      .then((list) => {
-        setEquipment({
-          online: list.filter((item) => item.status === 'ONLINE').length,
-          total: list.length,
-        });
-      })
-      .catch((err) => console.error('Failed to load equipment list:', err));
+    let cancelled = false;
+    void (async () => {
+      try {
+        const [ov, pending] = await Promise.all([
+          api.get<DashboardOverview>('/dashboard/overview'),
+          api.get<InspectionListResult>('/inspections', {
+            statuses: 'PENDING,INSPECTING,DRAFT,RE_INSPECTING',
+            page: 1,
+            pageSize: 6,
+          }),
+        ]);
+        if (cancelled) return;
+        setOverview(ov);
+        setPendingTasks(
+          (pending.items ?? []).map((o) => ({
+            id: o.id ?? o.orderNo,
+            orderNo: o.orderNo,
+            type: TYPE_LABEL[o.inspectionType] ?? o.inspectionType,
+            material: o.materialName,
+            qty: o.sampleQty,
+            status: STATUS_LABEL[o.status] ?? o.status,
+          }))
+        );
+      } catch (err) {
+        if (!cancelled) setLoadError(errorMessage(err));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  if (loadError !== null) {
-    return (
-      <div className="flex items-center justify-center h-64 text-rose-300 bg-rose-950/30 border border-rose-500/40 rounded-xl text-sm px-4 text-center">
-        看板数据加载失败：{loadError}
-      </div>
-    );
-  }
+  const today = new Date().toLocaleDateString('zh-CN', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
 
-  if (!stats) {
-    return (
-      <div className="flex items-center justify-center h-64 text-slate-400">
-        <Activity className="w-6 h-6 animate-spin mr-2 text-sky-400" />
-        加载工业态势中枢实时数据...
-      </div>
-    );
-  }
-
-  // ECharts Ring Chart (Defect Distribution)
+  // Donut Chart: 检验环节分布（IQC / IPQC / OQC，真实聚合）
+  const stage = overview?.stageDistribution ?? { iqcCount: 0, ipqcCount: 0, oqcCount: 0 };
   const donutOption: EChartsOption = {
-    backgroundColor: 'transparent',
-    tooltip: {
-      trigger: 'item',
-      formatter: '{b}: {c} 次 ({d}%)',
-    },
+    tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
     legend: {
-      bottom: '0%',
+      bottom: 0,
       left: 'center',
-      textStyle: {
-        color: '#94A3B8',
-        fontSize: 11,
-      },
-      itemWidth: 10,
-      itemHeight: 10,
+      icon: 'rect',
+      itemWidth: 12,
+      itemHeight: 8,
+      textStyle: { color: '#64748B', fontSize: 11 },
+      data: ['来料检验 (IQC)', '过程检验 (IPQC)', '出货检验 (OQC)'],
     },
+    color: ['#2563EB', '#8B5CF6', '#06B6D4'],
     series: [
       {
-        name: '缺陷类型',
+        name: '检验环节',
         type: 'pie',
-        radius: ['52%', '76%'],
-        center: ['50%', '42%'],
+        radius: ['52%', '72%'],
+        center: ['50%', '45%'],
         avoidLabelOverlap: false,
-        itemStyle: {
-          borderRadius: 4,
-          borderColor: '#0B1120',
-          borderWidth: 2,
-        },
-        label: {
-          show: false,
-        },
-        emphasis: {
-          label: {
-            show: true,
-            fontSize: 13,
-            fontWeight: 'bold',
-            color: '#F8FAFC',
-          },
-        },
-        data: stats.defectDistribution.map((d, i) => {
-          const colors = ['#F43F5E', '#F59E0B', '#0284C7', '#8B5CF6', '#10B981'];
-          return {
-            name: d.name,
-            value: d.value,
-            itemStyle: { color: colors[i % colors.length] },
-          };
-        }),
+        label: { show: false },
+        data: [
+          { value: stage.iqcCount, name: '来料检验 (IQC)' },
+          { value: stage.ipqcCount, name: '过程检验 (IPQC)' },
+          { value: stage.oqcCount, name: '出货检验 (OQC)' },
+        ],
       },
     ],
   };
 
-  // 合格率轴范围随真实数据自适应：种子库合格率约 40%~60%，
-  // 固定 98~100 的轴会让折线整条落在可视区之外
-  const yieldValues = stats.weeklyTrend.yieldRates;
-  const yieldMin = yieldValues.length > 0 ? Math.min(...yieldValues) : 0;
-  const yieldMax = yieldValues.length > 0 ? Math.max(...yieldValues) : 100;
-  const axisPadding = Math.max(2, Math.round((yieldMax - yieldMin) * 0.2));
-  const yAxisMin = Math.max(0, Math.floor(yieldMin - axisPadding));
-  const yAxisMax = Math.min(100, Math.ceil(yieldMax + axisPadding));
-
-  // ECharts Trend Line Chart (Weekly Yield)
+  // Trend Line Chart: 质量趋势(近7天) — 每日合格率 + 当日检验量
+  const trend = overview?.trendSeries ?? [];
   const lineOption: EChartsOption = {
-    backgroundColor: 'transparent',
-    tooltip: {
-      trigger: 'axis',
-      backgroundColor: '#1E293B',
-      borderColor: '#334155',
-      textStyle: { color: '#F8FAFC' },
+    tooltip: { trigger: 'axis' },
+    legend: {
+      top: 0,
+      right: 10,
+      icon: 'circle',
+      itemWidth: 8,
+      itemHeight: 8,
+      textStyle: { color: '#64748B', fontSize: 11 },
+      data: ['合格率(%)', '检验量'],
     },
-    grid: {
-      top: '12%',
-      left: '3%',
-      right: '4%',
-      bottom: '10%',
-      containLabel: true,
-    },
+    grid: { top: 30, left: 30, right: 30, bottom: 25, containLabel: true },
     xAxis: {
       type: 'category',
-      data: stats.weeklyTrend.dates,
-      axisLine: { lineStyle: { color: '#334155' } },
+      boundaryGap: false,
+      data: trend.map((d) => d.date.slice(5).replace('-', '/')),
+      axisLine: { lineStyle: { color: '#E2E8F0' } },
       axisLabel: { color: '#94A3B8', fontSize: 11 },
     },
-    yAxis: {
-      type: 'value',
-      min: yAxisMin,
-      max: yAxisMax,
-      axisLine: { lineStyle: { color: '#334155' } },
-      splitLine: { lineStyle: { color: '#1E293B' } },
-      axisLabel: {
-        color: '#94A3B8',
-        formatter: '{value}%',
-        fontSize: 11,
+    yAxis: [
+      {
+        type: 'value',
+        min: 0,
+        max: 100,
+        splitLine: { lineStyle: { color: '#F1F5F9' } },
+        axisLabel: { color: '#94A3B8', fontSize: 11 },
       },
-    },
+      {
+        type: 'value',
+        minInterval: 1,
+        splitLine: { show: false },
+        axisLabel: { color: '#CBD5E1', fontSize: 11 },
+      },
+    ],
     series: [
       {
-        name: '产品综合合格率',
+        name: '合格率(%)',
         type: 'line',
         smooth: true,
-        data: stats.weeklyTrend.yieldRates,
-        itemStyle: { color: '#06B6D4' },
-        lineStyle: { width: 3, color: '#06B6D4' },
-        areaStyle: {
-          color: {
-            type: 'linear',
-            x: 0,
-            y: 0,
-            x2: 0,
-            y2: 1,
-            colorStops: [
-              { offset: 0, color: 'rgba(6,182,212,0.35)' },
-              { offset: 1, color: 'rgba(6,182,212,0.0)' },
-            ],
-          },
-        },
+        showSymbol: true,
+        symbolSize: 4,
+        data: trend.map((d) => d.passRate),
+        lineStyle: { color: '#10B981', width: 2 },
+        itemStyle: { color: '#10B981' },
+        areaStyle: { color: 'rgba(16, 185, 129, 0.08)' },
+      },
+      {
+        name: '检验量',
+        type: 'bar',
+        yAxisIndex: 1,
+        barWidth: 8,
+        data: trend.map((d) => d.iqcCount + d.ipqcCount + d.oqcCount),
+        itemStyle: { color: 'rgba(37, 99, 235, 0.35)', borderRadius: [2, 2, 0, 0] },
       },
     ],
   };
 
-  // ECharts Bar Chart (Defect Breakdown per Day)
+  // Bar Chart: 缺陷类型 TOP（真实检验单失败指标聚合）
+  const defects = (overview?.topDefects ?? []).slice(0, 8).reverse();
   const barOption: EChartsOption = {
-    backgroundColor: 'transparent',
-    tooltip: {
-      trigger: 'axis',
-      axisPointer: { type: 'shadow' },
-      backgroundColor: '#1E293B',
-      borderColor: '#334155',
-      textStyle: { color: '#F8FAFC' },
-    },
-    grid: {
-      top: '12%',
-      left: '3%',
-      right: '4%',
-      bottom: '10%',
-      containLabel: true,
-    },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    grid: { top: 15, left: 110, right: 30, bottom: 25 },
     xAxis: {
-      type: 'category',
-      data: stats.weeklyTrend.dates,
-      axisLine: { lineStyle: { color: '#334155' } },
+      type: 'value',
+      minInterval: 1,
+      splitLine: { lineStyle: { color: '#F1F5F9' } },
       axisLabel: { color: '#94A3B8', fontSize: 11 },
     },
     yAxis: {
-      type: 'value',
-      axisLine: { lineStyle: { color: '#334155' } },
-      splitLine: { lineStyle: { color: '#1E293B' } },
-      axisLabel: { color: '#94A3B8', fontSize: 11 },
+      type: 'category',
+      data: defects.map((d) => d.defectName),
+      axisLine: { lineStyle: { color: '#E2E8F0' } },
+      axisTick: { show: false },
+      axisLabel: { color: '#64748B', fontSize: 11 },
     },
     series: [
       {
-        name: '质检抽样批次数',
+        name: '不合格次数',
         type: 'bar',
-        data: stats.weeklyTrend.inspectionCounts,
-        itemStyle: { color: '#3B82F6', borderRadius: [4, 4, 0, 0] },
-      },
-      {
-        name: '不良拦截批次',
-        type: 'bar',
-        data: stats.weeklyTrend.defectCounts,
-        itemStyle: { color: '#F43F5E', borderRadius: [4, 4, 0, 0] },
+        barWidth: 10,
+        data: defects.map((d) => ({
+          value: d.count,
+          label: { show: true, position: 'right', color: '#64748B', fontSize: 11 },
+        })),
+        itemStyle: { color: '#EF4444', borderRadius: [0, 2, 2, 0] },
       },
     ],
   };
 
+  const kpi = [
+    { label: '总检验单数', value: String(overview?.totalInspections ?? '—'), sub: '当前账号可见范围', icon: kpiTotal, accent: 'text-slate-400' },
+    { label: '待检验', value: String(overview?.pendingCount ?? '—'), sub: '含草稿与复检', icon: kpiPending, accent: 'text-rose-500' },
+    { label: '检验中', value: String(overview?.inspectingCount ?? '—'), sub: '在途任务', icon: kpiPassed, accent: 'text-emerald-500' },
+    { label: '不合格', value: String(overview?.failedCount ?? '—'), sub: overview ? `其中 ${overview.inMRBCount} 单进入 MRB` : '', icon: kpiFailed, accent: 'text-rose-500' },
+    { label: '综合合格率', value: overview ? `${overview.passRate}%` : '—', sub: '已判定单据口径', icon: kpiRate, accent: 'text-emerald-500' },
+  ];
+
   return (
-    <div className="space-y-6">
-      {/* 4 KPI Top Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Card 1: Today Inspections */}
-        <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-lg flex items-center justify-between">
-          <div>
-            <div className="text-xs text-slate-400 font-medium">今日完成检验批次</div>
-            <div className="text-2xl font-bold font-mono text-white mt-1">
-              {stats.todayInspections}{' '}
-              <span className="text-xs text-emerald-400 font-normal ml-1">
-                +14.2% <ArrowUpRight className="inline w-3 h-3" />
-              </span>
-            </div>
-            <div className="text-[11px] text-slate-400 mt-1 font-mono">覆盖 IQC/IPQC/FQC</div>
-          </div>
-          <div className="w-12 h-12 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-400">
-            <CheckCircle className="w-6 h-6" />
-          </div>
-        </div>
-
-        {/* Card 2: Yield Rate */}
-        <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-lg flex items-center justify-between">
-          <div>
-            <div className="text-xs text-slate-400 font-medium">整厂综合直通率 (FPY)</div>
-            <div className="text-2xl font-bold font-mono text-emerald-400 mt-1">
-              {stats.yieldRate}%
-            </div>
-            <div className="text-[11px] text-slate-400 mt-1 font-mono">目标阈值 ≥99.0%</div>
-          </div>
-          <div className="w-12 h-12 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
-            <TrendingUp className="w-6 h-6" />
-          </div>
-        </div>
-
-        {/* Card 3: Intercepted Batches */}
-        <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-lg flex items-center justify-between">
-          <div>
-            <div className="text-xs text-slate-400 font-medium">MES 触发硬拦截批次</div>
-            <div className="text-2xl font-bold font-mono text-rose-400 mt-1">
-              {stats.interceptedBatches}{' '}
-              <span className="text-xs bg-rose-500/20 text-rose-300 px-1.5 py-0.5 rounded border border-rose-500/30">
-                机台锁死
-              </span>
-            </div>
-            <div className="text-[11px] text-slate-400 mt-1 font-mono">下料/热处理工序</div>
-          </div>
-          <div className="w-12 h-12 rounded-xl bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-400">
-            <ShieldAlert className="w-6 h-6" />
-          </div>
-        </div>
-
-        {/* Card 4: Equipment Connectivity */}
-        <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-lg flex items-center justify-between">
-          <div>
-            <div className="text-xs text-slate-400 font-medium">关键机台联网率</div>
-            <div className="text-2xl font-bold font-mono text-sky-400 mt-1">
-              {equipment && equipment.total > 0
-                ? Number(((equipment.online / equipment.total) * 100).toFixed(1))
-                : 0}
-              %
-            </div>
-            <div className="text-[11px] text-slate-400 mt-1 font-mono">
-              {equipment ? `${equipment.online} / ${equipment.total} 台在线实时通讯` : '设备清单加载中...'}
-            </div>
-          </div>
-          <div className="w-12 h-12 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-400">
-            <Cpu className="w-6 h-6" />
-          </div>
-        </div>
+    <div className="space-y-4">
+      {/* Top Header Title */}
+      <div>
+        <h1 className="text-base font-semibold text-slate-800">检验进度总览</h1>
+        <p className="text-xs text-slate-400 mt-0.5">
+          {today} · 数据已按当前登录用户的物料权限自动过滤
+        </p>
       </div>
 
-      {/* Main Charts Row */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Trend Line (Span 2) */}
-        <div className="lg:col-span-2 bg-slate-900/90 border border-slate-800 rounded-xl p-5 shadow-lg">
-          <div className="flex items-center justify-between mb-3">
-            <div>
-              <h2 className="text-sm font-semibold text-white flex items-center gap-2">
-                <Zap className="w-4 h-4 text-cyan-400" />
-                近 7 日紧固件合格率与质量波动趋势
-              </h2>
-              <p className="text-xs text-slate-400 mt-0.5">连续式热处理及精密下料 SPC 监控带</p>
-            </div>
-            <span className="text-xs font-mono text-cyan-400 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-500/30">
-              动态刷新中
-            </span>
-          </div>
-          <EChart option={lineOption} style={{ height: '300px' }} />
+      {loadError && (
+        <div className="rounded border border-red-200 bg-red-50 px-3.5 py-2 text-xs text-red-700">
+          看板数据加载失败：{loadError}
         </div>
+      )}
 
-        {/* Donut Chart (Span 1) */}
-        <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 shadow-lg">
-          <div className="flex items-center justify-between mb-3">
-            <div>
-              <h2 className="text-sm font-semibold text-white flex items-center gap-2">
-                <Flame className="w-4 h-4 text-rose-400" />
-                高频不良类型分布
-              </h2>
-              <p className="text-xs text-slate-400 mt-0.5">柏拉图 Pareto 分析源</p>
-            </div>
-          </div>
-          <EChart option={donutOption} style={{ height: '300px' }} />
-        </div>
-      </div>
-
-      {/* Bottom Row: Bar chart & Live Interceptions */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Bar chart (Span 2) */}
-        <div className="lg:col-span-2 bg-slate-900/90 border border-slate-800 rounded-xl p-5 shadow-lg">
-          <div className="flex items-center justify-between mb-3">
-            <div>
-              <h2 className="text-sm font-semibold text-white flex items-center gap-2">
-                <Activity className="w-4 h-4 text-blue-400" />
-                各工段每日检验量与不合格批对比
-              </h2>
-              <p className="text-xs text-slate-400 mt-0.5">下料 / 冷镦 / 搓丝 / 调质 / 包装</p>
-            </div>
-          </div>
-          <EChart option={barOption} style={{ height: '280px' }} />
-        </div>
-
-        {/* Real-time Interception Feed (Span 1) */}
-        <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-5 shadow-lg flex flex-col">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold text-white flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-amber-400" />
-              当前 MES 拦截锁定实况
-            </h2>
-            <span className="text-[10px] bg-rose-950/80 text-rose-400 px-2 py-0.5 rounded border border-rose-500/30">
-              物理停机
-            </span>
-          </div>
-
-          <div className="space-y-3 flex-1 overflow-y-auto">
-            {stats.interceptionEvents.map((evt) => (
-              <div
-                key={evt.id}
-                className="p-3 rounded-lg bg-rose-950/30 border border-rose-500/30 space-y-1.5"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-mono font-bold text-rose-300">{evt.station}</span>
-                  <span className="text-[10px] font-mono text-slate-400">{evt.time}</span>
-                </div>
-                <div className="text-xs text-slate-200">
-                  批次: <span className="font-mono text-amber-300">{evt.batch}</span>
-                </div>
-                <div className="text-xs text-rose-400 font-medium">原因: {evt.item}</div>
-                <div className="text-[11px] text-emerald-400 bg-slate-950/60 px-2 py-1 rounded border border-slate-800 flex items-center justify-between">
-                  <span>{evt.mesStatus}</span>
-                  <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping" />
-                </div>
+      {/* Row 1: 5 KPI Cards */}
+      <div className="grid grid-cols-5 gap-4">
+        {kpi.map((c) => (
+          <div
+            key={c.label}
+            className="bg-white border border-slate-100 rounded-lg p-3.5 shadow-sm flex items-center justify-between"
+          >
+            <div className="space-y-1">
+              <div className="text-xs text-slate-400 font-normal">{c.label}</div>
+              <div className="text-2xl font-bold text-slate-800 font-mono tracking-tight">{c.value}</div>
+              <div className={`text-[11px] ${c.accent}`}>
+                <span className="text-slate-400 ml-0.5">{c.sub}</span>
               </div>
-            ))}
-
-            <div className="p-3 rounded-lg bg-slate-800/40 border border-slate-800 text-xs text-slate-400 text-center">
-              所有关键工艺尺寸均由传感器与卡尺自动上传 QMS 阻断中枢
             </div>
+            <img src={c.icon} alt={c.label} className="w-10 h-10 object-contain" />
+          </div>
+        ))}
+      </div>
+
+      {/* Row 2: Two Charts (Donut + Trend Line) */}
+      <div className="grid grid-cols-2 gap-4">
+        {/* Left: 检验环节分布 */}
+        <div className="bg-white border border-slate-100 rounded-lg p-4 shadow-sm">
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="text-[13px] font-semibold text-slate-800">检验环节分布</h2>
+            <span className="text-[11px] text-slate-400">全部时段 · 真实库聚合</span>
+          </div>
+          <EChart option={donutOption} style={{ height: '240px' }} />
+        </div>
+
+        {/* Right: 质量趋势 (近7天) */}
+        <div className="bg-white border border-slate-100 rounded-lg p-4 shadow-sm">
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="text-[13px] font-semibold text-slate-800">质量趋势 (近7天)</h2>
+          </div>
+          <EChart option={lineOption} style={{ height: '240px' }} />
+        </div>
+      </div>
+
+      {/* Row 3: Bottom Row (缺陷 TOP + 待办检验任务) */}
+      <div className="grid grid-cols-2 gap-4">
+        {/* Left: 缺陷类型 TOP */}
+        <div className="bg-white border border-slate-100 rounded-lg p-4 shadow-sm flex flex-col">
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="text-[13px] font-semibold text-slate-800">缺陷类型 TOP</h2>
+            <span className="text-[11px] text-slate-400">取自检验单失败指标</span>
+          </div>
+          <div className="flex-1 flex items-center">
+            <div className="w-full">
+              <EChart option={barOption} style={{ height: '220px' }} />
+            </div>
+          </div>
+        </div>
+
+        {/* Right: 待办检验任务 */}
+        <div className="bg-white border border-slate-100 rounded-lg p-4 shadow-sm flex flex-col">
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="text-[13px] font-semibold text-slate-800">待办检验任务</h2>
+            <span className="text-[11px] text-slate-400">仅显示有权限的物料</span>
+          </div>
+
+          <div className="overflow-x-auto flex-1">
+            <table className="w-full text-[12px] text-left">
+              <thead>
+                <tr className="text-slate-400 border-b border-slate-100 font-normal">
+                  <th className="py-2 font-normal">检验单号</th>
+                  <th className="py-2 font-normal">类型</th>
+                  <th className="py-2 font-normal">物料</th>
+                  <th className="py-2 font-normal">数量</th>
+                  <th className="py-2 font-normal">状态</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 text-slate-600">
+                {pendingTasks.length === 0 && !loadError && (
+                  <tr>
+                    <td colSpan={5} className="py-8 text-center text-slate-400 text-xs">
+                      {overview === null ? '加载中...' : '当前账号权限范围内没有待办任务'}
+                    </td>
+                  </tr>
+                )}
+                {pendingTasks.map((t) => (
+                  <tr key={t.id} className="hover:bg-slate-50/60">
+                    <td className="py-2.5 font-mono text-blue-600 font-normal">{t.orderNo}</td>
+                    <td className="py-2.5">{t.type}</td>
+                    <td className="py-2.5 text-slate-700">{t.material}</td>
+                    <td className="py-2.5 font-mono">{t.qty}</td>
+                    <td className="py-2.5">
+                      <span
+                        className={`inline-block px-1.5 py-0.5 text-[11px] rounded ${
+                          t.status === '待检验'
+                            ? 'bg-slate-100 text-slate-500'
+                            : 'bg-blue-50 text-blue-600'
+                        }`}
+                      >
+                        {t.status}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
     </div>
   );
 }
+
+export default DashboardPage;

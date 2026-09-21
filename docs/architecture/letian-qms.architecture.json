@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "乐天紧固件 QMS 架构拓扑图",
+    "output": "letian-qms-architecture.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "full-stack",
+        "label": "端到端系统架构全貌",
+        "focus": ["web", "desktop", "api", "app", "domain", "infra", "db", "outbox"],
+        "note": "从工业作业终端、网关接入、领域模型到数据持久化与发件箱异步集成"
+      },
+      {
+        "id": "ddd-clean-arch",
+        "label": "DDD 分层与依赖倒置",
+        "focus": ["api", "app", "domain", "infra", "db"],
+        "note": "严格遵循 Clean Architecture，Domain 与 Application 核心解耦"
+      },
+      {
+        "id": "workshop-iot",
+        "label": "车间测量与工控联动",
+        "focus": ["desktop", "gauges", "api", "infra"],
+        "note": "工业千分尺/数显卡尺串口直连与本地缓存上报链路"
+      },
+      {
+        "id": "outbox-integration",
+        "label": "可靠发件箱与外部协同",
+        "focus": ["app", "infra", "db", "outbox", "erp"],
+        "note": "检验放行/阻断领域事件通过 Transactional Outbox 驱动 ERP/MES 同步"
+      }
+    ]
+  },
+  "components": [
+    { "id": "web", "type": "frontend", "label": "Web 控制台", "sublabel": "React 18 + Vite", "pos": [60, 200], "size": [140, 60], "tag": "质量大屏/评审" },
+    { "id": "desktop", "type": "frontend", "label": "工控工作站", "sublabel": "Electron + Node", "pos": [60, 360], "size": [140, 60], "tag": "车间现场机" },
+    { "id": "gauges", "type": "external", "label": "工业数显量具", "sublabel": "RS-232 / BLE", "pos": [60, 520], "size": [140, 60], "tag": "千分尺/卡尺" },
+    
+    { "id": "api", "type": "backend", "label": "API 网关服务", "sublabel": "Fastify + Zod", "pos": [280, 280], "size": [150, 64], "tag": "JWT 鉴权 / PBAC" },
+    
+    { "id": "app", "type": "backend", "label": "用例编排层", "sublabel": "@letian/application", "pos": [510, 200], "size": [160, 64], "tag": "质检/MRB编排" },
+    { "id": "domain", "type": "backend", "label": "DDD 纯领域核心", "sublabel": "@letian/domain", "pos": [510, 380], "size": [160, 64], "tag": "公差算法/阻断断言" },
+    
+    { "id": "infra", "type": "backend", "label": "基础设施适配", "sublabel": "@letian/infrastructure", "pos": [740, 200], "size": [160, 64], "tag": "Kysely ORM" },
+    { "id": "db", "type": "database", "label": "主时序数据库", "sublabel": "PostgreSQL 16", "pos": [970, 200], "size": [150, 64], "tag": "JSONB / GIN 索引" },
+    
+    { "id": "outbox", "type": "messagebus", "label": "事务型发件箱", "sublabel": "Transactional Outbox", "pos": [740, 380], "size": [160, 64], "tag": "最终一致性保证" },
+    { "id": "erp", "type": "external", "label": "ERP / MES / WMS", "sublabel": "企业上下游系统", "pos": [970, 380], "size": [150, 64], "tag": "放行/阻断回传" }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "终端与工业感知接入域 (Presentation Tier)",
+      "wraps": ["web", "desktop", "gauges"]
+    },
+    {
+      "kind": "region",
+      "label": "QMS 核心业务计算域 (Core Domain & Application)",
+      "wraps": ["api", "app", "domain"]
+    },
+    {
+      "kind": "region",
+      "label": "基础设施与存储域 (Storage & External Integration)",
+      "wraps": ["infra", "db", "outbox", "erp"]
+    }
+  ],
+  "connections": [
+    { "id": "web-to-api", "from": "web", "to": "api", "label": "HTTPS / JSON", "variant": "emphasis" },
+    { "id": "desktop-to-api", "from": "desktop", "to": "api", "label": "REST Sync", "variant": "emphasis" },
+    { "id": "gauges-to-desktop", "from": "gauges", "to": "desktop", "label": "串口读取", "variant": "dashed", "fromSide": "top", "toSide": "bottom" },
+    
+    { "id": "api-to-app", "from": "api", "to": "app", "label": "业务用例", "variant": "emphasis" },
+    { "id": "app-to-domain", "from": "app", "to": "domain", "label": "驱动领域", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "labelDy": 30 },
+    { "id": "app-to-infra", "from": "app", "to": "infra", "label": "仓储接口", "fromSide": "right", "toSide": "left" },
+    
+    { "id": "infra-to-db", "from": "infra", "to": "db", "label": "SQL / 事务", "variant": "emphasis" },
+    { "id": "infra-to-outbox", "from": "infra", "to": "outbox", "label": "发件箱事件", "fromSide": "bottom", "toSide": "top", "labelDy": 30 },
+    { "id": "outbox-to-erp", "from": "outbox", "to": "erp", "label": "异步推送", "variant": "emphasis" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Clean Architecture & DDD 规范",
+      "items": [
+        "@letian/domain: 零第三方框架依赖，承载紧固件公差、AQL 算法与判定实体",
+        "@letian/application: 编排检验生命周期、MRB 专家会签及批次追溯",
+        "@letian/infrastructure: 依托 Kysely + PostgreSQL 保证 ACID 事务与追溯图存储"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "工业现场设备深度集成",
+      "items": [
+        "Electron 桌面端提供工业测量仪器直连（RS-232/USB/BLE）",
+        "千分尺与卡尺实测值防篡改直接上报，杜绝手抄差错",
+        "支持车间离线暂存与网络恢复后的幂等批量同步"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "严格放行阻断与合规追溯",
+      "items": [
+        "检验未完成、判定不合格或处于 MRB 状态时物理锁库强阻断",
+        "全生命周期正反向穿透追踪（原材料批次 -> 炉号 -> 冷镦 -> 包装）",
+        "Transactional Outbox 确保外部 MES/ERP 系统状态最终一致"
+      ]
+    }
+  ]
+}

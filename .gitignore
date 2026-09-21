@@ -5,12 +5,19 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# 桌面客户端 (apps/desktop) 生成产物
+apps/desktop/out/
+apps/desktop/web-dist/
+apps/desktop/release/
+apps/desktop/smoke-output/
+
 # 环境变量（.env.example 为模板，需保留）
 .env
 .env.local
 .env.*.local
 
 # 日志与临时文件
+logs/
 *.log
 npm-debug.log*
 pnpm-debug.log*
@@ -23,3 +30,4 @@ coverage/
 Thumbs.db
 .vscode/
 .idea/
+

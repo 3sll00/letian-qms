@@ -1,12 +1,13 @@
 import { sql, type Expression, type ExpressionBuilder, type Kysely, type SqlBool } from 'kysely';
 import type { InspectionPlanRepository as IInspectionPlanRepository } from '@letian/domain';
-import type { InspectionPlan, InspectionPlanVersion, InspectionType } from '@letian/contracts';
+import type { InspectionPlan, InspectionPlanVersion, InspectionType, MaterialPermission } from '@letian/contracts';
 import type {
   Database,
   InspectionPlanInsert,
   InspectionPlanRow,
   PlanSamplingConfig,
 } from '../database/schema.js';
+import { buildMaterialPermissionWhere } from './pbac-sql-translator.js';
 
 /** 契约 InspectionTypeEnum 的 6 个合法取值，用于把 string 收窄为 InspectionType */
 const INSPECTION_TYPES: readonly string[] = ['IQC', 'IPQC_CT', 'IPQC_RL', 'IPQC_FN', 'OQC_SF', 'OQC_SH'];
@@ -145,7 +146,7 @@ export class KyselyInspectionPlanRepository implements IInspectionPlanRepository
       const insertValues: InspectionPlanInsert = {
         planCode: plan.planCode,
         planName: plan.planName,
-        materialCode: plan.materialCode,
+        materialCode: plan.materialCode ?? "",
         version: version.versionNo,
         versionStatus: version.status,
         inspectionStage: plan.inspectionType,
@@ -162,7 +163,7 @@ export class KyselyInspectionPlanRepository implements IInspectionPlanRepository
         .onConflict((oc) =>
           oc.columns(['planCode', 'version']).doUpdateSet({
             planName: plan.planName,
-            materialCode: plan.materialCode,
+            materialCode: plan.materialCode ?? "",
             inspectionStage: plan.inspectionType,
             versionStatus: version.status,
             items: JSON.stringify(version.items),
@@ -186,6 +187,8 @@ export class KyselyInspectionPlanRepository implements IInspectionPlanRepository
     materialCode?: string;
     keyword?: string;
     activeOnly?: boolean;
+    /** 三维 PBAC 权限过滤（方案表无供应商列，限定供应商的规则按 fail-closed 不匹配） */
+    permissions?: readonly MaterialPermission[];
     page: number;
     pageSize: number;
   }): Promise<{ total: number; list: InspectionPlan[] }> {
@@ -203,6 +206,14 @@ export class KyselyInspectionPlanRepository implements IInspectionPlanRepository
       }
       if (query.activeOnly === true) {
         list.push(eb('versionStatus', '=', 'ACTIVE'));
+      }
+      if (query.permissions !== undefined) {
+        list.push(
+          buildMaterialPermissionWhere(query.permissions, {
+            targetRef: 'inspection_plans',
+            hasSupplierColumn: false,
+          })
+        );
       }
       return list.length > 0 ? eb.and(list) : sql<SqlBool>`1 = 1`;
     };

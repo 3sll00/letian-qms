@@ -9,6 +9,7 @@ import { KyselyBatchTraceRepository } from '../repositories/batch-trace-reposito
 import { KyselyOutboxRepository } from '../repositories/outbox-repository.js';
 import { KyselyAuditLogRepository } from '../repositories/audit-log-repository.js';
 import { KyselyMaterialPermissionRepository } from '../repositories/material-permission-repository.js';
+import { KyselyMasterDataRepository } from '../repositories/master-data-repository.js';
 
 /**
  * PostgreSQL 事务级咨询锁实现
@@ -53,6 +54,7 @@ export class KyselyUnitOfWork implements IUnitOfWork {
         locks: new PostgresAdvisoryLockPort(trx),
         auditLogs: new KyselyAuditLogRepository(trx),
         permissions: new KyselyMaterialPermissionRepository(trx),
+        materials: new KyselyMasterDataRepository(trx),
       };
       return await work(ctx);
     });

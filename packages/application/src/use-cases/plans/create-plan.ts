@@ -7,7 +7,7 @@ import type { ISecurityContext } from '../../security/security-context.js';
 import type { IUnitOfWork } from '../../tx/unit-of-work.js';
 
 export interface CreatePlanCommand extends InspectionPlanDTO {
-  materialCategory: string;
+  categoryName?: string;
   initialVersionNo?: string;
   initialItems: InspectionPlanItemDTO[];
   samplingScheme?: string;
@@ -27,8 +27,8 @@ export class CreatePlanUseCase {
   public async execute(cmd: CreatePlanCommand, securityCtx?: ISecurityContext): Promise<InspectionPlanDTO> {
     if (securityCtx) {
       securityCtx.assertAccess({
-        targetCategory: cmd.materialCategory,
-        targetMaterialCode: cmd.materialCode,
+        targetCategory: cmd.categoryName ?? cmd.categoryId ?? "*",
+        targetMaterialCode: cmd.materialCode ?? "*",
       });
     }
 
@@ -38,8 +38,8 @@ export class CreatePlanUseCase {
         id: planId,
         planCode: cmd.planCode,
         planName: cmd.planName,
-        materialCode: cmd.materialCode,
-        materialCategory: cmd.materialCategory,
+        materialCode: cmd.materialCode ?? undefined,
+        materialCategory: cmd.categoryName ?? cmd.categoryId ?? "GENERAL",
         inspectionType: cmd.inspectionType,
       });
 

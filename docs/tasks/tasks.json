@@ -8,9 +8,13 @@
       "title": "开发环境容器基建与运行时配置管理 (infra)",
       "category": "infra",
       "status": "completed",
-      "dependencies": ["QMS-001"],
+      "dependencies": [
+        "QMS-001"
+      ],
       "description": "基于 QMS-001 建立的工程规范，提供本地与 CI 容器化 PostgreSQL 14+ 实例编排基建，配置统一环境变量模板（.env.example），规范服务端口、JWT 密钥、数据库连接池与测试沙箱凭据。在根 package.json 中集成一键数据库生命周期指令（pnpm db:up / pnpm db:down），消除本地与云端环境差异。",
-      "inputs": ["QMS-001 (根 package.json 与工程脚手架)"],
+      "inputs": [
+        "QMS-001 (根 package.json 与工程脚手架)"
+      ],
       "deliverables": [
         "docker-compose.yml (PostgreSQL 14-alpine 容器编排，带健康检查探针)",
         ".env.example (数据库、JWT、MES/ERP沙箱与告警WebHook配置规范)",
@@ -45,7 +49,9 @@
       "title": "共享契约源头与 Zod 模式生成器 (packages/contracts)",
       "category": "contracts",
       "status": "completed",
-      "dependencies": ["QMS-001"],
+      "dependencies": [
+        "QMS-001"
+      ],
       "description": "作为全系统单一数据源（Single Source of Truth）。手写核心 Zod Schema：覆盖质检方案版本库与指标公差、检验工单与快照、检验实测公差带、四类不合格 MRB 会签与超时催办、可配置评审流程引擎（ReviewFlowDefinition）、物料分类/编码/供应商三维 PBAC 规则、ERP 6类基础档案 DTO、MES 集成配置与同步日志模型、审计统计卡片模型、以及 RFC 7807 统一错误模型（遵循小写短横线 URI 规范）。基于 Zod Schema 自动推导并导出全量 TypeScript DTO 与 OpenAPI 3.1 规范。",
       "inputs": [
         "docs/letian-qms-prd.md (v2.2.0)",
@@ -67,7 +73,9 @@
       "title": "纯业务领域模型、端口定义与状态机引擎 (packages/domain)",
       "category": "domain",
       "status": "completed",
-      "dependencies": ["QMS-002"],
+      "dependencies": [
+        "QMS-002"
+      ],
       "description": "严格零外部 I/O 与零框架依赖的纯领域模型。输入输出直接复用继承 packages/contracts 的 DTO。实现质检方案聚合根 (InspectionPlan) 与版本状态机；实现检验单状态机与方案快照深拷贝绑定；实现指标公差自动判定算法（数值公差、上下限、百分比文本区间）、AQL 抽样算法；实现可配置评审流程引擎模型 (ReviewFlowDefinition) 与 MRB 四类处置决策会签（特采需客户代表签核，返工触发回边生成复检轮次）；实现纯内存 PBAC 规则评估器（支持物料分类、特定编码与供应商三维匹配）；定义六边形架构端口接口（ErpPort 涵盖6类档案, MesPort 含放行校验与锁定端口, 仓储接口）与 DAG 批次追溯数据结构。",
       "inputs": [
         "packages/contracts (复用所有 DTO、枚举与 Schema)"
@@ -92,7 +100,9 @@
       "title": "应用服务编排、PBAC 上下文装配与事务边界 (packages/application)",
       "category": "application",
       "status": "pending",
-      "dependencies": ["QMS-003"],
+      "dependencies": [
+        "QMS-003"
+      ],
       "description": "实现应用用例服务（Use Cases）。负责跨聚合业务编排：检验单创建时拉取并快照生效方案版本；检验实测判定不合格时自动匹配可配置流程引擎创建 MRB 并通过 Outbox 触发 MesPort 批次锁定；MRB 返工决策触发复检任务生成；管理事务生命周期（Unit of Work）与成品放行并发排他控制（pg_advisory_xact_lock）；装配当前用户的三维 PBAC 过滤上下文（物料/分类/供应商）注入仓储；实现基于 exceljs 与 @react-pdf/renderer 的统一导出编排服务（PDF/CSV/Excel）；输出标准 DTO 给 API 控制器，严禁领域实体外泄。",
       "inputs": [
         "packages/domain (聚合根、状态机、PBAC规则评估器、端口接口)",
@@ -120,7 +130,9 @@
       "title": "数据库表设计、仓储适配与集成端口实现 (packages/infrastructure)",
       "category": "infrastructure",
       "status": "pending",
-      "dependencies": ["QMS-004"],
+      "dependencies": [
+        "QMS-004"
+      ],
       "description": "使用 Kysely Migration 落地 PostgreSQL 14+ 迁移，配置 CamelCasePlugin 统一驼峰映射，约定 JSONB 内部键统一为 camelCase。实现 domain/application 定义的仓储与集成端口：落实方案快照主表 JSONB 与明细行 (order_id, item_code) 唯一约束表设计；实现 authorization_logs 与 integration_configs 表 DDL；将物料/分类/供应商三维 PBAC 规则翻译为 SQL WHERE 子句；为批次追溯 DAG 建立联合索引并实现基于递归 CTE（带 PG14+ CYCLE 语法）查询仓储；实现 ErpAdapter（6类基础档案映射同步）与 MesAdapter（集成配置表、生产数据拉取、放行校验与 Outbox 异步批次锁定事件）；落实复合键幂等表（24h TTL、SHA-256 哈希校验）以及单表行级防篡改触发器 trg_audit_immutable 的不可变审计流水线。",
       "inputs": [
         "packages/domain/src/ports/ (端口接口定义)",
@@ -147,7 +159,9 @@
       "title": "Fastify API 服务端、统一鉴权与契约校验测试 (apps/api)",
       "category": "api",
       "status": "pending",
-      "dependencies": ["QMS-005"],
+      "dependencies": [
+        "QMS-005"
+      ],
       "description": "实现 Fastify REST API 引擎。作为纯协议适配层：请求与响应校验直接调用 packages/contracts 的 Zod Schema，实现单一数据源校验；集成 RFC 7807 统一错误响应拦截（小写短横线 URI 规范，对齐 trace_id 与 requestId）；挂载身份认证（JWT/Session）中间件并将当前用户注入 Application 层；暴露方案管理、检验单录入、进度明细流式导出（PDF/CSV/Excel）、成品检强制放行纯读校验接口（GET /release-gates/{batchNo}）、可配置评审流程、MRB会签处置、MES集成配置、审计汇总统计卡片与批次追溯端点；编写基于 contracts Zod schema 的自动化契约测试套件。",
       "inputs": [
         "packages/contracts (运行时 Zod 校验器与 RFC 7807 错误定义)",
@@ -173,11 +187,13 @@
       "title": "React 工业级质量工作台与 Mock 契约先行协同 (apps/web)",
       "category": "web",
       "status": "pending",
-      "dependencies": ["QMS-002"],
+      "dependencies": [
+        "QMS-002"
+      ],
       "description": "搭建 React + Vite + TailwindCSS 现代化工业前端。基于 packages/contracts 共享类型与 Mock Service Worker (MSW) 实现契约先行解耦开发，无需等待后端 API 完成。所有 MSW Mock 数据必须在构建/测试阶段通过 contracts 的 Zod schema .parse() 强校验。严格按照 21 张设计图高保真实现方案管理配置、质量总览看板、检验明细多维导出、IQC录入、IPQC下料/滚丝/成品检三卡片、OQC三大Tab委外、MRB处置列表与可配置评审流程设置页、MES集成管理配置页及批次全链路追溯图。",
       "inputs": [
         "packages/contracts (共享 DTO 类型与 API 契约)",
-        "D:\\乐天\\图片 (21张高保真原型设计稿)"
+        "docs/prototypes (21张高保真原型设计稿)"
       ],
       "deliverables": [
         "apps/web/src/mocks/ (基于 contracts 类型的 MSW 模拟数据服务，构建期自动执行 Zod parse 校验)",
@@ -202,7 +218,9 @@
       "title": "生产基础档案与质检方案初始化种子数据 (infra)",
       "category": "infra",
       "status": "pending",
-      "dependencies": ["QMS-005"],
+      "dependencies": [
+        "QMS-005"
+      ],
       "description": "基于确认文档与 21 张原型图中的生产场景，编写一套干净库初始化种子数据脚本。涵盖供应商档案、客户档案、存货分类树、原材料与紧固件物料清单、车间工序档案、系统质检人员与角色权限，以及 IQC、IPQC、OQC、委外 4 套带指标公差与 AQL 抽样的正式质检方案，消除空库启动导致的测试与联调困难。",
       "inputs": [
         "packages/infrastructure/src/mocks/mock-data.ts",
@@ -222,7 +240,9 @@
       "title": "后台运维守护进程与自动化调度中心 (infra)",
       "category": "infra",
       "status": "pending",
-      "dependencies": ["QMS-005"],
+      "dependencies": [
+        "QMS-005"
+      ],
       "description": "实现系统后台任务调度与可靠运维组件：实现 Outbox 事务事件高可靠投递（指数退避重试、超过 5 次自动流转 DEAD_LETTER 死信并触发 WebHook 告警）；实现 MRB 审批超过 24h 未裁决的自动超时催办与标红告警；实现 authorization_logs 超过 180 天的滚动清理与 idempotency_keys 超过 24h 的过期清除作业。",
       "inputs": [
         "packages/infrastructure (仓储与数据库事务连接)",
@@ -242,7 +262,12 @@
       "title": "生产容器化构建、反向代理与全链路交付验收 (deploy)",
       "category": "deploy",
       "status": "pending",
-      "dependencies": ["QMS-006", "QMS-007", "QMS-008", "QMS-009"],
+      "dependencies": [
+        "QMS-006",
+        "QMS-007",
+        "QMS-008",
+        "QMS-009"
+      ],
       "description": "提供生产级打包构建流水线、多阶段 Dockerfile、Nginx 反向代理配置（带 API 代理、静态资源缓存与 gzip 压缩）。在 Staging 环境中执行全链路端到端集成验证与 UAT 场景演练（包含从原材料 IQC、IPQC 滚丝下料、成品检 409 阻断拦截、MRB 特采会签归档到批次 DAG 追溯 PDF 导出的全业务闭环）。",
       "inputs": [
         "apps/api (生产编译产物)",
@@ -259,6 +284,53 @@
         "执行 docker compose -f docker-compose.prod.yml up 可完整拉起 PG、API、Web 全套系统",
         "外部 MES 调用 release-gates 接口能够真实收到 409 阻断状态码",
         "UAT 演练 100% 覆盖 21 项业务能力且追溯 PDF 成功下载无中文乱码"
+      ]
+    },
+    {
+      "id": "QMS-011",
+      "title": "检验台账前端响应信封与筛选口径对齐 (apps/web)",
+      "category": "web",
+      "status": "completed",
+      "dependencies": [
+        "QMS-007"
+      ],
+      "description": "出货检验(OQC)页已修正为读取真实后端 { total, list, statusCounts } 信封并把中文检验状态翻译为契约 statuses；本轮同步修正了委外检验(OutsourceList.tsx)与来料检验(IqcList.tsx)：两者此前按离线 Mock 的 items / orders 信封读取，生产构建下恒为兜底参考数据、从不读库，现已改为 list/items 双信封兼容，并把 orderType/limit 等失效参数改为契约的 type/pageSize，状态与结论字段改用 overallDecision 契约口径。",
+      "inputs": [
+        "apps/web/src/pages/inspections/components/OqcList.tsx (已修正的参考实现)",
+        "apps/api/src/controllers/inspections.controller.ts (查询契约)",
+        "docs/16-出货检验OQC数据字段与接口打通设计.md §5A"
+      ],
+      "deliverables": [
+        "OutsourceList.tsx / IqcList.tsx 的响应信封与状态筛选口径修正"
+      ],
+      "acceptanceCriteria": [
+        "两个页面在真实后端下均能渲染库中数据，不再依赖 INITIAL_* 兜底数组",
+        "筛选下拉框的中文状态经翻译后不再触发 400，且与列表状态标签一致"
+      ]
+    },
+    {
+      "id": "QMS-012",
+      "title": "出货检验「检验状态」派生口径筛选打通 (apps/web + apps/api)",
+      "category": "web",
+      "status": "completed",
+      "dependencies": [
+        "QMS-011"
+      ],
+      "description": "台账「检验状态」列是由 inspection_orders.status + judgment 共同决定的派生列，而 GET /inspections 只能按原始 status 枚举过滤，导致按「已合格」筛选会带出列上显示「不合格」的行、按「不合格」筛选一条都查不到（实测 total=0）。本轮在契约新增 inspectionState（PENDING/INSPECTING/PASSED/FAILED）查询参数，由仓储层统一翻译为 status + judgment 谓词，前端出货检验页改提交该参数；同时修正列表派生逻辑漏判 RE_INSPECTING 与 IN_MRB_REVIEW 的问题，使筛选结果与列上字样永远一致。",
+      "inputs": [
+        "docs/16-出货检验OQC数据字段与接口打通设计.md §5.1 / §7.12",
+        "packages/infrastructure/src/repositories/inspection-order-repository.ts (listOrders)",
+        "apps/api/src/controllers/inspections.controller.ts (InspectionQuerySchema)"
+      ],
+      "deliverables": [
+        "GET /inspections 新增 inspectionState 语义筛选参数（契约 + 控制器 + 仓储唯一翻译实现）",
+        "OqcList.tsx 改提交 inspectionState 并修正 RE_INSPECTING / IN_MRB_REVIEW 的派生状态",
+        "e2e.test.ts 新增派生状态互斥且并集全覆盖的回归断言"
+      ],
+      "acceptanceCriteria": [
+        "四个派生状态筛选命中数之和等于该类型无筛选时的 total，且逐条满足列上显示口径",
+        "非法 inspectionState 取值返回 400，而不是被忽略后退化为全表",
+        "pnpm -r run typecheck / npm run test / npm run build 全绿"
       ]
     }
   ]

@@ -13,8 +13,9 @@ export class InspectionPlan {
   private id: string;
   private planCode: string;
   private planName: string;
-  private materialCode: string;
-  private materialCategory: string;
+  private materialCode?: string | undefined;
+  private materialCategory?: string | undefined;
+    categoryName?: string | undefined;
   private inspectionType: InspectionType;
   private versions: InspectionPlanVersionDTO[];
 
@@ -22,8 +23,9 @@ export class InspectionPlan {
     id: string;
     planCode: string;
     planName: string;
-    materialCode: string;
-    materialCategory: string;
+    materialCode?: string | undefined;
+    materialCategory?: string | undefined;
+    categoryName?: string | undefined;
     inspectionType: InspectionType;
     versions?: InspectionPlanVersionDTO[];
   }) {
@@ -31,7 +33,7 @@ export class InspectionPlan {
     this.planCode = params.planCode;
     this.planName = params.planName;
     this.materialCode = params.materialCode;
-    this.materialCategory = params.materialCategory;
+    this.materialCategory = params.materialCategory ?? params.categoryName;
     this.inspectionType = params.inspectionType;
     this.versions = params.versions ? [...params.versions] : [];
   }
@@ -48,11 +50,11 @@ export class InspectionPlan {
     return this.planName;
   }
 
-  public getMaterialCode(): string {
+  public getMaterialCode(): string | undefined {
     return this.materialCode;
   }
 
-  public getMaterialCategory(): string {
+  public getMaterialCategory(): string | undefined {
     return this.materialCategory;
   }
 

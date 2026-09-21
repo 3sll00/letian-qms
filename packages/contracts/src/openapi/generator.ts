@@ -12,6 +12,18 @@ import {
   AuditLogSchema,
   AuditStatsResponseSchema,
   MaterialPermissionSchema,
+  RoleSchema,
+  AuthorizationDecisionEnum,
+  AuthorizationLogSchema,
+  PermissionLogListResponseSchema,
+  MaterialPermissionListResponseSchema,
+  CreatePermissionRequestSchema,
+  ApplyRolePermissionRequestSchema,
+  PermissionCheckRequestSchema,
+  PermissionCheckResponseSchema,
+  AuthUserSchema,
+  LoginRequestSchema,
+  LoginResponseSchema,
   TraceRelationTypeEnum,
   TraceNodeStatusEnum,
   TraceNodeSchema,
@@ -80,6 +92,18 @@ export function createLetianQmsOpenApiRegistry(): OpenAPIRegistry {
   registry.register('IntegrationSyncLog', IntegrationSyncLogSchema);
   registry.register('IntegrationConfig', IntegrationConfigSchema);
   registry.register('OutboxEvent', OutboxEventSchema);
+  registry.register('Role', RoleSchema);
+  registry.register('AuthorizationDecision', AuthorizationDecisionEnum);
+  registry.register('AuthorizationLog', AuthorizationLogSchema);
+  registry.register('PermissionLogListResponse', PermissionLogListResponseSchema);
+  registry.register('MaterialPermissionListResponse', MaterialPermissionListResponseSchema);
+  registry.register('CreatePermissionRequest', CreatePermissionRequestSchema);
+  registry.register('ApplyRolePermissionRequest', ApplyRolePermissionRequestSchema);
+  registry.register('PermissionCheckRequest', PermissionCheckRequestSchema);
+  registry.register('PermissionCheckResponse', PermissionCheckResponseSchema);
+  registry.register('AuthUser', AuthUserSchema);
+  registry.register('LoginRequest', LoginRequestSchema);
+  registry.register('LoginResponse', LoginResponseSchema);
 
   // 2. 注册核心 API 路由路径
   // 检验单列表查询
@@ -338,6 +362,269 @@ export function createLetianQmsOpenApiRegistry(): OpenAPIRegistry {
     },
   });
 
+  // ==========================================================================
+  // 物料权限管理（系统管理）
+  // ==========================================================================
+
+  // 权限规则分页列表（含停用规则）
+  registry.registerPath({
+    method: 'get',
+    path: '/api/v1/permissions',
+    summary: '查询物料权限规则分页列表（含停用）',
+    tags: ['Permission'],
+    request: {
+      query: z.object({
+        page: z.coerce.number().int().min(1).default(1),
+        pageSize: z.coerce.number().int().min(1).max(100).default(20),
+        userName: z.string().optional(),
+        roleCode: z.string().optional(),
+        materialCode: z.string().optional(),
+      }),
+    },
+    responses: {
+      200: {
+        description: '成功返回权限规则分页列表',
+        content: {
+          'application/json': {
+            schema: MaterialPermissionListResponseSchema,
+          },
+        },
+      },
+    },
+  });
+
+  // 创建权限规则
+  registry.registerPath({
+    method: 'post',
+    path: '/api/v1/permissions',
+    summary: '创建物料权限规则',
+    tags: ['Permission'],
+    request: {
+      body: {
+        content: {
+          'application/json': {
+            schema: CreatePermissionRequestSchema,
+          },
+        },
+      },
+    },
+    responses: {
+      201: {
+        description: '创建成功',
+        content: {
+          'application/json': {
+            schema: MaterialPermissionSchema,
+          },
+        },
+      },
+      409: {
+        description: '同用户同角色规则已存在',
+        content: {
+          'application/problem+json': {
+            schema: ProblemDetailsSchema,
+          },
+        },
+      },
+    },
+  });
+
+  // 编辑权限规则
+  registry.registerPath({
+    method: 'put',
+    path: '/api/v1/permissions/{id}',
+    summary: '编辑物料权限规则（三维维度 / 启停）',
+    tags: ['Permission'],
+    request: {
+      params: z.object({ id: z.string().uuid() }),
+      body: {
+        content: {
+          'application/json': {
+            schema: CreatePermissionRequestSchema,
+          },
+        },
+      },
+    },
+    responses: {
+      200: {
+        description: '更新成功',
+        content: {
+          'application/json': {
+            schema: MaterialPermissionSchema,
+          },
+        },
+      },
+    },
+  });
+
+  // 删除权限规则
+  registry.registerPath({
+    method: 'delete',
+    path: '/api/v1/permissions/{id}',
+    summary: '删除物料权限规则',
+    tags: ['Permission'],
+    request: {
+      params: z.object({ id: z.string().uuid() }),
+    },
+    responses: {
+      204: { description: '删除成功' },
+      404: {
+        description: '规则不存在',
+        content: {
+          'application/problem+json': {
+            schema: ProblemDetailsSchema,
+          },
+        },
+      },
+    },
+  });
+
+  // 角色字典
+  registry.registerPath({
+    method: 'get',
+    path: '/api/v1/permissions/roles',
+    summary: '查询角色字典',
+    tags: ['Permission'],
+    responses: {
+      200: {
+        description: '成功返回角色字典列表',
+        content: {
+          'application/json': {
+            schema: z.array(RoleSchema),
+          },
+        },
+      },
+    },
+  });
+
+  // 按角色批量配置
+  registry.registerPath({
+    method: 'post',
+    path: '/api/v1/permissions/apply-role',
+    summary: '按角色批量改写该角色下所有用户的三维权限',
+    tags: ['Permission'],
+    request: {
+      body: {
+        content: {
+          'application/json': {
+            schema: ApplyRolePermissionRequestSchema,
+          },
+        },
+      },
+    },
+    responses: {
+      200: {
+        description: '批量配置完成，返回受影响规则数',
+        content: {
+          'application/json': {
+            schema: z.object({
+              roleCode: z.string(),
+              updatedCount: z.number().int(),
+            }),
+          },
+        },
+      },
+    },
+  });
+
+  // 权限校验工具
+  registry.registerPath({
+    method: 'post',
+    path: '/api/v1/permissions/check',
+    summary: '校验某用户对某物料是否具备访问权限（权限校验工具）',
+    tags: ['Permission'],
+    request: {
+      body: {
+        content: {
+          'application/json': {
+            schema: PermissionCheckRequestSchema,
+          },
+        },
+      },
+    },
+    responses: {
+      200: {
+        description: '返回判定结果与命中规则',
+        content: {
+          'application/json': {
+            schema: PermissionCheckResponseSchema,
+          },
+        },
+      },
+    },
+  });
+
+  // 权限校验日志
+  registry.registerPath({
+    method: 'get',
+    path: '/api/v1/permissions/logs',
+    summary: '查询权限校验日志分页列表',
+    tags: ['Permission'],
+    request: {
+      query: z.object({
+        page: z.coerce.number().int().min(1).default(1),
+        pageSize: z.coerce.number().int().min(1).max(100).default(20),
+        userId: z.string().optional(),
+        decision: AuthorizationDecisionEnum.optional(),
+        resourceType: z.string().optional(),
+      }),
+    },
+    responses: {
+      200: {
+        description: '成功返回校验日志分页列表',
+        content: {
+          'application/json': {
+            schema: PermissionLogListResponseSchema,
+          },
+        },
+      },
+    },
+  });
+
+  // 登录页用户列表
+  registry.registerPath({
+    method: 'get',
+    path: '/api/v1/auth/users',
+    summary: '开发态登录页用户列表（职员档案）',
+    tags: ['Auth'],
+    responses: {
+      200: {
+        description: '成功返回可登录用户列表',
+        content: {
+          'application/json': {
+            schema: z.array(AuthUserSchema),
+          },
+        },
+      },
+    },
+  });
+
+  // 开发态登录
+  registry.registerPath({
+    method: 'post',
+    path: '/api/v1/auth/login',
+    summary: '开发态按用户 UUID 签发 JWT',
+    tags: ['Auth'],
+    request: {
+      body: {
+        content: {
+          'application/json': {
+            schema: LoginRequestSchema,
+          },
+        },
+      },
+    },
+    responses: {
+      200: {
+        description: '登录成功',
+        content: {
+          'application/json': {
+            schema: LoginResponseSchema,
+          },
+        },
+      },
+    },
+  });
+
   return registry;
 }
 
@@ -358,7 +645,7 @@ export function generateLetianQmsOpenApiDocument(): ReturnType<OpenApiGeneratorV
     },
     servers: [
       {
-        url: 'http://localhost:3000',
+        url: 'http://localhost:3100',
         description: '本地开发调试环境',
       },
     ],

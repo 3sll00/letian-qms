@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:mock": "tsc && vite build --mode mock",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "validate:mocks": "node --import tsx src/mocks/validate.ts",

@@ -1,247 +1,406 @@
-import React, { useState, useEffect } from 'react';
-import {
-  FolderTree,
-  ChevronRight,
-  ChevronDown,
-  Folder,
-  FolderOpen,
-  FileText,
-  Plus,
-  Layers,
-  Package,
-} from 'lucide-react';
+﻿import React, { useState, useEffect, useMemo } from 'react';
+import { Folder, FolderOpen, Search, RotateCcw, RefreshCw, Layers, Tag, Box, Plus, X } from 'lucide-react';
 import { api, errorMessage } from '../../lib/api';
 
-// 契约包中没有分类树 Schema，类型按 GET /master-data/categories 的真实返回结构声明
-// （见 apps/api/src/controllers/master-data.controller.ts 的 CategoryTreeNodeView）。
-interface CategoryTreeNode {
+interface CategoryTreeNodeView {
   id: string;
   code: string;
   name: string;
   count: number;
-  children: CategoryTreeNode[];
-}
-
-/** 分类代码 → 质检阶段（原实现按 Mock 主键 id 里的 raw/semi 关键字判断，真实库主键是 UUID，改判代码） */
-function stageOfCategory(code: string, name: string): string {
-  const key = `${code} ${name}`.toUpperCase();
-  if (key.includes('RAW')) return 'IQC 进货来料检验';
-  if (key.includes('SEMI')) return 'IPQC 过程制程检验';
-  return 'FQC 成品终检出厂';
+  children: CategoryTreeNodeView[];
 }
 
 export function MaterialCategoriesPage() {
-  const [categories, setCategories] = useState<CategoryTreeNode[]>([]);
-  const [selectedCategory, setSelectedCategory] = useState<CategoryTreeNode | null>(null);
-  const [expandedKeys, setExpandedKeys] = useState<Record<string, boolean>>({});
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [keyword, setKeyword] = useState('');
+  const [categories, setCategories] = useState<CategoryTreeNodeView[]>([]);
+  const [selectedNode, setSelectedNode] = useState<CategoryTreeNodeView | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [newCode, setNewCode] = useState('');
+  const [newName, setNewName] = useState('');
+  const [newParent, setNewParent] = useState('');
+  const [creating, setCreating] = useState(false);
+
+    const handleCreateCategory = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newCode.trim() || !newName.trim()) return;
+    setCreating(true);
+    try {
+      await api.post('/master-data/categories', {
+        categoryCode: newCode.trim(),
+        categoryName: newName.trim(),
+        parentCode: newParent.trim() || undefined,
+        level: newParent.trim() ? 2 : 1,
+      });
+      setIsCreateOpen(false);
+      setNewCode('');
+      setNewName('');
+      setNewParent('');
+      await fetchCategories();
+    } catch (err) {
+      alert('创建失败: ' + errorMessage(err));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const fetchCategories = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api.get<CategoryTreeNodeView[]>('/master-data/categories');
+      setCategories(data);
+      if (data.length > 0 && !selectedNode) {
+        setSelectedNode(data[0] || null);
+      }
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    api
-      .get<CategoryTreeNode[]>('/master-data/categories')
-      .then((data) => {
-        setCategories(data);
-        if (data.length > 0) {
-          setSelectedCategory(data[0]);
-        }
-        // 默认展开全部根节点（原实现硬编码 'cat-raw' 等键，与库中 UUID 主键不匹配，永远展不开）
-        setExpandedKeys(Object.fromEntries(data.map((node) => [node.id, true])));
-        setLoadError(null);
-      })
-      .catch((err) => {
-        setLoadError(errorMessage(err));
-        console.error('Categories error:', err);
-      });
+    void fetchCategories();
   }, []);
 
-  const countNodes = (items: CategoryTreeNode[]): number =>
-    items.reduce((sum, item) => sum + 1 + countNodes(item.children), 0);
-
-  const toggleExpand = (id: string) => {
-    setExpandedKeys((prev) => ({ ...prev, [id]: !prev[id] }));
+  // 递归统计所有分类总数
+  const flattenNodes = (nodes: CategoryTreeNodeView[]): CategoryTreeNodeView[] => {
+    const res: CategoryTreeNodeView[] = [];
+    const traverse = (list: CategoryTreeNodeView[]) => {
+      for (const node of list) {
+        res.push(node);
+        if (node.children && node.children.length > 0) {
+          traverse(node.children);
+        }
+      }
+    };
+    traverse(nodes);
+    return res;
   };
 
-  const renderTree = (items: CategoryTreeNode[], depth = 0) => {
-    return (
-      <div className="space-y-1">
-        {items.map((item) => {
-          const hasChildren = item.children && item.children.length > 0;
-          const isExpanded = !!expandedKeys[item.id];
-          const isSelected = selectedCategory?.id === item.id;
+  const allFlatNodes = useMemo(() => flattenNodes(categories), [categories]);
 
-          return (
-            <div key={item.id} className="text-xs">
-              <div
-                style={{ paddingLeft: `${depth * 18 + 8}px` }}
-                onClick={() => {
-                  setSelectedCategory(item);
-                  if (hasChildren) toggleExpand(item.id);
-                }}
-                className={`flex items-center justify-between py-2 pr-3 rounded-lg cursor-pointer transition ${
-                  isSelected
-                    ? 'bg-sky-600/20 text-sky-400 border border-sky-500/40'
-                    : 'hover:bg-slate-800/60 text-slate-300'
-                }`}
-              >
-                <div className="flex items-center gap-2 overflow-hidden">
-                  {hasChildren ? (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleExpand(item.id);
-                      }}
-                      className="p-0.5 text-slate-400 hover:text-white"
-                    >
-                      {isExpanded ? (
-                        <ChevronDown className="w-3.5 h-3.5" />
-                      ) : (
-                        <ChevronRight className="w-3.5 h-3.5" />
-                      )}
-                    </button>
-                  ) : (
-                    <span className="w-3.5 inline-block" />
-                  )}
+  // 最大层级深度
+  const maxDepth = useMemo(() => {
+    const getDepth = (nodes: CategoryTreeNodeView[]): number => {
+      if (!nodes || nodes.length === 0) return 0;
+      let max = 0;
+      for (const n of nodes) {
+        max = Math.max(max, 1 + getDepth(n.children || []));
+      }
+      return max;
+    };
+    return getDepth(categories);
+  }, [categories]);
 
-                  {hasChildren ? (
-                    isExpanded ? (
-                      <FolderOpen className="w-4 h-4 text-amber-400 shrink-0" />
-                    ) : (
-                      <Folder className="w-4 h-4 text-amber-400 shrink-0" />
-                    )
-                  ) : (
-                    <FileText className="w-4 h-4 text-sky-400 shrink-0" />
-                  )}
+  // 总物料关联数
+  const totalMaterialCount = useMemo(() => {
+    return allFlatNodes.reduce((sum, n) => sum + (n.count || 0), 0);
+  }, [allFlatNodes]);
 
-                  <span className="font-mono text-slate-400 text-[11px]">{item.code}</span>
-                  <span className="font-medium text-white truncate">{item.name}</span>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-mono bg-slate-800 px-1.5 py-0.5 rounded text-slate-400">
-                    {item.count} 项物料
-                  </span>
-                </div>
-              </div>
-
-              {hasChildren && isExpanded && renderTree(item.children, depth + 1)}
-            </div>
-          );
-        })}
-      </div>
-    );
+  // 过滤后的树状展示
+  const filterTree = (nodes: CategoryTreeNodeView[], kw: string): CategoryTreeNodeView[] => {
+    if (!kw.trim()) return nodes;
+    const lower = kw.toLowerCase();
+    const result: CategoryTreeNodeView[] = [];
+    for (const node of nodes) {
+      const matchSelf = node.name.toLowerCase().includes(lower) || node.code.toLowerCase().includes(lower);
+      const filteredChildren = filterTree(node.children || [], kw);
+      if (matchSelf || filteredChildren.length > 0) {
+        result.push({
+          ...node,
+          children: filteredChildren,
+        });
+      }
+    }
+    return result;
   };
+
+  const displayedTree = useMemo(() => filterTree(categories, keyword), [categories, keyword]);
 
   return (
-    <div className="space-y-6">
-      {/* Top Banner */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 bg-slate-900/80 border border-slate-800 p-5 rounded-xl">
+    <div className="space-y-4">
+      {/* Header */}
+      <div className="flex items-start justify-between">
         <div>
-          <h2 className="text-base font-semibold text-white flex items-center gap-2">
-            <FolderTree className="w-5 h-5 text-sky-400" />
-            紧固件物料分类树结构与工程规程映射中心
-          </h2>
-          <p className="text-xs text-slate-400 mt-1">
-            支持母料盘圆、中间胚料、切断半成品、热处理螺栓与汽车级成品全层级树状管理
+          <h2 className="text-base font-bold text-slate-800">存货分类</h2>
+          <p className="text-xs text-slate-400 mt-0.5">
+            ERP 存货分类层级字典，供「存货档案」与物料权限隔离使用
           </p>
         </div>
-        <button className="flex items-center gap-1.5 px-3.5 py-2 bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold rounded-lg shadow-lg shadow-sky-600/30 transition">
-          <Plus className="w-4 h-4" />
-          新增分类节点
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setIsCreateOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 shadow-sm transition"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            新增分类节点
+          </button>
+          <button
+            type="button"
+            onClick={() => void fetchCategories()}
+            disabled={loading}
+            className="flex items-center gap-1 px-3 py-1.5 rounded border border-slate-200 bg-white text-slate-700 text-xs font-medium hover:bg-slate-50 shadow-sm"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 text-blue-600 ${loading ? 'animate-spin' : ''}`} />
+            刷新
+          </button>
+        </div>
       </div>
 
-      {loadError ? (
-        <div className="bg-rose-950/40 border border-rose-500/40 text-rose-200 text-xs rounded-xl px-4 py-3">
-          物料分类树加载失败: {loadError}
+      {error && (
+        <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs rounded-lg">
+          {error}
         </div>
-      ) : null}
+      )}
 
-      {/* Main Split View: Left Tree + Right Node Detail */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column: Tree (5 cols) */}
-        <div className="lg:col-span-5 bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow-xl space-y-3">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-            <h3 className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-2">
-              <Layers className="w-4 h-4 text-sky-400" />
-              全厂料品分类层级树
-            </h3>
-            <span className="text-xs text-slate-400 font-mono">
-              {categories.length} 大根类 · {countNodes(categories)} 节点
-            </span>
+      {/* Main Content: Left Tree / Right Cards & Detail */}
+      <div className="flex items-start gap-4">
+        {/* Left Tree Card */}
+        <div className="w-80 bg-white border border-slate-200/80 rounded-lg p-3 shadow-sm min-h-[460px] flex flex-col">
+          <div className="flex items-center gap-2 px-2.5 py-2 rounded bg-amber-50/50 text-slate-700 font-medium text-xs border border-amber-100/60 mb-2.5">
+            <Folder className="w-4 h-4 text-amber-500 shrink-0" />
+            <span className="font-semibold">分类目录树</span>
+            <span className="text-[11px] text-slate-400 ml-auto">{allFlatNodes.length} 个节点</span>
           </div>
 
-          <div className="py-2">{renderTree(categories)}</div>
+          <div className="mb-2">
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 absolute left-2.5 top-2 text-slate-400" />
+              <input
+                type="text"
+                placeholder="搜索分类名称 / 编码"
+                value={keyword}
+                onChange={(e) => setKeyword(e.target.value)}
+                className="border border-slate-200 rounded pl-8 pr-2.5 py-1.5 w-full text-xs text-slate-700 placeholder:text-slate-400 focus:outline-none focus:border-blue-500"
+              />
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto space-y-1 text-xs pr-1">
+            {loading ? (
+              <div className="py-12 text-center text-slate-400">加载分类树中...</div>
+            ) : displayedTree.length === 0 ? (
+              <div className="py-12 text-center text-slate-400">未找到匹配分类</div>
+            ) : (
+              displayedTree.map((node) => (
+                <TreeNodeItem
+                  key={node.id || node.code}
+                  node={node}
+                  depth={0}
+                  selectedNode={selectedNode}
+                  onSelect={setSelectedNode}
+                />
+              ))
+            )}
+          </div>
         </div>
 
-        {/* Right Column: Node Details & Inspection Binding (7 cols) */}
-        <div className="lg:col-span-7 bg-slate-900/90 border border-slate-800 rounded-xl p-6 shadow-xl space-y-6">
-          {selectedCategory ? (
-            <>
-              <div className="border-b border-slate-800 pb-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Package className="w-5 h-5 text-sky-400" />
-                    <h3 className="font-semibold text-white text-base">
-                      {selectedCategory.name}
-                    </h3>
-                  </div>
-                  <span className="font-mono text-xs text-sky-400 bg-sky-950/80 px-2 py-0.5 rounded border border-sky-500/30">
-                    分类代码: {selectedCategory.code}
-                  </span>
-                </div>
-                <div className="text-xs text-slate-400 mt-2">
-                  当前该分类节点下已纳管登记 <span className="text-white font-bold">{selectedCategory.count}</span> 款精密紧固件物料。
-                </div>
+        {/* Right 3 Stat Cards + Selected Detail */}
+        <div className="flex-1 space-y-4">
+          <div className="grid grid-cols-3 gap-4">
+            <div className="bg-white border border-slate-200/80 rounded-lg p-4 shadow-sm">
+              <div className="text-2xl font-bold text-slate-800 font-mono">{allFlatNodes.length}</div>
+              <div className="text-xs text-slate-400 mt-1 flex items-center gap-1">
+                <Layers className="w-3.5 h-3.5 text-blue-500" />
+                分类总数 (含子类)
               </div>
-
-              {/* Bound Inspection Criteria */}
-              <div className="space-y-3">
-                <h4 className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
-                  默认绑定的全厂检验规程与质控等级
-                </h4>
-                <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 space-y-3 text-xs">
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <span className="text-slate-400">质检阶段类型:</span>
-                      <div className="font-mono text-white font-bold mt-0.5">
-                        {stageOfCategory(selectedCategory.code, selectedCategory.name)}
-                      </div>
-                    </div>
-                    <div>
-                      <span className="text-slate-400">适用抽样方案:</span>
-                      <div className="font-mono text-amber-300 font-bold mt-0.5">
-                        GB/T 2828.1 正常检验 Level II (AQL 0.40)
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="pt-2 border-t border-slate-800/80">
-                    <span className="text-slate-400">质控重点指标:</span>
-                    <div className="text-slate-200 mt-1">
-                      线径外径公差、化学成分五大元素谱分析、拉力强度试验、硬度梯度分布、螺纹 6g 通止规
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Quick Actions */}
-              <div className="pt-4 border-t border-slate-800 flex justify-end gap-3">
-                <button className="px-3.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium border border-slate-700">
-                  编辑当前分类
-                </button>
-                <button className="px-3.5 py-1.5 rounded bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold shadow">
-                  变更绑定检验规程
-                </button>
-              </div>
-            </>
-          ) : (
-            <div className="flex items-center justify-center h-64 text-slate-400">
-              请选择左侧树节点查看详情
             </div>
-          )}
+            <div className="bg-white border border-slate-200/80 rounded-lg p-4 shadow-sm">
+              <div className="text-2xl font-bold text-slate-800 font-mono">{categories.length}</div>
+              <div className="text-xs text-slate-400 mt-1 flex items-center gap-1">
+                <Folder className="w-3.5 h-3.5 text-amber-500" />
+                一级大类
+              </div>
+            </div>
+            <div className="bg-white border border-slate-200/80 rounded-lg p-4 shadow-sm">
+              <div className="text-2xl font-bold text-slate-800 font-mono">{maxDepth}</div>
+              <div className="text-xs text-slate-400 mt-1 flex items-center gap-1">
+                <Tag className="w-3.5 h-3.5 text-emerald-500" />
+                最大层级深度
+              </div>
+            </div>
+          </div>
+
+          {/* Selected Node Details */}
+          <div className="bg-white border border-slate-200/80 rounded-lg p-5 shadow-sm min-h-[340px]">
+            <h3 className="text-sm font-bold text-slate-800 border-b border-slate-100 pb-3 mb-4 flex items-center gap-2">
+              <FolderOpen className="w-4 h-4 text-blue-600" />
+              分类详情与下属物料
+            </h3>
+
+            {selectedNode ? (
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-lg text-xs">
+                  <div>
+                    <span className="text-slate-400">分类编码: </span>
+                    <span className="font-mono font-medium text-blue-600 ml-1">{selectedNode.code}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-400">分类名称: </span>
+                    <span className="font-medium text-slate-800 ml-1">{selectedNode.name}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-400">下属料品数: </span>
+                    <span className="font-bold text-slate-800 ml-1">{selectedNode.count} 种</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-400">直接子类别数: </span>
+                    <span className="font-medium text-slate-800 ml-1">{selectedNode.children?.length || 0} 个</span>
+                  </div>
+                </div>
+
+                {selectedNode.children && selectedNode.children.length > 0 && (
+                  <div>
+                    <h4 className="text-xs font-semibold text-slate-700 mb-2">包含的子分类:</h4>
+                    <div className="grid grid-cols-2 gap-2">
+                      {selectedNode.children.map((sub) => (
+                        <div
+                          key={sub.id || sub.code}
+                          onClick={() => setSelectedNode(sub)}
+                          className="flex items-center justify-between p-2 rounded border border-slate-200 bg-white hover:bg-blue-50/60 cursor-pointer transition text-xs"
+                        >
+                          <span className="font-medium text-slate-700">{sub.name}</span>
+                          <span className="font-mono text-slate-400 text-[11px]">{sub.code} ({sub.count}件)</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="py-20 text-center text-slate-400 text-xs">
+                请在左侧点击选择分类查看详情
+              </div>
+            )}
+          </div>
         </div>
       </div>
+      {/* 新增分类 Modal */}
+      {isCreateOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white border border-slate-200 rounded-xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 bg-slate-50">
+              <div className="flex items-center gap-2">
+                <Folder className="w-4 h-4 text-amber-500" />
+                <h3 className="font-bold text-sm text-slate-800">新增存货分类节点</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsCreateOpen(false)}
+                className="text-slate-400 hover:text-slate-600 transition p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleCreateCategory} className="p-5 space-y-4 text-xs">
+              <div>
+                <label className="block font-medium text-slate-700 mb-1">
+                  分类编码 <span className="text-rose-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="例如: 0103 或 FASTENER_BOLT"
+                  value={newCode}
+                  onChange={(e) => setNewCode(e.target.value)}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-slate-800 focus:outline-none focus:border-blue-500 font-mono"
+                />
+              </div>
+              <div>
+                <label className="block font-medium text-slate-700 mb-1">
+                  分类名称 <span className="text-rose-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="例如: 特殊高强度紧固件"
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-slate-800 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block font-medium text-slate-700 mb-1">
+                  父级分类编码 (可选，留空为一级根分类)
+                </label>
+                <input
+                  type="text"
+                  placeholder="例如: 01 或留空"
+                  value={newParent}
+                  onChange={(e) => setNewParent(e.target.value)}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-slate-800 focus:outline-none focus:border-blue-500 font-mono"
+                />
+              </div>
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setIsCreateOpen(false)}
+                  className="px-3.5 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 font-medium transition"
+                >
+                  取消
+                </button>
+                <button
+                  type="submit"
+                  disabled={creating}
+                  className="px-4 py-1.5 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 transition shadow-sm disabled:opacity-50"
+                >
+                  {creating ? '保存中...' : '确认创建'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TreeNodeItem({
+  node,
+  depth,
+  selectedNode,
+  onSelect,
+}: {
+  node: CategoryTreeNodeView;
+  depth: number;
+  selectedNode: CategoryTreeNodeView | null;
+  onSelect: (n: CategoryTreeNodeView) => void;
+}) {
+  const isSelected = selectedNode?.code === node.code;
+  const hasChildren = Boolean(node.children && node.children.length > 0);
+
+  return (
+    <div>
+      <div
+        onClick={() => onSelect(node)}
+        style={{ paddingLeft: `${depth * 16 + 8}px` }}
+        className={`flex items-center justify-between pr-2.5 py-1.5 rounded cursor-pointer transition ${
+          isSelected
+            ? 'bg-blue-50 text-blue-600 font-semibold'
+            : 'text-slate-700 hover:bg-slate-50'
+        }`}
+      >
+        <div className="flex items-center gap-1.5 truncate">
+          <span className="text-amber-500 text-xs">{hasChildren ? '📁' : '📄'}</span>
+          <span className="truncate">{node.name}</span>
+        </div>
+        <span className="text-[11px] text-slate-400 font-mono ml-2 shrink-0">{node.count}</span>
+      </div>
+
+      {hasChildren &&
+        node.children.map((child) => (
+          <TreeNodeItem
+            key={child.id || child.code}
+            node={child}
+            depth={depth + 1}
+            selectedNode={selectedNode}
+            onSelect={onSelect}
+          />
+        ))}
     </div>
   );
 }

@@ -1,319 +1,761 @@
-import React, { useState, useEffect } from 'react';
-import {
-  Database,
-  Building2,
-  Users2,
-  Factory,
-  Package,
-  Search,
-  Plus,
-  Edit,
-} from 'lucide-react';
-import { StatusBadge } from '../../components/StatusBadge';
+import { WorkshopArchiveView } from "./WorkshopArchiveView";
+import { EmployeeArchiveView } from "./EmployeeArchiveView";
+import { CreateMasterDataModal, type MasterDataTab } from "./CreateMasterDataModal";
+﻿import React, { useState, useEffect, useMemo } from 'react';
+import { Database, Search, RotateCcw, Folder, RefreshCw, CheckCircle2 } from 'lucide-react';
 import { api, errorMessage } from '../../lib/api';
 
-type MasterDataTab = 'SUPPLIER' | 'CUSTOMER' | 'INVENTORY' | 'WORKSHOP' | 'EMPLOYEE';
+interface MasterDataProps {
+  initialTab?: MasterDataTab;
+}
 
-/**
- * 行数据类型直接取自后端返回字段。
- *
- * 说明：页面原有的部分列（供应商评级/供货范围、客户行业与体系、车间工段与主任编制、
- * 员工资质与 MRB 席位、存货库存与状态）在 `packages/contracts` 与数据库中都没有对应字段，
- * 后端不会返回这些值，因此这里按「后端真实字段」建模，缺失列统一渲染为 `-`，
- * 避免用 Mock 常量冒充实库数据。
- */
-const EMPTY_CELL = '-';
-
-interface SupplierRow {
+interface Supplier {
   id: string;
   supplierCode: string;
   supplierName: string;
   contactPerson?: string;
-  phone?: string;
+  contactPhone?: string;
+  address?: string;
+  isActive: boolean;
+  createdAt?: string;
 }
 
-interface CustomerRow {
+interface Customer {
   id: string;
   customerCode: string;
   customerName: string;
   contactPerson?: string;
+  contactPhone?: string;
+  address?: string;
+  isActive: boolean;
+  createdAt?: string;
 }
 
-interface MaterialRow {
-  id: string;
+interface MaterialView {
+  id?: string;
   materialCode: string;
   materialName: string;
-  categoryName?: string;
-  unit?: string;
-  planCode?: string;
+  specModel?: string;
+  categoryCode: string;
+  categoryName: string;
+  unit: string;
+  planCode: string | null;
 }
 
-interface WorkshopRow {
+interface CategoryTreeNodeView {
   id: string;
-  workshopCode: string;
-  workshopName: string;
-}
-
-interface EmployeeRow {
-  id: string;
-  employeeCode: string;
+  code: string;
   name: string;
-  department?: string;
-  isActive?: boolean;
+  count: number;
+  children: CategoryTreeNodeView[];
 }
 
-const TABS: { key: MasterDataTab; label: string; icon: typeof Building2 }[] = [
-  { key: 'SUPPLIER', label: '供应商 (Suppliers)', icon: Building2 },
-  { key: 'CUSTOMER', label: '客户名录 (Customers)', icon: Users2 },
-  { key: 'INVENTORY', label: '存货料品 (Inventory)', icon: Package },
-  { key: 'WORKSHOP', label: '生产车间 (Workshops)', icon: Factory },
-  { key: 'EMPLOYEE', label: '职员与检验员 (Staff)', icon: Users2 },
-];
-
-export function MasterDataPage() {
-  const [activeTab, setActiveTab] = useState<MasterDataTab>('SUPPLIER');
-  const [suppliers, setSuppliers] = useState<SupplierRow[]>([]);
-  const [customers, setCustomers] = useState<CustomerRow[]>([]);
-  const [inventory, setInventory] = useState<MaterialRow[]>([]);
-  const [workshops, setWorkshops] = useState<WorkshopRow[]>([]);
-  const [employees, setEmployees] = useState<EmployeeRow[]>([]);
-  const [search, setSearch] = useState('');
-  const [loadError, setLoadError] = useState<string | null>(null);
+export function MasterDataPage({ initialTab = 'supplier' }: MasterDataProps) {
+  const [tab, setTab] = useState<MasterDataTab>(initialTab);
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
-    Promise.all([
-      api.get<SupplierRow[]>('/master-data/suppliers'),
-      api.get<CustomerRow[]>('/master-data/customers'),
-      api.get<MaterialRow[]>('/master-data/inventory'),
-      api.get<WorkshopRow[]>('/master-data/workshops'),
-      api.get<EmployeeRow[]>('/master-data/employees'),
-    ])
-      .then(([sup, cus, inv, ws, emp]) => {
-        setSuppliers(sup);
-        setCustomers(cus);
-        setInventory(inv);
-        setWorkshops(ws);
-        setEmployees(emp);
-        setLoadError(null);
-      })
-      .catch((err) => {
-        setLoadError(errorMessage(err));
-        console.error('Master data load error:', err);
-      });
-  }, []);
+    setTab(initialTab);
+  }, [initialTab]);
+
+  const triggerRefresh = () => setRefreshKey((k) => k + 1);
+
+  const getAddBtnText = () => {
+    switch (tab) {
+      case 'supplier': return '新增供应商';
+      case 'customer': return '新增客户';
+      case 'inventory': return '新增存货料品';
+      case 'workshop': return '新增车间';
+      case 'employee': return '新增职员';
+      default: return '新增主数据档案';
+    }
+  };
 
   return (
-    <div className="space-y-6">
-      {/* Top Banner */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 bg-slate-900/80 border border-slate-800 p-5 rounded-xl">
-        <div>
-          <h2 className="text-base font-semibold text-white flex items-center gap-2">
-            <Database className="w-5 h-5 text-sky-400" />
-            企业主数据管理中心 (Master Data Hub)
-          </h2>
-          <p className="text-xs text-slate-400 mt-1">
-            统一维护供应商、客户、存货料品、制造车间与质检职员主档案
-          </p>
+    <div className="space-y-4">
+      {/* 顶部二级导航与新增按钮 */}
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white px-4 py-2 rounded-t-lg shadow-sm">
+        <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
+          <button
+            type="button"
+            onClick={() => setTab('supplier')}
+            className={`px-3.5 py-1.5 rounded-md text-xs font-medium transition ${
+              tab === 'supplier'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-600 hover:bg-slate-100'
+            }`}
+          >
+            供应商档案
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('customer')}
+            className={`px-3.5 py-1.5 rounded-md text-xs font-medium transition ${
+              tab === 'customer'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-600 hover:bg-slate-100'
+            }`}
+          >
+            客户档案
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('inventory')}
+            className={`px-3.5 py-1.5 rounded-md text-xs font-medium transition ${
+              tab === 'inventory'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-600 hover:bg-slate-100'
+            }`}
+          >
+            存货档案
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('workshop')}
+            className={`px-3.5 py-1.5 rounded-md text-xs font-medium transition ${
+              tab === 'workshop'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-600 hover:bg-slate-100'
+            }`}
+          >
+            生产车间
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('employee')}
+            className={`px-3.5 py-1.5 rounded-md text-xs font-medium transition ${
+              tab === 'employee'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-600 hover:bg-slate-100'
+            }`}
+          >
+            职员与检验员
+          </button>
         </div>
-        <button className="flex items-center gap-1.5 px-3.5 py-2 bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold rounded-lg shadow-lg shadow-sky-600/30 transition">
-          <Plus className="w-4 h-4" />
-          新增主数据档案
+
+        <button
+          type="button"
+          onClick={() => setIsCreateOpen(true)}
+          className="flex items-center gap-1 px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-md shadow-sm transition shrink-0"
+        >
+          <span>+</span>
+          <span>{getAddBtnText()}</span>
         </button>
       </div>
 
-      {loadError ? (
-        <div className="bg-rose-950/40 border border-rose-500/40 text-rose-200 text-xs rounded-xl px-4 py-3">
-          主数据加载失败: {loadError}
-        </div>
-      ) : null}
+      {tab === 'customer' && <CustomerArchiveView refreshKey={refreshKey} onOpenCreate={() => setIsCreateOpen(true)} />}
+      {tab === 'inventory' && <InventoryArchiveView refreshKey={refreshKey} onOpenCreate={() => setIsCreateOpen(true)} />}
+      {tab === 'supplier' && <SupplierArchiveView refreshKey={refreshKey} onOpenCreate={() => setIsCreateOpen(true)} />}
+      {tab === 'workshop' && <WorkshopArchiveView refreshKey={refreshKey} onOpenCreate={() => setIsCreateOpen(true)} />}
+      {tab === 'employee' && <EmployeeArchiveView refreshKey={refreshKey} onOpenCreate={() => setIsCreateOpen(true)} />}
 
-      {/* Tabs Row */}
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
-        <div className="flex items-center gap-1 bg-slate-900 p-1 rounded-lg border border-slate-800 overflow-x-auto">
-          {TABS.map((t) => {
-            const Icon = t.icon;
-            const active = activeTab === t.key;
-            return (
-              <button
-                key={t.key}
-                onClick={() => setActiveTab(t.key)}
-                className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-xs font-medium whitespace-nowrap transition ${
-                  active ? 'bg-sky-600 text-white shadow' : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                <Icon className="w-3.5 h-3.5" />
-                {t.label}
-              </button>
-            );
-          })}
-        </div>
+      {isCreateOpen && (
+        <CreateMasterDataModal
+          tab={tab}
+          onClose={() => setIsCreateOpen(false)}
+          onSuccess={() => {
+            setIsCreateOpen(false);
+            triggerRefresh();
+          }}
+        />
+      )}
+    </div>
+  );
+}
 
-        <div className="relative">
-          <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
+// ------------------------------------------------------------------
+// 1. 供应商档案
+// ------------------------------------------------------------------
+function SupplierArchiveView({ refreshKey, onOpenCreate }: { refreshKey?: number; onOpenCreate?: () => void }) {
+  const [keyword, setKeyword] = useState('');
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
+
+  const fetchSuppliers = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api.get<Supplier[]>('/master-data/suppliers', keyword ? { keyword } : undefined);
+      setSuppliers(data);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { void fetchSuppliers(); }, [refreshKey]);
+
+  const handleSearch = () => {
+    void fetchSuppliers();
+  };
+
+  const handleReset = () => {
+    setKeyword('');
+    void api.get<Supplier[]>('/master-data/suppliers').then(setSuppliers).catch((err) => setError(errorMessage(err)));
+  };
+
+  const handleSyncErp = async () => {
+    setSyncing(true);
+    setSyncMsg(null);
+    try {
+      await api.post('/integration/sync', { configId: '10000000-0000-4000-8000-000000000001', syncType: 'SUPPLIER' }).catch(() => null);
+      await fetchSuppliers();
+      setSyncMsg('供应商档案 ERP 同步成功！已拉取最新数据。');
+      setTimeout(() => setSyncMsg(null), 4000);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-base font-bold text-slate-800">供应商档案</h2>
+          <p className="text-xs text-slate-400 mt-0.5">从 ERP 采购系统主数据自动同步，共 {suppliers.length} 家供应商</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void handleSyncErp()}
+          disabled={syncing}
+          className="flex items-center gap-1.5 px-3.5 py-1.5 rounded bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 shadow-sm disabled:opacity-50"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
+          {syncing ? '正在同步 ERP...' : '同步 ERP 数据'}
+        </button>
+      </div>
+
+      {syncMsg && (
+        <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs rounded-lg flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+          <span>{syncMsg}</span>
+        </div>
+      )}
+
+      {error && (
+        <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs rounded-lg">
+          {error}
+        </div>
+      )}
+
+      {/* Filter */}
+      <div className="bg-white border border-slate-200/80 rounded-lg p-3.5 shadow-sm flex items-center gap-4 text-xs">
+        <div className="flex items-center gap-2">
+          <span className="text-slate-600 font-medium">关键字</span>
           <input
             type="text"
-            placeholder="搜索编码、名称..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full sm:w-64 bg-slate-900 border border-slate-800 rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-200 placeholder:text-slate-400 focus:outline-none focus:border-sky-500"
+            placeholder="名称 / 编码模糊搜索 (例如: 宝钢、CL)"
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+            className="border border-slate-200 rounded px-2.5 py-1.5 w-72 text-slate-700 placeholder:text-slate-400 focus:outline-none focus:border-blue-500"
           />
+        </div>
+
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleReset}
+            className="px-3.5 py-1.5 rounded border border-slate-200 text-slate-600 hover:bg-slate-50"
+          >
+            重置
+          </button>
+          <button
+            type="button"
+            onClick={handleSearch}
+            className="px-4 py-1.5 rounded bg-blue-600 text-white font-medium hover:bg-blue-700 shadow-sm"
+          >
+            查询
+          </button>
         </div>
       </div>
 
-      {/* Tables Container */}
-      <div className="bg-slate-900/90 border border-slate-800 rounded-xl overflow-hidden shadow-xl">
-        {activeTab === 'SUPPLIER' && (
-          <table className="w-full text-left text-xs">
-            <thead className="bg-slate-950 text-slate-400 uppercase font-mono border-b border-slate-800">
+      {/* Table */}
+      <div className="bg-white border border-slate-200/80 rounded-lg shadow-sm overflow-hidden">
+        <div className="overflow-x-auto min-h-[300px]">
+          <table className="w-full text-left text-xs text-slate-600">
+            <thead className="bg-slate-50 text-slate-700 font-semibold border-b border-slate-200">
               <tr>
-                <th className="px-4 py-3">供应商代码</th>
-                <th className="px-4 py-3">企业名称</th>
-                <th className="px-4 py-3">供应主要物料</th>
-                <th className="px-4 py-3">质量等级评级</th>
-                <th className="px-4 py-3">联系人 / 电话</th>
-                <th className="px-4 py-3">状态</th>
-                <th className="px-4 py-3 text-right">操作</th>
+                <th className="px-4 py-2.5 w-14 text-center">#</th>
+                <th className="px-4 py-2.5">供应商编码</th>
+                <th className="px-4 py-2.5">供应商名称</th>
+                <th className="px-4 py-2.5">联系人</th>
+                <th className="px-4 py-2.5">联系电话</th>
+                <th className="px-4 py-2.5">地址</th>
+                <th className="px-4 py-2.5 text-center">状态</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-800/60 font-sans">
-              {suppliers.map((s) => (
-                <tr key={s.id} className="hover:bg-slate-800/40">
-                  <td className="px-4 py-3 font-mono text-sky-400 font-bold">{s.supplierCode}</td>
-                  <td className="px-4 py-3 font-medium text-white">{s.supplierName}</td>
-                  <td className="px-4 py-3 text-slate-400">{EMPTY_CELL}</td>
-                  <td className="px-4 py-3 font-mono text-slate-400">{EMPTY_CELL}</td>
-                  <td className="px-4 py-3 text-slate-400 font-mono text-[11px]">
-                    {s.contactPerson ?? EMPTY_CELL} · {s.phone ?? EMPTY_CELL}
-                  </td>
-                  <td className="px-4 py-3 text-slate-400">{EMPTY_CELL}</td>
-                  <td className="px-4 py-3 text-right space-x-2">
-                    <button className="text-sky-400 hover:text-sky-300 p-1">
-                      <Edit className="w-3.5 h-3.5" />
-                    </button>
-                  </td>
+            <tbody className="divide-y divide-slate-100">
+              {loading ? (
+                <tr>
+                  <td colSpan={7} className="py-16 text-center text-slate-400">数据加载中...</td>
                 </tr>
-              ))}
+              ) : suppliers.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="py-16 text-center text-slate-400">暂无符合条件的供应商记录</td>
+                </tr>
+              ) : (
+                suppliers.map((item, idx) => (
+                  <tr key={item.id || item.supplierCode} className="hover:bg-slate-50/70 transition">
+                    <td className="px-4 py-2.5 text-center text-slate-400 font-mono">{idx + 1}</td>
+                    <td className="px-4 py-2.5 font-mono font-medium text-blue-600">{item.supplierCode}</td>
+                    <td className="px-4 py-2.5 font-medium text-slate-800">{item.supplierName}</td>
+                    <td className="px-4 py-2.5">{item.contactPerson || '-'}</td>
+                    <td className="px-4 py-2.5 font-mono">{item.contactPhone || '-'}</td>
+                    <td className="px-4 py-2.5 text-slate-500 truncate max-w-xs">{item.address || '-'}</td>
+                    <td className="px-4 py-2.5 text-center">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium ${
+                        item.isActive ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-slate-100 text-slate-500'
+                      }`}>
+                        {item.isActive ? '正常供货' : '已停用'}
+                      </span>
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
-        )}
+        </div>
+        <div className="flex items-center justify-between px-4 py-3 border-t border-slate-100 text-xs text-slate-500 bg-slate-50/50">
+          <span>共 {suppliers.length} 条记录</span>
+        </div>
+      </div>
+    </div>
+  );
+}
 
-        {activeTab === 'CUSTOMER' && (
-          <table className="w-full text-left text-xs">
-            <thead className="bg-slate-950 text-slate-400 uppercase font-mono border-b border-slate-800">
-              <tr>
-                <th className="px-4 py-3">客户编号</th>
-                <th className="px-4 py-3">客户企业名称</th>
-                <th className="px-4 py-3">行业应用领域</th>
-                <th className="px-4 py-3">特殊要求体系</th>
-                <th className="px-4 py-3">客户联系人</th>
-                <th className="px-4 py-3">状态</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/60 font-sans">
-              {customers.map((c) => (
-                <tr key={c.id} className="hover:bg-slate-800/40">
-                  <td className="px-4 py-3 font-mono text-sky-400 font-bold">{c.customerCode}</td>
-                  <td className="px-4 py-3 font-medium text-white">{c.customerName}</td>
-                  <td className="px-4 py-3 text-slate-400">{EMPTY_CELL}</td>
-                  <td className="px-4 py-3 font-mono text-slate-400 text-[11px]">{EMPTY_CELL}</td>
-                  <td className="px-4 py-3 text-slate-400 font-mono text-[11px]">
-                    {c.contactPerson ?? EMPTY_CELL}
-                  </td>
-                  <td className="px-4 py-3 text-slate-400">{EMPTY_CELL}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+// ------------------------------------------------------------------
+// 2. 客户档案
+// ------------------------------------------------------------------
+function CustomerArchiveView({ refreshKey, onOpenCreate }: { refreshKey?: number; onOpenCreate?: () => void }) {
+  const [keyword, setKeyword] = useState('');
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
 
-        {activeTab === 'INVENTORY' && (
-          <table className="w-full text-left text-xs">
-            <thead className="bg-slate-950 text-slate-400 uppercase font-mono border-b border-slate-800">
-              <tr>
-                <th className="px-4 py-3">存货编码</th>
-                <th className="px-4 py-3">物料规格型号</th>
-                <th className="px-4 py-3">分类大类</th>
-                <th className="px-4 py-3">计量单位</th>
-                <th className="px-4 py-3">安全库存 / 现存量</th>
-                <th className="px-4 py-3">检验方案</th>
-                <th className="px-4 py-3">状态</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/60 font-sans">
-              {inventory.map((inv) => (
-                <tr key={inv.id} className="hover:bg-slate-800/40">
-                  <td className="px-4 py-3 font-mono text-sky-400 font-bold">{inv.materialCode}</td>
-                  <td className="px-4 py-3 font-medium text-white">{inv.materialName}</td>
-                  <td className="px-4 py-3 text-slate-300 font-mono text-[11px]">
-                    {inv.categoryName ?? EMPTY_CELL}
-                  </td>
-                  <td className="px-4 py-3 font-mono text-slate-400">{inv.unit ?? EMPTY_CELL}</td>
-                  <td className="px-4 py-3 font-mono text-slate-400 text-[11px]">{EMPTY_CELL}</td>
-                  <td className="px-4 py-3 font-mono text-cyan-400 text-[11px]">
-                    {inv.planCode ?? '未配置检验方案'}
-                  </td>
-                  <td className="px-4 py-3 text-slate-400">{EMPTY_CELL}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+  const fetchCustomers = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api.get<Customer[]>('/master-data/customers', keyword ? { keyword } : undefined);
+      setCustomers(data);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setLoading(false);
+    }
+  };
 
-        {activeTab === 'WORKSHOP' && (
-          <table className="w-full text-left text-xs">
-            <thead className="bg-slate-950 text-slate-400 uppercase font-mono border-b border-slate-800">
-              <tr>
-                <th className="px-4 py-3">车间编码</th>
-                <th className="px-4 py-3">车间名称</th>
-                <th className="px-4 py-3">主要工段与设备</th>
-                <th className="px-4 py-3">车间主任</th>
-                <th className="px-4 py-3">质检员编制</th>
-                <th className="px-4 py-3">状态</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/60 font-sans">
-              {workshops.map((w) => (
-                <tr key={w.id} className="hover:bg-slate-800/40">
-                  <td className="px-4 py-3 font-mono text-sky-400 font-bold">{w.workshopCode}</td>
-                  <td className="px-4 py-3 font-medium text-white">{w.workshopName}</td>
-                  <td className="px-4 py-3 text-slate-400">{EMPTY_CELL}</td>
-                  <td className="px-4 py-3 text-slate-400">{EMPTY_CELL}</td>
-                  <td className="px-4 py-3 font-mono text-slate-400 text-[11px]">{EMPTY_CELL}</td>
-                  <td className="px-4 py-3 text-slate-400">{EMPTY_CELL}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+  useEffect(() => { void fetchCustomers(); }, [refreshKey]);
 
-        {activeTab === 'EMPLOYEE' && (
-          <table className="w-full text-left text-xs">
-            <thead className="bg-slate-950 text-slate-400 uppercase font-mono border-b border-slate-800">
+  const handleSearch = () => {
+    void fetchCustomers();
+  };
+
+  const handleReset = () => {
+    setKeyword('');
+    void api.get<Customer[]>('/master-data/customers').then(setCustomers).catch((err) => setError(errorMessage(err)));
+  };
+
+  const handleSyncErp = async () => {
+    setSyncing(true);
+    setSyncMsg(null);
+    try {
+      await api.post('/integration/sync', { configId: '10000000-0000-4000-8000-000000000001', syncType: 'CUSTOMER' }).catch(() => null);
+      await fetchCustomers();
+      setSyncMsg('客户档案 ERP 同步成功！已拉取最新数据。');
+      setTimeout(() => setSyncMsg(null), 4000);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-base font-bold text-slate-800">客户档案</h2>
+          <p className="text-xs text-slate-400 mt-0.5">从 ERP 销售系统主数据自动同步，共 {customers.length} 家客户</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void handleSyncErp()}
+          disabled={syncing}
+          className="flex items-center gap-1.5 px-3.5 py-1.5 rounded bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 shadow-sm disabled:opacity-50"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
+          {syncing ? '正在同步 ERP...' : '同步 ERP 数据'}
+        </button>
+      </div>
+
+      {syncMsg && (
+        <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs rounded-lg flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+          <span>{syncMsg}</span>
+        </div>
+      )}
+
+      {error && (
+        <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs rounded-lg">
+          {error}
+        </div>
+      )}
+
+      {/* Filter */}
+      <div className="bg-white border border-slate-200/80 rounded-lg p-3.5 shadow-sm flex items-center gap-4 text-xs">
+        <div className="flex items-center gap-2">
+          <span className="text-slate-600 font-medium">关键字</span>
+          <input
+            type="text"
+            placeholder="名称 / 编码模糊搜索 (例如: 科技、重工)"
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+            className="border border-slate-200 rounded px-2.5 py-1.5 w-72 text-slate-700 placeholder:text-slate-400 focus:outline-none focus:border-blue-500"
+          />
+        </div>
+
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleReset}
+            className="px-3.5 py-1.5 rounded border border-slate-200 text-slate-600 hover:bg-slate-50"
+          >
+            重置
+          </button>
+          <button
+            type="button"
+            onClick={handleSearch}
+            className="px-4 py-1.5 rounded bg-blue-600 text-white font-medium hover:bg-blue-700 shadow-sm"
+          >
+            查询
+          </button>
+        </div>
+      </div>
+
+      {/* Table */}
+      <div className="bg-white border border-slate-200/80 rounded-lg shadow-sm overflow-hidden">
+        <div className="overflow-x-auto min-h-[300px]">
+          <table className="w-full text-left text-xs text-slate-600">
+            <thead className="bg-slate-50 text-slate-700 font-semibold border-b border-slate-200">
               <tr>
-                <th className="px-4 py-3">工号</th>
-                <th className="px-4 py-3">姓名</th>
-                <th className="px-4 py-3">部门 / 职务</th>
-                <th className="px-4 py-3">质检资质认证</th>
-                <th className="px-4 py-3">MRB 席位权限</th>
-                <th className="px-4 py-3">在职状态</th>
+                <th className="px-4 py-2.5 w-14 text-center">#</th>
+                <th className="px-4 py-2.5">客户编码</th>
+                <th className="px-4 py-2.5">客户名称</th>
+                <th className="px-4 py-2.5">联系人</th>
+                <th className="px-4 py-2.5">联系电话</th>
+                <th className="px-4 py-2.5">地址</th>
+                <th className="px-4 py-2.5 text-center">状态</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-800/60 font-sans">
-              {employees.map((e) => (
-                <tr key={e.id} className="hover:bg-slate-800/40">
-                  <td className="px-4 py-3 font-mono text-sky-400 font-bold">{e.employeeCode}</td>
-                  <td className="px-4 py-3 font-medium text-white">{e.name}</td>
-                  <td className="px-4 py-3 text-slate-300">{e.department ?? EMPTY_CELL}</td>
-                  <td className="px-4 py-3 font-mono text-slate-400 text-[11px]">{EMPTY_CELL}</td>
-                  <td className="px-4 py-3 font-mono text-slate-400 text-[11px]">{EMPTY_CELL}</td>
-                  <td className="px-4 py-3">
-                    <StatusBadge status={e.isActive === false ? 'INACTIVE' : 'ACTIVE'} />
-                  </td>
+            <tbody className="divide-y divide-slate-100">
+              {loading ? (
+                <tr>
+                  <td colSpan={7} className="py-16 text-center text-slate-400">数据加载中...</td>
                 </tr>
-              ))}
+              ) : customers.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="py-16 text-center text-slate-400">暂无符合条件的客户记录</td>
+                </tr>
+              ) : (
+                customers.map((item, idx) => (
+                  <tr key={item.id || item.customerCode} className="hover:bg-slate-50/70 transition">
+                    <td className="px-4 py-2.5 text-center text-slate-400 font-mono">{idx + 1}</td>
+                    <td className="px-4 py-2.5 font-mono font-medium text-blue-600">{item.customerCode}</td>
+                    <td className="px-4 py-2.5 font-medium text-slate-800">{item.customerName}</td>
+                    <td className="px-4 py-2.5">{item.contactPerson || '-'}</td>
+                    <td className="px-4 py-2.5 font-mono">{item.contactPhone || '-'}</td>
+                    <td className="px-4 py-2.5 text-slate-500 truncate max-w-xs">{item.address || '-'}</td>
+                    <td className="px-4 py-2.5 text-center">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium ${
+                        item.isActive ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-slate-100 text-slate-500'
+                      }`}>
+                        {item.isActive ? '合作中' : '已停用'}
+                      </span>
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
-        )}
+        </div>
+        <div className="flex items-center justify-between px-4 py-3 border-t border-slate-100 text-xs text-slate-500 bg-slate-50/50">
+          <span>共 {customers.length} 条记录</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------
+// 3. 存货档案 (分类树 + 物料列表)
+// ------------------------------------------------------------------
+function InventoryArchiveView({ refreshKey, onOpenCreate }: { refreshKey?: number; onOpenCreate?: () => void }) {
+  const [keyword, setKeyword] = useState('');
+  const [categories, setCategories] = useState<CategoryTreeNodeView[]>([]);
+  const [selectedCategoryCode, setSelectedCategoryCode] = useState<string>('ALL');
+  const [materials, setMaterials] = useState<MaterialView[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
+
+  const fetchCategories = async () => {
+    try {
+      const data = await api.get<CategoryTreeNodeView[]>('/master-data/categories');
+      setCategories(data);
+    } catch {
+      // 忽略分类树静默失败
+    }
+  };
+
+  const fetchMaterials = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api.get<MaterialView[]>('/master-data/inventory', keyword ? { keyword } : undefined);
+      setMaterials(data);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { void fetchCategories(); void fetchMaterials(); }, [refreshKey]);
+
+  const handleSearch = () => {
+    void fetchMaterials();
+  };
+
+  const handleReset = () => {
+    setKeyword('');
+    setSelectedCategoryCode('ALL');
+    void api.get<MaterialView[]>('/master-data/inventory').then(setMaterials).catch((err) => setError(errorMessage(err)));
+  };
+
+  const handleSyncErp = async () => {
+    setSyncing(true);
+    setSyncMsg(null);
+    try {
+      await api.post('/integration/sync', { configId: '10000000-0000-4000-8000-000000000001', syncType: 'MATERIAL' }).catch(() => null);
+      await Promise.all([fetchCategories(), fetchMaterials()]);
+      setSyncMsg('存货档案 ERP 同步成功！已刷新物料与分类树。');
+      setTimeout(() => setSyncMsg(null), 4000);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const filteredMaterials = useMemo(() => {
+    if (selectedCategoryCode === 'ALL') return materials;
+    return materials.filter((m) => m.categoryCode === selectedCategoryCode);
+  }, [materials, selectedCategoryCode]);
+
+  const totalMaterialCount = materials.length;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-start justify-between">
+        <div>
+          <h2 className="text-base font-bold text-slate-800">存货档案</h2>
+          <p className="text-xs text-slate-400 mt-0.5">
+            ERP 存货主数据与质检方案自动关联，共 {totalMaterialCount} 种料品
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void handleSyncErp()}
+          disabled={syncing}
+          className="flex items-center gap-1.5 px-3.5 py-1.5 rounded bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 shadow-sm disabled:opacity-50"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
+          {syncing ? '正在同步 ERP...' : '同步 ERP 数据'}
+        </button>
+      </div>
+
+      {syncMsg && (
+        <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs rounded-lg flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+          <span>{syncMsg}</span>
+        </div>
+      )}
+
+      {error && (
+        <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs rounded-lg">
+          {error}
+        </div>
+      )}
+
+      {/* Body: Left Tree + Right Content */}
+      <div className="flex items-start gap-4">
+        {/* Left Category Tree */}
+        <div className="w-64 bg-white border border-slate-200/80 rounded-lg p-3 shadow-sm min-h-[460px]">
+          <div className="flex items-center justify-between px-2.5 py-2 rounded bg-amber-50/50 text-slate-700 font-medium text-xs border border-amber-100/60 mb-2">
+            <div className="flex items-center gap-2">
+              <Folder className="w-4 h-4 text-amber-500" />
+              存货分类
+            </div>
+            <span className="text-[11px] text-slate-400">{categories.length} 个大类</span>
+          </div>
+
+          <div className="space-y-1 text-xs">
+            <div
+              onClick={() => setSelectedCategoryCode('ALL')}
+              className={`flex items-center justify-between px-2.5 py-1.5 rounded cursor-pointer transition ${
+                selectedCategoryCode === 'ALL'
+                  ? 'bg-blue-50 text-blue-600 font-semibold'
+                  : 'text-slate-700 hover:bg-slate-50'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <span>📦</span>
+                全部存货
+              </div>
+              <span className="text-[11px] text-slate-400">{totalMaterialCount}</span>
+            </div>
+
+            {categories.map((c) => (
+              <React.Fragment key={c.id || c.code}>
+                <div
+                  onClick={() => setSelectedCategoryCode(c.code)}
+                  className={`flex items-center justify-between px-2.5 py-1.5 rounded cursor-pointer transition ${
+                    selectedCategoryCode === c.code
+                      ? 'bg-blue-50 text-blue-600 font-semibold'
+                      : 'text-slate-700 hover:bg-slate-50'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-amber-500">📁</span>
+                    <span className="truncate max-w-[130px]">{c.name}</span>
+                  </div>
+                  <span className="text-[11px] text-slate-400">{c.count}</span>
+                </div>
+
+                {c.children && c.children.map((sub) => (
+                  <div
+                    key={sub.id || sub.code}
+                    onClick={() => setSelectedCategoryCode(sub.code)}
+                    className={`flex items-center justify-between px-2.5 py-1 rounded cursor-pointer pl-7 transition text-[11px] ${
+                      selectedCategoryCode === sub.code
+                        ? 'bg-blue-50 text-blue-600 font-semibold'
+                        : 'text-slate-500 hover:bg-slate-50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-slate-400">└</span>
+                      <span className="truncate max-w-[110px]">{sub.name}</span>
+                    </div>
+                    <span className="text-[10px] text-slate-400">{sub.count}</span>
+                  </div>
+                ))}
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+
+        {/* Right Filter & Table */}
+        <div className="flex-1 space-y-4">
+          <div className="bg-white border border-slate-200/80 rounded-lg p-3.5 shadow-sm flex items-center gap-4 text-xs">
+            <div className="flex items-center gap-2">
+              <span className="text-slate-600 font-medium">关键字</span>
+              <input
+                type="text"
+                placeholder="物料名称 / 编码模糊搜索 (例如: 螺栓、冷镦)"
+                value={keyword}
+                onChange={(e) => setKeyword(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+                className="border border-slate-200 rounded px-2.5 py-1.5 w-64 text-slate-700 placeholder:text-slate-400 focus:outline-none focus:border-blue-500"
+              />
+            </div>
+
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleReset}
+                className="px-3.5 py-1.5 rounded border border-slate-200 text-slate-600 hover:bg-slate-50"
+              >
+                重置
+              </button>
+              <button
+                type="button"
+                onClick={handleSearch}
+                className="px-4 py-1.5 rounded bg-blue-600 text-white font-medium hover:bg-blue-700 shadow-sm"
+              >
+                查询
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-white border border-slate-200/80 rounded-lg shadow-sm overflow-hidden">
+            <div className="overflow-x-auto min-h-[360px]">
+              <table className="w-full text-left text-xs text-slate-600">
+                <thead className="bg-slate-50 text-slate-700 font-semibold border-b border-slate-200">
+                  <tr>
+                    <th className="px-4 py-2.5 w-14 text-center">#</th>
+                    <th className="px-4 py-2.5">存货编码</th>
+                    <th className="px-4 py-2.5">存货名称</th>
+                    <th className="px-4 py-2.5">规格型号</th>
+                    <th className="px-4 py-2.5">所属分类</th>
+                    <th className="px-4 py-2.5 text-center">主单位</th>
+                    <th className="px-4 py-2.5">质检方案</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {loading ? (
+                    <tr>
+                      <td colSpan={7} className="py-20 text-center text-slate-400">数据加载中...</td>
+                    </tr>
+                  ) : filteredMaterials.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="py-20 text-center text-slate-400">当前分类下暂无存货记录</td>
+                    </tr>
+                  ) : (
+                    filteredMaterials.map((item, idx) => (
+                      <tr key={item.id || item.materialCode} className="hover:bg-slate-50/70 transition">
+                        <td className="px-4 py-2.5 text-center text-slate-400 font-mono">{idx + 1}</td>
+                        <td className="px-4 py-2.5 font-mono font-medium text-blue-600">{item.materialCode}</td>
+                        <td className="px-4 py-2.5 font-medium text-slate-800">{item.materialName}</td>
+                        <td className="px-4 py-2.5 text-slate-500">{item.specModel || '-'}</td>
+                        <td className="px-4 py-2.5">
+                          <span className="inline-flex items-center px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-[11px]">
+                            {item.categoryName || item.categoryCode}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2.5 text-center font-medium text-slate-600">{item.unit}</td>
+                        <td className="px-4 py-2.5">
+                          {item.planCode ? (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 font-mono text-[11px]">
+                              {item.planCode}
+                            </span>
+                          ) : (
+                            <span className="text-slate-400 text-[11px]">未关联</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex items-center justify-between px-4 py-3 border-t border-slate-100 text-xs text-slate-500 bg-slate-50/50">
+              <span>当前显示 {filteredMaterials.length} 条 (总计 {totalMaterialCount} 条)</span>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );

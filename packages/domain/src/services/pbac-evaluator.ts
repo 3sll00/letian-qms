@@ -23,16 +23,29 @@ export class PBACEvaluator {
     targetMaterialCode: string;
     targetSupplierCode?: string;
   }): boolean {
+    return this.findMatchingRule(params) !== null;
+  }
+
+  /**
+   * 返回第一条命中的生效规则（权限校验工具需要展示"命中了哪条规则"）。
+   * 判定语义与 hasPermission 完全一致：任一启用 policy 匹配即返回该 policy，否则 null。
+   */
+  public static findMatchingRule(params: {
+    permissions: readonly MaterialPermission[];
+    targetCategory: string;
+    targetMaterialCode: string;
+    targetSupplierCode?: string;
+  }): MaterialPermission | null {
     const { permissions, targetCategory, targetMaterialCode, targetSupplierCode } = params;
 
     if (!permissions || permissions.length === 0) {
-      return false;
+      return null;
     }
 
-    return permissions.some(policy => {
+    for (const policy of permissions) {
       // 0. 跳过已停用的权限策略（isActive=false 不授予任何访问权）
       if (policy.isActive === false) {
-        return false;
+        continue;
       }
 
       // 1. 评估物料分类维度
@@ -42,7 +55,7 @@ export class PBACEvaluator {
         policy.materialCategories.includes(targetCategory);
 
       if (!categoryMatched) {
-        return false;
+        continue;
       }
 
       // 2. 评估物料编码维度
@@ -52,7 +65,7 @@ export class PBACEvaluator {
         policy.materialCodes.includes(targetMaterialCode);
 
       if (!codeMatched) {
-        return false;
+        continue;
       }
 
       // 3. 评估供应商维度
@@ -61,16 +74,20 @@ export class PBACEvaluator {
       const targetHasSupplier = targetSupplierCode !== undefined && targetSupplierCode.trim() !== '';
 
       if (hasSupplierWildcard) {
-        return true;
+        return policy;
       }
 
       // policy 限定了具体供应商：目标必须具备可核对的供应商上下文，否则该 policy 不匹配（拒绝，避免 fail-open）
       if (!targetHasSupplier) {
-        return false;
+        continue;
       }
 
-      return policy.supplierCodes.includes(targetSupplierCode as string);
-    });
+      if (policy.supplierCodes.includes(targetSupplierCode as string)) {
+        return policy;
+      }
+    }
+
+    return null;
   }
 
   /**

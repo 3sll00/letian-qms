@@ -34,8 +34,10 @@ export class CustomerSignOffUseCase {
       }
 
       if (securityCtx) {
+        // 从物料主数据解析真实分类；查不到时 UNKNOWN 不命中任何白名单（fail-closed）
+        const material = await ctx.materials.getMaterialByCode(review.materialCode);
         securityCtx.assertAccess({
-          targetCategory: review.materialCode.split('-')[0] ?? 'STANDARD',
+          targetCategory: material?.categoryCode ?? 'UNKNOWN',
           targetMaterialCode: review.materialCode,
         });
       }

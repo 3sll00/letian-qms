@@ -3,7 +3,7 @@
  *
  * 后端业务路由全部挂载在 `/api/v1` 之下并要求 JWT（`fastify.authenticate`），
  * 因此这里集中处理三件事，页面只关心路径与返回值：
- * 1. 相对路径拼接 `/api/v1` 前缀（开发态由 Vite `server.proxy` 转发到 API 进程）；
+ * 1. 基址解析（`resolveApiBase`）：浏览器同源用相对路径，桌面端用「服务器设置」中配置的绝对地址；
  * 2. 开发态登录取令牌并缓存，请求自动附带 `Authorization: Bearer`；
  *   收到 401 时清掉缓存令牌重登一次（令牌过期/后端重启场景）；
  * 3. RFC 7807 `application/problem+json` 错误体统一收敛为 ApiError，
@@ -15,11 +15,199 @@ import type { ProblemDetailsSchema } from '@letian/contracts';
 /** 后端 RFC 7807 错误体（Zod schema 为唯一真理源，这里只取其推导类型） */
 type ProblemDetails = z.infer<typeof ProblemDetailsSchema>;
 
-/** 与后端路由前缀保持一致（apps/api/src/app.ts 中的 securedScope 前缀） */
-export const API_BASE = '/api/v1';
+/**
+ * 校验并归一化服务器地址：只接受 http/https；
+ * 只填主机（如 http://192.168.1.10:3000）时自动补 /api/v1 路径；
+ * 非法输入返回 null，由调用方继续回退到下一优先级。
+ */
+function normalizeServerUrl(raw: string | null | undefined): string | null {
+  if (raw === null || raw === undefined) return null;
+  const text = raw.trim();
+  if (text === '') return null;
+  try {
+    const url = new URL(text);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    if (url.pathname === '' || url.pathname === '/') url.pathname = '/api/v1';
+    // 去掉末尾斜杠，保证与 DEV_LOGIN_PATH 等相对路径可以直接字符串拼接
+    return url.toString().replace(/\/+$/, '');
+  } catch {
+    return null;
+  }
+}
 
-/** 开发态登录身份：后端 POST /api/v1/auth/login 在 NODE_ENV=production 时不会注册 */
+/**
+ * API 基地址解析优先级：
+ * 1. 离线 Mock 构建（VITE_USE_MOCK=true）：恒定相对路径，让 MSW 在同源拦截；
+ * 2. 桌面端运行时配置（window.desktop.getServerUrl，Electron「服务器设置」持久化）；
+ * 3. 构建期环境变量 VITE_API_BASE（把服务器地址固化进产物的部署方式）；
+ * 4. 相对路径 /api/v1（浏览器同源：开发态 Vite 代理、生产态 nginx 反代）。
+ */
+function resolveApiBase(): string {
+  if (import.meta.env.VITE_USE_MOCK === 'true') return '/api/v1';
+  const desktop = normalizeServerUrl(
+    typeof window !== 'undefined' ? window.desktop?.getServerUrl?.() : undefined
+  );
+  if (desktop !== null) return desktop;
+  const baked = normalizeServerUrl(import.meta.env.VITE_API_BASE);
+  if (baked !== null) return baked;
+  return '/api/v1';
+}
+
+/** 与后端路由前缀保持一致（apps/api/src/app.ts 中的 securedScope 前缀） */
+export const API_BASE = resolveApiBase();
+
+/** 开发态登录接口：后端 POST /api/v1/auth/login 在 NODE_ENV=production 时不会注册 */
 const DEV_LOGIN_PATH = '/auth/login';
+const AUTH_USERS_PATH = '/auth/users';
+
+/** 登录会话（与后端 LoginResponse.user 对齐） */
+export interface SessionUser {
+  userId: string;
+  userName: string;
+  role: string;
+  roleName?: string | undefined;
+  activeRulesCount?: number | undefined;
+}
+
+/** 登录页可选用户（GET /auth/users，职员档案 + 主角色） */
+export interface AuthUserOption {
+  id: string;
+  name: string;
+  employeeCode?: string | undefined;
+  department?: string | undefined;
+  roleCode?: string | undefined;
+  roleName?: string | undefined;
+}
+
+const TOKEN_STORAGE_KEY = 'letian_qms_token';
+const USER_STORAGE_KEY = 'letian_qms_user';
+
+/** 存储读写兜底：桌面端 file:// 或隐私模式下 localStorage 可能抛异常 */
+function safeStorage(): Storage | null {
+  try {
+    return typeof window !== 'undefined' ? window.localStorage : null;
+  } catch {
+    return null;
+  }
+}
+
+function readStoredSession(): { token: string | null; user: SessionUser | null } {
+  const storage = safeStorage();
+  if (storage === null) return { token: null, user: null };
+  try {
+    const token = storage.getItem(TOKEN_STORAGE_KEY);
+    const raw = storage.getItem(USER_STORAGE_KEY);
+    const user = raw !== null ? (JSON.parse(raw) as SessionUser) : null;
+    return { token, user };
+  } catch {
+    return { token: null, user: null };
+  }
+}
+
+/** 内存会话：登录/登出即变更，request() 从这里读令牌 */
+let session = readStoredSession();
+
+/** 当前登录用户；null 表示未登录（App 据此渲染登录页） */
+export function getCurrentUser(): SessionUser | null {
+  return session.user;
+}
+
+/** 订阅登录态变化（401 被动登出时通知 App 切回登录页） */
+export function subscribeAuthChange(listener: (user: SessionUser | null) => void): () => void {
+  authListeners.add(listener);
+  return () => authListeners.delete(listener);
+}
+const authListeners = new Set<(user: SessionUser | null) => void>();
+
+function emitAuthChange(): void {
+  for (const listener of authListeners) {
+    try {
+      listener(session.user);
+    } catch {
+      /* 单个监听器异常不影响其他订阅者 */
+    }
+  }
+}
+
+function persistSession(token: string, user: SessionUser): void {
+  session = { token, user };
+  const storage = safeStorage();
+  if (storage !== null) {
+    try {
+      storage.setItem(TOKEN_STORAGE_KEY, token);
+      storage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
+    } catch {
+      /* 存储失败不阻断登录（内存会话仍然有效） */
+    }
+  }
+  emitAuthChange();
+}
+
+/** 登录成功写入会话；后端 LoginResponse.user 缺字段时以兜底值补全 */
+function acceptLogin(data: { token?: string; user?: Partial<SessionUser> & { userId?: string; userName?: string; role?: string } }): SessionUser {
+  if (typeof data.token !== 'string' || data.token === '') {
+    throw new ApiError(500, '登录响应缺少 token 字段');
+  }
+  const user: SessionUser = {
+    userId: data.user?.userId ?? '00000000-0000-0000-0000-000000000000',
+    userName: data.user?.userName ?? '未知用户',
+    role: data.user?.role ?? 'GUEST',
+    ...(data.user?.roleName !== undefined ? { roleName: data.user.roleName } : {}),
+    ...(data.user?.activeRulesCount !== undefined ? { activeRulesCount: data.user.activeRulesCount } : {}),
+  };
+  persistSession(data.token, user);
+  return user;
+}
+
+/** 登录页：拉取可选职员列表 */
+export async function fetchAuthUsers(): Promise<AuthUserOption[]> {
+  const res = await fetch(`${API_BASE}${AUTH_USERS_PATH}`);
+  if (!res.ok) {
+    throw await parseErrorResponse(res);
+  }
+  return (await res.json()) as AuthUserOption[];
+}
+
+/** 登录页：按职员 UUID 一键登录 */
+export async function loginUser(userId: string): Promise<SessionUser> {
+  const res = await fetch(`${API_BASE}${DEV_LOGIN_PATH}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId }),
+  });
+  if (!res.ok) {
+    throw await parseErrorResponse(res);
+  }
+  return acceptLogin((await res.json()) as { token?: string; user?: Partial<SessionUser> });
+}
+
+/** Mock 模式兜底：以默认演示身份登录（MSW 拦截 /auth/login，不依赖后端） */
+export async function loginAsDefault(): Promise<SessionUser> {
+  const res = await fetch(`${API_BASE}${DEV_LOGIN_PATH}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  if (!res.ok) {
+    throw new ApiError(res.status, '登录失败：请确认后端服务已启动');
+  }
+  return acceptLogin((await res.json()) as { token?: string; user?: Partial<SessionUser> });
+}
+
+/** 退出登录：清除会话并通知 App 切回登录页 */
+export function logout(): void {
+  session = { token: null, user: null };
+  const storage = safeStorage();
+  if (storage !== null) {
+    try {
+      storage.removeItem(TOKEN_STORAGE_KEY);
+      storage.removeItem(USER_STORAGE_KEY);
+    } catch {
+      /* ignore */
+    }
+  }
+  emitAuthChange();
+}
 
 export class ApiError extends Error {
   public readonly status: number;
@@ -33,39 +221,6 @@ export class ApiError extends Error {
     this.code = code;
     this.detail = detail;
   }
-}
-
-let tokenPromise: Promise<string> | null = null;
-
-/** 取开发态令牌（并发调用共享同一个请求） */
-function loadToken(): Promise<string> {
-  if (tokenPromise === null) {
-    tokenPromise = fetch(`${API_BASE}${DEV_LOGIN_PATH}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: '{}',
-    })
-      .then(async (res) => {
-        if (!res.ok) {
-          throw new ApiError(res.status, '开发态登录失败：请确认后端服务已启动');
-        }
-        const data = (await res.json()) as { token?: string };
-        if (!data.token) {
-          throw new ApiError(500, '开发态登录响应缺少 token 字段');
-        }
-        return data.token;
-      })
-      .catch((err: unknown) => {
-        // 失败不缓存，允许下次请求重试
-        tokenPromise = null;
-        throw err;
-      });
-  }
-  return tokenPromise;
-}
-
-function resetToken(): void {
-  tokenPromise = null;
 }
 
 /** 拼装查询串，忽略 undefined / 空串，避免出现 `?type=&keyword=` 这类空参数 */
@@ -107,15 +262,20 @@ interface RequestOptions {
   body?: unknown;
   /** 需要原始文本（如 CSV 导出）时置 true */
   rawText?: boolean;
+  /** 需要二进制 Blob（如 PDF/Excel 导出）时置 true */
+  rawBlob?: boolean;
   /** 内部递归标记：401 重试用，避免无限循环 */
   retried?: boolean;
 }
 
 async function request<T>(options: RequestOptions): Promise<T> {
-  const token = await loadToken();
+  // 未登录不发业务请求：App 层的登录页门控是主防线，这里兜底防御
+  if (session.token === null) {
+    throw new ApiError(401, '未登录：请先在登录页选择用户');
+  }
   const url = `${API_BASE}${options.path}${buildQuery(options.query)}`;
 
-  const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+  const headers: Record<string, string> = { Authorization: `Bearer ${session.token}` };
   const init: RequestInit = { method: options.method, headers };
   if (options.body !== undefined) {
     headers['Content-Type'] = 'application/json';
@@ -124,15 +284,19 @@ async function request<T>(options: RequestOptions): Promise<T> {
 
   const res = await fetch(url, init);
 
+  // 令牌过期/后端重启：清除会话，App 监听到登出事件后切回登录页
   if (res.status === 401 && options.retried !== true) {
-    resetToken();
-    return request<T>({ ...options, retried: true });
+    logout();
+    throw await parseErrorResponse(res);
   }
 
   if (!res.ok) {
     throw await parseErrorResponse(res);
   }
 
+  if (options.rawBlob === true) {
+    return (await res.blob()) as unknown as T;
+  }
   if (options.rawText === true) {
     return (await res.text()) as unknown as T;
   }
@@ -161,6 +325,10 @@ export const api = {
 
   put: <T>(path: string, body?: unknown) =>
     request<T>({ method: 'PUT', path, ...(body !== undefined ? { body } : {}) }),
+
+  del: <T>(path: string) => request<T>({ method: 'DELETE', path }),
+  postBlob: (path: string, body?: unknown) =>
+    request<Blob>({ method: 'POST', path, rawBlob: true, ...(body !== undefined ? { body } : {}) }),
 };
 
 /** 统一把未知异常转成可展示文案（ApiError 直接给出后端 detail） */

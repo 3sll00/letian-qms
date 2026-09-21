@@ -27,6 +27,14 @@ export interface InspectionOrderRepository {
   findByBatchNo(batchNo: string): Promise<readonly InspectionOrder[]>;
   save(order: InspectionOrder): Promise<void>;
   updateStatus(id: string, status: string, remark?: string): Promise<void>;
+  /**
+   * 申请检验单号流水号：同一 (prefix, dayKey) 上单调递增，从 1 开始。
+   *
+   * 由仓储在**当前事务内**以原子 upsert 实现（依赖数据库行锁），
+   * 保证并发建单不重号；事务回滚时流水号随之回滚（不产生空洞）。
+   * 与 `formatInspectionOrderNo` 配合组成 `{PREFIX}-{YYYYMMDD}-{NNNN}` 单号。
+   */
+  allocateOrderNoSequence(prefix: string, dayKey: string): Promise<number>;
 }
 
 /**

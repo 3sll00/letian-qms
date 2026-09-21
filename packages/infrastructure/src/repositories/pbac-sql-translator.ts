@@ -1,87 +1,128 @@
-import { sql, RawBuilder } from 'kysely';
+import { sql, type Expression, type SqlBool } from 'kysely';
+import type { MaterialPermission } from '@letian/contracts';
 
 /**
- * PBAC 主体上下文（车间范围 / 物料品类范围 / 数据密级上限）。
- * 契约包当前未导出该形状，故在此就地声明并由本模块统一导出。
+ * PBAC 三维权限 → SQL WHERE 翻译器
+ *
+ * 把用户在 material_permissions 里的三维规则（物料分类 / 物料编码 / 供应商）
+ * 翻译成可直接挂在业务查询上的 WHERE 片段，实现读侧行级过滤。
+ *
+ * 语义与领域层 PBACEvaluator 严格对齐：
+ * 1. 没有任何生效规则 => `1 = 0`（fail-closed，什么都看不到）；
+ * 2. 任一规则三维全通配（空数组或含 '*'）=> `1 = 1`（全量放行）；
+ * 3. 多条规则之间 OR 关系；单条规则内部三维 AND 关系；
+ * 4. 供应商维度限定了具体编码时，业务行必须带供应商上下文且命中列表，
+ *    否则该规则不匹配（与评估器"无供应商上下文即拒绝"一致）。
+ *
+ * 物料分类维度通过 materials 主数据子查询换算：业务表普遍只有 material_code，
+ * 分类归属由 materials.category_code 提供，不引入冗余列。
  */
-export interface PbacSubject {
-  subjectId: string;
-  roles: readonly string[];
-  workshops?: readonly string[];
-  materialCategories?: readonly string[];
-  maxConfidentialityLevel?: number;
+
+export interface PbacWhereOptions {
+  /** 业务表引用（含可能的别名），默认 inspection_orders */
+  targetRef?: string;
+  /** 物料主数据表引用（含可能的别名），默认 materials */
+  materialsRef?: string;
+  /** 业务表是否具备 supplier_code 列（MRB、方案等表没有），默认 true */
+  hasSupplierColumn?: boolean;
+}
+
+/** 三维白名单是否为通配：空数组或包含 '*' 都视为不限制 */
+function isWildcard(list: readonly string[] | undefined): boolean {
+  return list === undefined || list.length === 0 || list.includes('*');
+}
+
+/** 规则是否三维全通配（等价于全量放行） */
+export function isFullWildcardRule(rule: MaterialPermission): boolean {
+  return (
+    isWildcard(rule.materialCategories) &&
+    isWildcard(rule.materialCodes) &&
+    isWildcard(rule.supplierCodes)
+  );
+}
+
+/** 规则集合里是否存在生效的全通配规则 */
+export function hasFullWildcard(permissions: readonly MaterialPermission[]): boolean {
+  return permissions.some((rule) => rule.isActive !== false && isFullWildcardRule(rule));
 }
 
 /**
- * PBAC 表字段映射关系配置
+ * 生成三维权限过滤条件。
+ *
+ * @param permissions 用户全部权限规则（未生效规则会被跳过）
+ * @param options 业务表引用 / 供应商列有无
  */
-export interface PbacFieldMapping {
-  /** 车间字段名，默认为 workshopCode 或 workshop_code */
-  workshopField?: string;
-  /** 物料类别字段名，默认为 categoryCode 或 category_code */
-  categoryField?: string;
-  /** 密级字段名，默认为 confidentialityLevel 或 confidentiality_level */
-  confidentialityField?: string;
-}
+export function buildMaterialPermissionWhere(
+  permissions: readonly MaterialPermission[],
+  options: PbacWhereOptions = {}
+): Expression<SqlBool> {
+  const targetRef = options.targetRef ?? 'inspection_orders';
+  const materialsRef = options.materialsRef ?? 'materials';
+  const hasSupplierColumn = options.hasSupplierColumn ?? true;
 
-export class PbacSqlTranslator {
-  /**
-   * 将三维 PBAC 主体 (车间范围、物料类别范围、数据密级范围) 翻译为安全底层的 SQL WHERE 条件
-   *
-   * @param subject PBAC 主体上下文 (含 workshops, materialCategories, maxConfidentialityLevel)
-   * @param mapping 当前查询表中的字段名映射配置 (默认为 camelCase 列名，支持 CamelCasePlugin)
-   * @returns RawBuilder<boolean> 用于 .where(sql`...`)
-   */
-  public static buildWhereClause(
-    subject: PbacSubject,
-    mapping: PbacFieldMapping = {}
-  ): RawBuilder<boolean> {
-    const workshopCol = mapping.workshopField ?? 'workshopCode';
-    const categoryCol = mapping.categoryField ?? 'categoryCode';
-    const confidentialityCol = mapping.confidentialityField ?? 'confidentialityLevel';
+  const active = permissions.filter((rule) => rule.isActive !== false);
 
-    const conditions: RawBuilder<boolean>[] = [];
+  // fail-closed：无生效规则 = 拒绝一切
+  if (active.length === 0) {
+    return sql<SqlBool>`1 = 0`;
+  }
+  // 全通配规则 = 不做任何过滤
+  if (active.some((rule) => isFullWildcardRule(rule))) {
+    return sql<SqlBool>`1 = 1`;
+  }
 
-    // 1. 车间维度 (Workshop Scope)
-    // 若包含 '*' 则拥有全部车间访问权限；否则必须属于用户的车间列表 (若字段为 NULL 也允许特定全局对象)
-    if (subject.workshops && !subject.workshops.includes('*')) {
-      if (subject.workshops.length === 0) {
-        // 空列表代表没有任何车间权限
-        conditions.push(sql`1 = 0`);
-      } else {
-        const workshopsSql = sql.join(subject.workshops.map((w) => sql`${w}`));
-        conditions.push(
-          sql`(${sql.ref(workshopCol)} IS NULL OR ${sql.ref(workshopCol)} IN (${workshopsSql}))`
-        );
-      }
+  const perRule: Expression<SqlBool>[] = [];
+
+  for (const rule of active) {
+    const catWild = isWildcard(rule.materialCategories);
+    const codeWild = isWildcard(rule.materialCodes);
+    const supWild = isWildcard(rule.supplierCodes);
+
+    // 业务表没有供应商上下文时，限定供应商的规则按 fail-closed 语义永不匹配
+    if (!hasSupplierColumn && !supWild) {
+      continue;
     }
 
-    // 2. 物料类别维度 (Material Category Scope)
-    // 若包含 '*' 则拥有全部品类权限；否则必须属于用户的品类列表
-    if (subject.materialCategories && !subject.materialCategories.includes('*')) {
-      if (subject.materialCategories.length === 0) {
-        conditions.push(sql`1 = 0`);
-      } else {
-        const categoriesSql = sql.join(subject.materialCategories.map((c) => sql`${c}`));
-        conditions.push(
-          sql`(${sql.ref(categoryCol)} IS NULL OR ${sql.ref(categoryCol)} IN (${categoriesSql}))`
-        );
-      }
-    }
+    const conds: Expression<SqlBool>[] = [];
 
-    // 3. 密级维度 (Confidentiality Level Scope)
-    // 密级 1-4，用户只能查看 confidentiality_level <= maxConfidentialityLevel 的数据
-    if (typeof subject.maxConfidentialityLevel === 'number') {
-      conditions.push(
-        sql`(${sql.ref(confidentialityCol)} IS NULL OR ${sql.ref(confidentialityCol)} <= ${subject.maxConfidentialityLevel})`
+    if (!catWild) {
+      // 分类维度：物料的分类必须命中白名单（物料不存在于主数据时自然不命中）
+      conds.push(
+        sql`EXISTS (
+          SELECT 1 FROM ${sql.ref(materialsRef)} AS perm_materials
+          WHERE perm_materials.material_code = ${sql.ref(`${targetRef}.material_code`)}
+            AND perm_materials.category_code IN (${sql.join(
+              rule.materialCategories.map((value) => sql`${value}`)
+            )})
+        )`
       );
     }
 
-    if (conditions.length === 0) {
-      return sql`1 = 1`;
+    if (!codeWild) {
+      conds.push(
+        sql`${sql.ref(`${targetRef}.material_code`)} IN (${sql.join(
+          rule.materialCodes.map((value) => sql`${value}`)
+        )})`
+      );
     }
 
-    // 将所有条件用 AND 组合起来
-    return sql`(${sql.join(conditions, sql` AND `)})`;
+    if (!supWild) {
+      conds.push(
+        sql`(${sql.ref(`${targetRef}.supplier_code`)} IS NOT NULL AND ${sql.ref(
+          `${targetRef}.supplier_code`
+        )} IN (${sql.join(rule.supplierCodes.map((value) => sql`${value}`))}))`
+      );
+    }
+
+    if (conds.length > 0) {
+      perRule.push(sql`(${sql.join(conds, sql` AND `)})`);
+    }
   }
+
+  // 所有规则都被跳过（例如全表无供应商列且规则全限定供应商）=> 拒绝一切
+  if (perRule.length === 0) {
+    return sql<SqlBool>`1 = 0`;
+  }
+
+  return sql`(${sql.join(perRule, sql` OR `)})`;
 }

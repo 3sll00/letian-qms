@@ -39,6 +39,8 @@ export const CustomerSchema = z.object({
   customerName: z.string().min(1, '客户名称不能为空'),
   contactPerson: z.string().optional(),
   phone: z.string().optional(),
+  /** 客户地址，对接管家婆 Btype.TelAndAddress 或销售订单送货地址 */
+  address: z.string().optional(),
   createdAt: z.string().optional(),
 });
 
@@ -57,6 +59,8 @@ export const EmployeeSchema = z.object({
   phone: z.string().optional(),
   email: z.string().email().optional(),
   isActive: z.boolean().default(true),
+  /** 主角色编码，关联角色字典 roles.role_code */
+  roleCode: z.string().optional(),
   createdAt: z.string().optional(),
 });
 

@@ -10,3 +10,6 @@ export * from './process-settings.controller';
 export * from './integration.controller';
 export * from './master-data.controller';
 export * from './export.controller';
+export * from './permissions.controller';
+
+export * from './report-templates.controller';export * from './review-flows.controller';

@@ -44,8 +44,10 @@ export class RecordMeasurementsAndJudgeUseCase {
       await ctx.locks.acquireXactLock(`LOCK_ORDER_${orderDto.batchNo}`);
 
       if (securityCtx) {
+        // 从物料主数据解析真实分类；查不到时 UNKNOWN 不命中任何白名单（fail-closed）
+        const material = await ctx.materials.getMaterialByCode(orderDto.materialCode);
         securityCtx.assertAccess({
-          targetCategory: 'STANDARD_PARTS',
+          targetCategory: material?.categoryCode ?? 'UNKNOWN',
           targetMaterialCode: orderDto.materialCode,
           ...(orderDto.supplierCode !== undefined ? { targetSupplierCode: orderDto.supplierCode } : {}),
         });
@@ -57,6 +59,10 @@ export class RecordMeasurementsAndJudgeUseCase {
         ...orderDto,
         id: orderDto.id ?? cmd.orderId,
         batchQty: orderDto.sampleQty,
+        // 实际承担检验的操作人即检验人：录入实测值的一方必须被记入工单，
+        // 否则「检验人」列只能停留在种子/迁移的兜底值（且 save() 会把 inspector_id 写回 NULL）
+        inspectorId: cmd.operatorId,
+        inspectorName: cmd.operatorName,
       });
 
       try {

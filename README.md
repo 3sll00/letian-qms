@@ -118,3 +118,40 @@ pnpm dev
 - **[seed] QMS-008**：生产基础档案与质检方案初始化种子数据 (`pnpm db:seed`, 6类档案与正式方案)
 - **[ops] QMS-009**：后台运维守护进程与自动化调度中心 (Outbox 死信告警、超时催办、日志清理)
 - **[deploy] QMS-010**：生产容器化构建、反向代理与全链路交付验收 (`Dockerfile`, `nginx.conf`, UAT 签字)
+
+---
+
+## 五、桌面客户端 (Electron)
+
+除浏览器版外，系统提供 Windows 原生桌面客户端（`apps/desktop`）：Electron 壳加载
+`@letian/web` 构建产物，由主进程内置的回环静态服务器（`127.0.0.1` 固定端口）托管前端资源，
+所有业务请求直达远程 Fastify 后端（API 已开放 CORS）。适合工厂内网工位机部署，无需浏览器。
+
+### 1. 构建与运行
+
+| 命令 | 说明 |
+| --- | --- |
+| `pnpm desktop:build` | 正式安装包：electron-builder 产出 NSIS 安装器与 portable 便携版（`apps/desktop/release/`），首次启动在「设置 → 服务器设置」中配置后端地址 |
+| `pnpm desktop:demo` | **离线演示包**：web 以 MSW Mock 模式构建（内置演示数据），无需后端与数据库即可完整走查界面 |
+| `pnpm desktop:dev` | 开发调试：直连本机 Vite 开发服务器（先 `pnpm dev:all` 启动 API 与 web） |
+| `pnpm desktop:start` | 不打包，本地直接运行客户端（自动完成 web 构建） |
+| `pnpm desktop:smoke` | 冒烟自检：启动 → 加载 → 截图至 `apps/desktop/smoke-output/screenshot.png` → 退出，供流水线断言 |
+
+### 2. 服务器地址解析优先级
+
+`apps/web/src/lib/api.ts` 的 `resolveApiBase()` 按以下顺序解析（与浏览器版共用同一实现）：
+
+1. Mock 构建（`VITE_USE_MOCK=true`）：恒定相对路径，由 MSW 同源拦截；
+2. 桌面端「服务器设置」（持久化于 `%APPDATA%/乐天QMS工作台/config.json`，保存即重载生效）；
+3. 构建期环境变量 `VITE_API_BASE`（固化进安装包的默认地址，见 `.env.example`）；
+4. 相对路径 `/api/v1`（浏览器同源部署：Vite 代理 / nginx 反代）。
+
+只填主机与端口（如 `http://192.168.1.10:3000`）会自动补全 `/api/v1`；设置窗口的
+「测试连接」通过主进程探测后端 `GET /health`。
+
+### 3. 已知约束
+
+- 后端在 `NODE_ENV=production` 下不注册开发态登录路由，而前端正式登录 UI 尚未实现，
+  因此桌面客户端当前面向开发/测试环境后端（浏览器版同受此限）；生产部署前需先补齐正式登录流程。
+- Fastify + PostgreSQL 仍集中部署在服务器，桌面客户端仅是展示层原生化；
+  放行阻断、PBAC 行级隔离等中心化管控语义与浏览器版完全一致。

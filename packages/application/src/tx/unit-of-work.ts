@@ -7,7 +7,15 @@ import type {
 } from '@letian/domain';
 import type { IOutboxRepository } from './outbox.js';
 import type { ILockPort } from './lock-port.js';
-import type { AuditLog, MaterialPermission } from '@letian/contracts';
+import type { AuditLog, Material, MaterialPermission } from '@letian/contracts';
+
+/**
+ * 物料主数据只读查询端口：PBAC 三维校验需要把物料编码解析为真实分类编码
+ */
+export interface IMaterialLookupPort {
+  getMaterialByCode(materialCode: string): Promise<Material | null>;
+  getMaterialByName(materialName: string): Promise<Material | null>;
+}
 
 /**
  * 审计日志仓储接口 (写入不可变审计记录)
@@ -30,7 +38,8 @@ export interface IAuditLogRepository {
  * PBAC 数据权限规则仓储接口
  */
 export interface IMaterialPermissionRepository {
-  findByUserId(userId: string): Promise<MaterialPermission | null>;
+  /** 用户在全部角色下的生效规则（一人多角色多条规则，评估为 OR 语义） */
+  findByUserId(userId: string): Promise<readonly MaterialPermission[]>;
   save(permission: MaterialPermission): Promise<void>;
   listAllActive(): Promise<MaterialPermission[]>;
 }
@@ -49,6 +58,8 @@ export interface IUnitOfWorkContext {
   readonly locks: ILockPort;
   readonly auditLogs: IAuditLogRepository;
   readonly permissions: IMaterialPermissionRepository;
+  /** 物料主数据只读查询（PBAC 校验解析物料分类） */
+  readonly materials: IMaterialLookupPort;
 }
 
 /**

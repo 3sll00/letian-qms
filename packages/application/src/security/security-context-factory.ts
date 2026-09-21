@@ -17,8 +17,8 @@ export class SecurityContextFactory {
    * 根据当前请求的认证用户 Principal 装配三维 PBAC 安全上下文
    */
   public async createContext(user: IUserPrincipal, traceId?: string): Promise<ISecurityContext> {
-    const userPermission = await this.permissionRepo.findByUserId(user.id);
-    const permissions = userPermission ? [userPermission] : [];
+    // 用户在全部角色下的生效规则（一人多角色多条规则，评估器按 OR 语义处理）
+    const permissions = await this.permissionRepo.findByUserId(user.id);
 
     return new SecurityContext({
       userId: user.id,

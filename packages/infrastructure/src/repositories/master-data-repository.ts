@@ -42,6 +42,19 @@ export class KyselyMasterDataRepository implements ErpPort {
     return rows.map((row) => this.mapMaterial(row));
   }
 
+  public async getMaterialByName(name: string): Promise<Material | null> {
+    const row = await this.db
+      .selectFrom("materials")
+      .selectAll()
+      .where("materialName", "=", name)
+      .executeTakeFirst();
+    return row ? this.mapMaterial(row) : null;
+  }
+
+  public async findMaterialByCode(code: string): Promise<Material | null> {
+    return this.getMaterialByCode(code);
+  }
+
   public async getMaterialByCode(materialCode: string): Promise<Material | null> {
     const row = await this.db
       .selectFrom('materials')
@@ -189,4 +202,78 @@ export class KyselyMasterDataRepository implements ErpPort {
       ...(row.parentCode !== null ? { parentCode: row.parentCode } : {}),
     };
   }
+
+  public async saveSupplier(data: { supplierCode: string; supplierName: string; contactPerson?: string; phone?: string }): Promise<Supplier> {
+    const row = await this.db.insertInto('suppliers').values({
+      id: crypto.randomUUID(),
+      supplierCode: data.supplierCode,
+      supplierName: data.supplierName,
+      contactPerson: data.contactPerson ?? null,
+      phone: data.phone ?? null,
+      createdAt: new Date(),
+    }).returningAll().executeTakeFirstOrThrow();
+    return this.mapSupplier(row);
+  }
+
+  public async saveCustomer(data: { customerCode: string; customerName: string; contactPerson?: string; phone?: string }): Promise<Customer> {
+    const row = await this.db.insertInto('customers').values({
+      id: crypto.randomUUID(),
+      customerCode: data.customerCode,
+      customerName: data.customerName,
+      contactPerson: data.contactPerson ?? null,
+      phone: data.phone ?? null,
+      createdAt: new Date(),
+    }).returningAll().executeTakeFirstOrThrow();
+    return this.mapCustomer(row);
+  }
+
+  public async saveMaterial(data: { materialCode: string; materialName: string; specModel?: string; categoryCode: string; unit?: string }): Promise<Material> {
+    const row = await this.db.insertInto('materials').values({
+      id: crypto.randomUUID(),
+      materialCode: data.materialCode,
+      materialName: data.materialName,
+      specModel: data.specModel ?? null,
+      categoryCode: data.categoryCode,
+      unit: data.unit ?? '个',
+      createdAt: new Date(),
+    }).returningAll().executeTakeFirstOrThrow();
+    return this.mapMaterial(row);
+  }
+
+  public async saveWorkshop(data: { workshopCode: string; workshopName: string }): Promise<Workshop> {
+    const row = await this.db.insertInto('workshops').values({
+      id: crypto.randomUUID(),
+      workshopCode: data.workshopCode,
+      workshopName: data.workshopName,
+      createdAt: new Date(),
+    }).returningAll().executeTakeFirstOrThrow();
+    return this.mapWorkshop(row);
+  }
+
+  public async saveEmployee(data: { employeeCode: string; name: string; department?: string; phone?: string; email?: string }): Promise<Employee> {
+    const row = await this.db.insertInto('employees').values({
+      id: crypto.randomUUID(),
+      employeeCode: data.employeeCode,
+      name: data.name,
+      department: data.department ?? null,
+      phone: data.phone ?? null,
+      email: data.email ?? null,
+      isActive: true,
+      createdAt: new Date(),
+    }).returningAll().executeTakeFirstOrThrow();
+    return this.mapEmployee(row);
+  }
+
+  public async saveInventoryCategory(data: { categoryCode: string; categoryName: string; level?: number; parentCode?: string }): Promise<InventoryCategory> {
+    const row = await this.db.insertInto('inventoryCategories').values({
+      id: crypto.randomUUID(),
+      categoryCode: data.categoryCode,
+      categoryName: data.categoryName,
+      level: data.level ?? 1,
+      parentCode: data.parentCode ?? null,
+      createdAt: new Date(),
+    }).returningAll().executeTakeFirstOrThrow();
+    return this.mapInventoryCategory(row as any);
+  }
+
 }

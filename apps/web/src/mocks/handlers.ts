@@ -62,17 +62,92 @@ export const handlers = [
   http.get('/api/v1/inspections', ({ request }) => {
     const url = new URL(request.url);
     const type = url.searchParams.get('type');
+    const inspectionType = url.searchParams.get('inspectionType');
+    const inspectionTypes = url.searchParams.get('inspectionTypes');
     const status = url.searchParams.get('status');
+    const statuses = url.searchParams.get('statuses');
+    const inspectors = url.searchParams.get('inspectors');
+    const supplierCodes = url.searchParams.get('supplierCodes');
+    const dateFrom = url.searchParams.get('dateFrom');
+    const dateTo = url.searchParams.get('dateTo');
+    const partner = url.searchParams.get('partner');
+    const materialCode = url.searchParams.get('materialCode');
     const keyword = url.searchParams.get('keyword');
+    const page = Math.max(1, Number(url.searchParams.get('page') ?? '1'));
+    const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get('pageSize') ?? '20')));
+
+    /** 逗号分隔的多值参数 -> 去空数组（与真实后端 /inspections 的 commaList 口径一致） */
+    const multi = (raw: string | null): string[] =>
+      (raw ?? '')
+        .split(',')
+        .map((part) => part.trim())
+        .filter((part) => part !== '');
+
+    const supplierNames = new Map(mockSuppliers.map((s) => [s.supplierCode, s.supplierName]));
+    const customerNames = new Map(mockCustomers.map((c) => [c.customerCode, c.customerName]));
 
     let filtered = [...inspectionOrdersList];
-    if (type && type !== 'ALL') {
+
+    // 检验类型：多选 IN 语义优先于页签分组 / 单值
+    const multiTypes = multi(inspectionTypes);
+    if (multiTypes.length > 0) {
+      filtered = filtered.filter((r) => multiTypes.includes(r.inspectionType));
+    } else if (inspectionType) {
+      filtered = filtered.filter((r) => r.inspectionType === inspectionType);
+    } else if (type && type !== 'ALL') {
       // 页面筛选页签 (IQC / IPQC / FQC / OQC) 与前端展示共用
       // src/lib/inspectionTypes.ts 的同一份分组定义，避免前后端规则漂移
       filtered = filtered.filter((r) => inspectionTypeMatchesGroup(r.inspectionType, type));
     }
-    if (status && status !== 'ALL') {
+
+    // 检验状态：多选 IN 语义优先于单值
+    const multiStatuses = multi(statuses);
+    if (multiStatuses.length > 0) {
+      filtered = filtered.filter((r) => multiStatuses.includes(r.status));
+    } else if (status && status !== 'ALL') {
       filtered = filtered.filter((r) => r.status === status);
+    }
+
+    // 检验人 / 供应商：多值 IN（按 id / 编码精确匹配）
+    const multiInspectors = multi(inspectors);
+    if (multiInspectors.length > 0) {
+      filtered = filtered.filter(
+        (r) => r.inspectorId !== undefined && multiInspectors.includes(r.inspectorId)
+      );
+    }
+    const multiSuppliers = multi(supplierCodes);
+    if (multiSuppliers.length > 0) {
+      filtered = filtered.filter(
+        (r) => r.supplierCode !== undefined && multiSuppliers.includes(r.supplierCode)
+      );
+    }
+
+    // 日期范围：与真实后端一致按 createdAt 过滤（含起止当日）
+    if (dateFrom) {
+      filtered = filtered.filter((r) => (r.createdAt ?? '') >= `${dateFrom}T00:00:00`);
+    }
+    if (dateTo) {
+      filtered = filtered.filter((r) => (r.createdAt ?? '') <= `${dateTo}T23:59:59.999`);
+    }
+
+    // 供应商/客户名称模糊匹配
+    if (partner && partner.trim() !== '') {
+      const q = partner.trim().toLowerCase();
+      filtered = filtered.filter((r) => {
+        const names = [
+          r.supplierCode !== undefined ? supplierNames.get(r.supplierCode) ?? '' : '',
+          r.customerCode !== undefined ? customerNames.get(r.customerCode) ?? '' : '',
+        ];
+        return names.some((name) => name.toLowerCase().includes(q));
+      });
+    }
+
+    if (materialCode && materialCode.trim() !== '') {
+      const q = materialCode.trim().toLowerCase();
+      filtered = filtered.filter(
+        (r) =>
+          r.materialCode.toLowerCase().includes(q) || r.materialName.toLowerCase().includes(q)
+      );
     }
     if (keyword) {
       const q = keyword.toLowerCase();
@@ -85,14 +160,45 @@ export const handlers = [
       );
     }
 
-    // 每一条记录严格校验
-    const validatedItems = filtered.map((item) => InspectionOrderSchema.parse(item));
+    // 与真实后端口径一致：createdAt 倒序，再按页切分；每一条记录严格校验
+    const validatedItems = filtered
+      .slice()
+      .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
+      .map((item) => InspectionOrderSchema.parse(item));
+
+    const items = validatedItems.slice((page - 1) * pageSize, page * pageSize);
 
     return HttpResponse.json({
-      items: validatedItems,
+      items,
       total: validatedItems.length,
-      page: 1,
-      pageSize: 50,
+      page,
+      pageSize,
+    });
+  }),
+
+  // 检验明细筛选候选：检验人为库中出现过检验记录的员工，类型/状态为契约枚举全集
+  http.get('/api/v1/inspections/filters', () => {
+    const inspectors = new Map<string, string>();
+    for (const order of inspectionOrdersList) {
+      if (!order.inspectorId) continue;
+      const employee = mockEmployees.find((e) => e.id === order.inspectorId);
+      if (employee && employee.id !== undefined && !inspectors.has(employee.id)) {
+        inspectors.set(employee.id, employee.name);
+      }
+    }
+    return HttpResponse.json({
+      inspectors: [...inspectors.entries()].map(([id, name]) => ({ id, name })),
+      inspectionTypes: ['IQC', 'IPQC_CT', 'IPQC_RL', 'IPQC_FN', 'OQC_SF', 'OQC_SH'],
+      statuses: [
+        'PENDING',
+        'INSPECTING',
+        'DRAFT',
+        'PASSED',
+        'FAILED',
+        'IN_MRB_REVIEW',
+        'RE_INSPECTING',
+        'COMPLETED',
+      ],
     });
   }),
 

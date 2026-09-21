@@ -121,6 +121,7 @@ export interface EmployeesTable {
   email: string | null;
   isActive: Generated<boolean>;
   createdAt: Generated<Date>;
+  roleCode: ColumnType<string | null, string | null | undefined, string | null>;
 }
 
 // ============================================================================
@@ -173,6 +174,39 @@ export interface InspectionOrdersTable {
   planVersionId: string;
   planSnapshot: JsonColumnType<PlanSnapshot>;
   items: JsonColumnType<InspectionItem[]>;
+  customerAddress?: string | null;
+  projectNo?: string | null;
+  shortProjectNo?: string | null;
+  manufactureDate?: Date | null;
+  // 006 来料检验采购入库与规格对账字段
+  receiptNo?: string | null;
+  receiptDate?: Date | null;
+  specification?: string | null;
+  unit?: string | null;
+  supplierName?: string | null;
+  inspectorName?: string | null;
+  // 007 过程检验 (IPQC: 下料检验/滚丝检验/成品检) 工序与设备追溯字段
+  workOrderNo?: string | null;
+  blankingLength?: NumericColumnType | null;
+  operatorName?: string | null;
+  operatorId?: string | null;
+  equipmentCode?: string | null;
+  equipmentName?: string | null;
+  threadSpec?: string | null;
+  inspectionTeam?: string | null;
+  processStep?: string | null;
+  completedAt?: Date | null;
+  // 008 出货检验 (OQC) 销售出库对账与客户追溯字段
+  salesOrderNo?: string | null;
+  dispatchDate?: string | null;
+  customerName?: string | null;
+  salesOrderPoNo?: string | null;
+  erpStatus?: string | null;
+  // 009 委外检验 (OQC 七分类) 台账字段：委外单号 / 加工类型 / 回厂日期 / 加工商快照
+  outsourceNo?: string | null;
+  processType?: string | null;
+  returnDate?: string | null;
+  vendorName?: string | null;
 }
 
 // ============================================================================
@@ -320,6 +354,34 @@ export interface IntegrationSyncLogsTable {
 // 7. 物料行级数据权限（PBAC）
 // ============================================================================
 
+
+export interface RolesTable {
+  roleCode: string;
+  roleName: string;
+  description: string | null;
+  isActive: Generated<boolean>;
+  sortOrder: Generated<number>;
+  createdAt: Generated<Date>;
+  updatedAt: Generated<Date>;
+}
+
+export interface AuthorizationLogsTable {
+  id: Generated<string>;
+  userId: string;
+  userName: string;
+  roleCode: string | null;
+  resourceType: string;
+  resourceId: string | null;
+  materialCode: string | null;
+  materialCategory: string | null;
+  supplierCode: string | null;
+  action: string;
+  decision: "ALLOWED" | "DENIED";
+  matchedRuleId: string | null;
+  detail: string | null;
+  createdAt: Generated<Date>;
+}
+
 export interface MaterialPermissionsTable {
   id: Generated<string>;
   userId: string;
@@ -333,7 +395,70 @@ export interface MaterialPermissionsTable {
   updatedAt: Generated<Date>;
 }
 
+
+// ============================================================================
+// 8. 质检报表模板配置表
+// ============================================================================
+
+// ============================================================================
+// 7.5 不合格待审核池工单表 (Pending Review Pool)
+// ============================================================================
+
+export interface PendingMrbItemsTable {
+  id: Generated<string>;
+  sourceOrderId: string;
+  sourceOrderNo: string;
+  sourceStage: string;
+  materialCode: string;
+  materialName: string;
+  batchNo: string;
+  defectQty: NumericColumnType;
+  defectRate: NumericColumnType;
+  failReason: string;
+  failedItems: JsonColumnType<any[]>;
+  status: Generated<string>;
+  mrbReviewId: string | null;
+  reviewStartedAt: Date | null;
+  reviewStartedBy: string | null;
+  createdAt: Generated<Date>;
+}
+
+export interface ReportTemplatesTable {
+  id: Generated<string>;
+  templateCode: string;
+  templateName: string;
+  scope: string;
+  applicableType: string;
+  isDefault: Generated<boolean>;
+  pageSize: Generated<string>;
+  orientation: Generated<string>;
+  sectionLayouts: JsonColumnType<any[]>;
+  headerConfig: JsonColumnType<Record<string, any>> | null;
+  footerConfig: JsonColumnType<Record<string, any>> | null;
+  watermarkText: string | null;
+  customCss: string | null;
+  status: Generated<string>;
+  createdBy: string;
+  createdAt: Generated<Date>;
+  updatedAt: Generated<Date>;
+}
+
+
+export interface WarehousesTable {
+  id: Generated<string>;
+  warehouseCode: string;
+  warehouseName: string;
+  warehouseType: Generated<string>;
+  location: string | null;
+  managerName: string | null;
+  isActive: Generated<boolean>;
+  comment: string | null;
+  createdAt: Generated<Date>;
+  updatedAt: Generated<Date>;
+}
+
 export interface Database {
+  warehouses: WarehousesTable;
   materials: MaterialsTable;
   inventoryCategories: InventoryCategoriesTable;
   suppliers: SuppliersTable;
@@ -352,6 +477,10 @@ export interface Database {
   integrationConfigs: IntegrationConfigsTable;
   integrationSyncLogs: IntegrationSyncLogsTable;
   materialPermissions: MaterialPermissionsTable;
+  roles: RolesTable;
+  authorizationLogs: AuthorizationLogsTable;
+  pendingMrbItems: PendingMrbItemsTable;
+  reportTemplates: ReportTemplatesTable;
 }
 
 // ============================================================================
@@ -375,6 +504,25 @@ export type OutboxEventRow = Selectable<OutboxEventsTable>;
 export type IntegrationConfigRow = Selectable<IntegrationConfigsTable>;
 export type IntegrationSyncLogRow = Selectable<IntegrationSyncLogsTable>;
 export type MaterialPermissionRow = Selectable<MaterialPermissionsTable>;
+
+export type RoleRow = Selectable<RolesTable>;
+export type RoleInsert = Insertable<RolesTable>;
+export type RoleUpdate = Updateable<RolesTable>;
+
+export type AuthorizationLogRow = Selectable<AuthorizationLogsTable>;
+export type AuthorizationLogInsert = Insertable<AuthorizationLogsTable>;
+export type AuthorizationLogUpdate = Updateable<AuthorizationLogsTable>;
+
+export type PendingMrbItemRow = Selectable<PendingMrbItemsTable>;
+export type PendingMrbItemInsert = Insertable<PendingMrbItemsTable>;
+export type PendingMrbItemUpdate = Updateable<PendingMrbItemsTable>;
+
+export type ReportTemplateRow = Selectable<ReportTemplatesTable>;
+export type WarehouseRow = Selectable<WarehousesTable>;
+export type NewWarehouseRow = Insertable<WarehousesTable>;
+export type ReportTemplateInsert = Insertable<ReportTemplatesTable>;
+export type ReportTemplateUpdate = Updateable<ReportTemplatesTable>;
+
 
 export type MaterialInsert = Insertable<MaterialsTable>;
 export type InventoryCategoryInsert = Insertable<InventoryCategoriesTable>;

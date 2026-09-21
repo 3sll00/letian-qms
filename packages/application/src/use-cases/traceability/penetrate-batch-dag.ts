@@ -122,13 +122,13 @@ export class PenetrateBatchDagUseCase {
       }
 
       // 2. PBAC 权限校验 (若安全上下文存在)
+      // 追溯节点只携带物料名称：按名称反查主数据得到真实编码与分类；
+      // 查不到时以名称占位编码、分类取 UNKNOWN（任何白名单规则都不命中，fail-closed）
       if (securityCtx) {
+        const material = await ctx.materials.getMaterialByName(rootNode.materialName);
         securityCtx.assertAccess({
-          targetCategory: 'STANDARD_PARTS',
-          targetMaterialCode: rootNode.materialName,
-          ...(rootNode.supplierOrCustomer !== undefined
-            ? { targetSupplierCode: rootNode.supplierOrCustomer }
-            : {}),
+          targetCategory: material?.categoryCode ?? 'UNKNOWN',
+          targetMaterialCode: material?.materialCode ?? rootNode.materialName,
         });
       }
 

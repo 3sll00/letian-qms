@@ -1,7 +1,8 @@
 import { Kysely } from 'kysely';
 import type { MRBReviewRepository as IMRBReviewRepository } from '@letian/domain';
-import type { MRBFailCategory, MRBReview, MRBStatus } from '@letian/contracts';
+import type { MaterialPermission, MRBFailCategory, MRBReview, MRBStatus } from '@letian/contracts';
 import type { Database, MrbReviewInsert, MrbReviewRow } from '../database/schema.js';
+import { buildMaterialPermissionWhere } from './pbac-sql-translator.js';
 
 /** PostgreSQL uuid 列不接受非 uuid 文本，按 id 查询前先做格式判断避免 22P02 错误 */
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -86,6 +87,8 @@ export class KyselyMRBReviewRepository implements IMRBReviewRepository {
   public async listMrbReviews(query: {
     sourceType?: string;
     status?: string;
+    /** 三维 PBAC 权限过滤（MRB 表无供应商列，限定供应商的规则按 fail-closed 不匹配） */
+    permissions?: readonly MaterialPermission[];
     page: number;
     pageSize: number;
   }): Promise<MRBListResult> {
@@ -101,6 +104,14 @@ export class KyselyMRBReviewRepository implements IMRBReviewRepository {
       const status = toMrbStatus(query.status);
       listQuery = listQuery.where('status', '=', status);
       countQuery = countQuery.where('status', '=', status);
+    }
+    if (query.permissions !== undefined) {
+      const pbacWhere = buildMaterialPermissionWhere(query.permissions, {
+        targetRef: 'mrb_reviews',
+        hasSupplierColumn: false,
+      });
+      listQuery = listQuery.where(pbacWhere);
+      countQuery = countQuery.where(pbacWhere);
     }
 
     const rows = await listQuery

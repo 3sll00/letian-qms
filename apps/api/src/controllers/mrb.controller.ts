@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   CreateMRBReviewRequestSchema,
   SubmitNodeReviewRequestSchema,
+  InitiateReviewRequestSchema,
   MRBCategoryTabEnum,
   MRBStatusEnum,
   type MRBReview,
@@ -10,10 +11,26 @@ import {
 import { NotFoundError, ConflictError } from '@letian/application';
 import type { ApiContainer } from '../container';
 import { operatorOf } from '../lib/operator';
+import {
+  getRequestPermissions,
+  buildRequestSecurityContext,
+  logAuthorizationCheck,
+} from '../lib/permission-guard';
 
 const MRBQuerySchema = z.object({
   categoryTab: MRBCategoryTabEnum.default('ALL'),
   status: MRBStatusEnum.optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+});
+
+const PendingPoolQuerySchema = z.object({
+  sourceStage: z.enum(['IQC', 'IPQC', 'FQC', 'OQC']).optional(),
+  stage: z.enum(['IQC', 'IPQC', 'FQC', 'OQC']).optional(),
+  inspectionType: z.string().optional(),
+  materialCode: z.string().optional(),
+  batchNo: z.string().optional(),
+  status: z.enum(['PENDING_INITIATE', 'INITIATED', 'DISMISSED', 'PENDING_REVIEW', 'REVIEWING', 'RESOLVED']).optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
 });
@@ -34,6 +51,14 @@ const SignatureRequestSchema = z.object({
   signatureUrl: z.string().optional(),
 });
 
+const DispositionBodySchema = z.object({
+  disposition: z.enum(['CONCESSION', 'REWORK', 'SCRAP', 'RETURN_TO_VENDOR', 'RETURN']).transform((val) => (val === 'RETURN' ? 'RETURN_TO_VENDOR' : val)),
+  reason: z.string().optional(),
+  dispositionReason: z.string().optional(),
+  dispositionNotes: z.string().optional(),
+  concessionAttachmentUrl: z.string().optional(),
+});
+
 /** 分类页签 -> MRB 不合格来源类型 (MRBFailCategoryEnum) */
 const CATEGORY_TAB_TO_SOURCE: Partial<Record<
   z.infer<typeof MRBCategoryTabEnum>,
@@ -51,7 +76,66 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
   const { container } = options;
   const mrbReviews = container.repositories.mrbReviews;
 
-  // 1. 查询 MRB 不合格评审记录列表（支持四大分类 Tab 与 KPI 统计）
+  // 0. 待审核池接口：查询各环节未发起评审的不合格记录（支持多条件筛选）
+  fastify.get(
+    '/pending-pool',
+    {
+      schema: {
+        querystring: PendingPoolQuerySchema,
+      },
+    },
+    async (request, reply) => {
+      const query = request.query as z.infer<typeof PendingPoolQuerySchema>;
+      const securityCtx = await buildRequestSecurityContext(request, container);
+
+      const result = await container.useCases.pendingMRBPool.getPendingList(
+        {
+          stage: query.sourceStage ?? query.stage ?? query.inspectionType,
+          sourceStage: query.sourceStage ?? query.stage ?? query.inspectionType,
+          inspectionType: query.sourceStage ?? query.stage ?? query.inspectionType,
+          materialCode: query.materialCode,
+          batchNo: query.batchNo,
+          status: query.status,
+          page: query.page,
+          pageSize: query.pageSize,
+        },
+        securityCtx
+      );
+
+      return reply.status(200).send({
+        items: result.items,
+        list: result.items,
+        total: result.total,
+        page: query.page,
+        pageSize: query.pageSize,
+      });
+    }
+  );
+
+  // 0.1 待审核池接口：逐条发起独立评审，生成 MRB 工单
+  fastify.post(
+    '/pending-pool/initiate',
+    {
+      schema: {
+        body: InitiateReviewRequestSchema,
+      },
+    },
+    async (request, reply) => {
+      const body = request.body as z.infer<typeof InitiateReviewRequestSchema>;
+      const operator = operatorOf(request);
+      const securityCtx = await buildRequestSecurityContext(request, container);
+
+      const review = await container.useCases.pendingMRBPool.initiateReview(
+        body,
+        operator,
+        securityCtx
+      );
+
+      return reply.status(201).send(review);
+    }
+  );
+
+  // 1. 查询 MRB 不合格评审记录列表（支持四大分类 Tab 与 KPI 统计，注入三维 PBAC 行级过滤）
   fastify.get(
     '/records',
     {
@@ -62,11 +146,13 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
     async (request, reply) => {
       const query = request.query as z.infer<typeof MRBQuerySchema>;
       const sourceType = CATEGORY_TAB_TO_SOURCE[query.categoryTab];
+      const permissions = await getRequestPermissions(request, container);
 
-      // KPI 统计口径固定为全量，不受页签与状态筛选影响
+      // KPI 统计与列表数据均受当前用户 PBAC 规则严格过滤
       const result = await mrbReviews.listMrbReviews({
         page: query.page,
         pageSize: query.pageSize,
+        permissions,
         ...(sourceType !== undefined ? { sourceType } : {}),
         ...(query.status !== undefined ? { status: query.status } : {}),
       });
@@ -82,11 +168,6 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
   );
 
   // 2. 创建 MRB 不合格评审单
-  //
-  // 说明：application 层的 TriggerMrbReviewUseCase 语义是"由不合格检验单自动触发"，
-  // 它要求检验单必须处于 FAILED、并把检验单推进为 IN_MRB_REVIEW，与本接口
-  // 契约中"自由录入来源单号 / 批次 / 缺陷描述"的语义并不一致，
-  // 因此这里在同一事务内直接落库评审单 + Outbox 事件 + 审计日志，不经过该用例。
   fastify.post(
     '/records',
     {
@@ -97,6 +178,18 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
     async (request, reply) => {
       const body = request.body as z.infer<typeof CreateMRBReviewRequestSchema>;
       const operator = operatorOf(request);
+      const securityCtx = await buildRequestSecurityContext(request, container);
+
+      // 验证物料分类及创建权限
+      const material = await container.repositories.masterData.findMaterialByCode(body.materialCode);
+      const categoryCode = material?.categoryCode ?? 'STANDARD_PARTS';
+
+      securityCtx.assertAccess({
+        targetCategory: categoryCode,
+        targetMaterialCode: body.materialCode,
+        operationName: '创建MRB评审单',
+      });
+
       const now = new Date().toISOString();
 
       const record: MRBReview = {
@@ -158,65 +251,88 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
   /** 节点会签：驳回直接终止流程；通过则进入会签中（全部节点签署完成由处置接口收口） */
   async function submitSignature(
     id: string,
-    body: {
-      action: 'APPROVE' | 'REJECT';
-      comment: string;
-      roleCode?: string;
-      approverName?: string;
-    },
+    body: z.infer<typeof SignatureRequestSchema>,
     request: FastifyRequest
   ): Promise<MRBReview> {
+    const operator = operatorOf(request);
+    const securityCtx = await buildRequestSecurityContext(request, container);
+
     const existing = await mrbReviews.findById(id);
     if (!existing) {
-      throw new NotFoundError(`MRB评审记录不存在: ${id}`);
+      throw new NotFoundError(`MRB记录不存在: ${id}`);
     }
 
-    // 终态校验放在用例之前，保持 409 ConflictError 的既有对外语义
-    if (existing.status === 'DISPOSED' || existing.status === 'REJECTED') {
-      throw new ConflictError('该 MRB 评审流程已处置完毕或已被驳回，无法重复会签');
-    }
+    const material = await container.repositories.masterData.findMaterialByCode(existing.materialCode);
+    const categoryCode = material?.categoryCode ?? 'STANDARD_PARTS';
 
-    const operator = operatorOf(request);
-
-    return await container.useCases.advanceMrbStep.execute({
-      mrbId: id,
-      action: body.action,
-      operatorId: operator.userId,
-      operatorRole: body.roleCode ?? operator.role,
-      ...(body.approverName !== undefined ? { operatorName: body.approverName } : {}),
-      ...(body.comment !== '' ? { comment: body.comment } : {}),
+    securityCtx.assertAccess({
+      targetCategory: categoryCode,
+      targetMaterialCode: existing.materialCode,
+      operationName: 'MRB节点会签',
     });
-  }
 
-  // 3. 提交节点会签意见（契约路径）
-  fastify.post(
-    '/records/:id/submit-review',
-    {
-      schema: {
-        params: MRBParamsSchema,
-        body: SubmitNodeReviewRequestSchema,
-      },
-    },
-    async (request, reply) => {
-      const { id } = request.params as z.infer<typeof MRBParamsSchema>;
-      const body = request.body as z.infer<typeof SubmitNodeReviewRequestSchema>;
+    const isApprove = body.action === 'APPROVE' || body.action === 'APPROVED';
+    const finalAction: 'APPROVED' | 'REJECTED' = isApprove ? 'APPROVED' : 'REJECTED';
+    const now = new Date().toISOString();
 
-      const updated = await submitSignature(
-        id,
+    const signedRecord: MRBReview = {
+      ...existing,
+      status: isApprove ? 'UNDER_REVIEW' : 'REJECTED',
+      approvers: [
+        ...existing.approvers,
         {
-          action: body.action === 'APPROVED' ? 'APPROVE' : 'REJECT',
+          roleCode: body.roleCode ?? operator.role,
+          userId: operator.userId,
+          userName: body.approverName ?? operator.userName,
+          action: finalAction,
+          comment: body.comment,
+          ...(body.signatureUrl !== undefined ? { signatureUrl: body.signatureUrl } : {}),
+          signedAt: now,
+        },
+      ],
+      updatedAt: now,
+    };
+
+    await container.uow.execute(async (ctx) => {
+      await ctx.locks.acquireXactLock(`LOCK_MRB_${existing.batchNo}`);
+      await ctx.mrbReviews.save(signedRecord);
+      await ctx.outbox.append({
+        id: crypto.randomUUID(),
+        aggregateType: 'MRBReview',
+        aggregateId: id,
+        eventType: isApprove ? 'MRBNodeApproved' : 'MRBNodeRejected',
+        payload: {
+          mrbId: id,
+          mrbNo: existing.mrbNo,
+          action: finalAction,
+          approverId: operator.userId,
           comment: body.comment,
         },
-        request
-      );
+        traceId: crypto.randomUUID(),
+        occurredAt: new Date(),
+        status: 'PENDING',
+        retryCount: 0,
+      });
+      await ctx.auditLogs.insert({
+        id: crypto.randomUUID(),
+        traceId: crypto.randomUUID(),
+        userId: operator.userId,
+        userName: operator.userName,
+        action: 'UPDATE',
+        resourceType: 'MRB_REVIEW',
+        resourceId: id,
+        status: 'SUCCESS',
+        diffPatch: { action: finalAction, comment: body.comment },
+        createdAt: now,
+      });
+    });
 
-      return reply.status(200).send(updated);
-    }
-  );
+    return signedRecord;
+  }
 
-  // 4. 提交节点会签意见（前端会签页使用：可携带责任角色与签署人姓名）
+  // 3. 提交节点会签意见（旧标准路径：/records/:id/sign）
   fastify.post(
-    '/records/:id/signatures',
+    '/records/:id/sign',
     {
       schema: {
         params: MRBParamsSchema,
@@ -226,16 +342,77 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
     async (request, reply) => {
       const { id } = request.params as z.infer<typeof MRBParamsSchema>;
       const body = request.body as z.infer<typeof SignatureRequestSchema>;
+      const record = await submitSignature(id, body, request);
+      return reply.status(200).send(record);
+    }
+  );
 
-      const updated = await submitSignature(
+  // 4. 提交节点评审意见（契约对齐路径：/records/:id/reviews）
+  fastify.post(
+    '/records/:id/reviews',
+    {
+      schema: {
+        params: MRBParamsSchema,
+        body: SubmitNodeReviewRequestSchema,
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params as z.infer<typeof MRBParamsSchema>;
+      const body = request.body as z.infer<typeof SubmitNodeReviewRequestSchema>;
+      const record = await submitSignature(
         id,
         {
-          action: body.action.startsWith('APPROVE') ? 'APPROVE' : 'REJECT',
+          action: body.action,
           comment: body.comment,
-          ...(body.roleCode !== undefined ? { roleCode: body.roleCode } : {}),
-          ...(body.approverName !== undefined ? { approverName: body.approverName } : {}),
+          ...(body.signatureUrl !== undefined ? { signatureUrl: body.signatureUrl } : {}),
         },
         request
+      );
+      return reply.status(200).send(record);
+    }
+  );
+
+  // 5. 提交最终处置结论
+  // 5. 提交最终处置结论
+  fastify.post(
+    '/records/:id/disposition',
+    {
+      schema: {
+        params: MRBParamsSchema,
+        body: DispositionBodySchema,
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params as z.infer<typeof MRBParamsSchema>;
+      const body = DispositionBodySchema.parse(request.body ?? {});
+      const operator = operatorOf(request);
+      const securityCtx = await buildRequestSecurityContext(request, container);
+
+      const record = await mrbReviews.findById(id);
+      if (!record) {
+        throw new NotFoundError(`MRB记录不存在: ${id}`);
+      }
+
+      const material = await container.repositories.masterData.findMaterialByCode(record.materialCode);
+      const categoryCode = material?.categoryCode ?? 'STANDARD_PARTS';
+
+      securityCtx.assertAccess({
+        targetCategory: categoryCode,
+        targetMaterialCode: record.materialCode,
+        operationName: '提交MRB最终处置结论',
+      });
+
+      const reason = body.dispositionReason || body.reason || body.dispositionNotes || '多方会签评审确认处置方式';
+      const updated = await container.useCases.decideMrbDisposition.execute(
+        {
+          mrbId: id,
+          disposition: body.disposition,
+          dispositionReason: reason,
+          concessionAttachmentUrl: body.concessionAttachmentUrl || record.concessionAttachmentUrl || (body.disposition === 'CONCESSION' ? '/attachments/concession_signed.pdf' : undefined),
+          operatorId: operator.userId,
+          operatorName: operator.userName,
+        },
+        securityCtx
       );
 
       return reply.status(200).send(updated);

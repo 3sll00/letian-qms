@@ -1,5 +1,7 @@
-import { sql, type Kysely } from 'kysely';
+import { sql, type Expression, type Kysely, type SqlBool } from 'kysely';
+import type { MaterialPermission } from '@letian/contracts';
 import type { Database } from '../database/schema.js';
+import { buildMaterialPermissionWhere } from './pbac-sql-translator.js';
 
 /**
  * 看板聚合读模型 (Kysely + PostgreSQL)
@@ -121,10 +123,31 @@ const WEEKDAY_LABELS = ['周日', '周一', '周二', '周三', '周四', '周�
 export class KyselyDashboardRepository {
   constructor(private readonly db: Kysely<Database>) {}
 
-  public async getOverview(): Promise<DashboardOverview> {
+  /**
+   * 三维 PBAC 过滤条件工厂：
+   * - permissions 未传（undefined）=> 恒真，不做过滤（保持旧行为，供无上下文调用）；
+   * - permissions 传空数组 => 由翻译器给出 1 = 0（fail-closed）。
+   */
+  private pbac(permissions: readonly MaterialPermission[] | undefined): Expression<SqlBool> {
+    return permissions !== undefined
+      ? buildMaterialPermissionWhere(permissions)
+      : sql<SqlBool>`1 = 1`;
+  }
+
+  /** 别名表引用版本：原生 SQL 里 inspection_orders 别名为 o（jsonb_array_elements 展开场景） */
+  private pbacAliased(permissions: readonly MaterialPermission[] | undefined): Expression<SqlBool> {
+    return permissions !== undefined
+      ? buildMaterialPermissionWhere(permissions, { targetRef: 'o' })
+      : sql<SqlBool>`1 = 1`;
+  }
+
+  public async getOverview(permissions?: readonly MaterialPermission[]): Promise<DashboardOverview> {
+    const where = this.pbac(permissions);
+
     const statusRows = await this.db
       .selectFrom('inspectionOrders')
       .select((eb) => ['status', eb.fn.countAll().as('count')])
+      .where(where)
       .groupBy('status')
       .execute();
 
@@ -133,8 +156,7 @@ export class KyselyDashboardRepository {
       statusCounts[row.status] = Number(row.count);
     }
 
-    const totalInspections = Object.values(statusCounts).reduce((sum, value) => sum + value, 0);
-    // 合格口径包含已判定合格(PASSED)与已结单归档(COMPLETED)两类
+    const totalInspections = Object.values(statusCounts).reduce((acc, n) => acc + n, 0);
     const passedCount = (statusCounts['PASSED'] ?? 0) + (statusCounts['COMPLETED'] ?? 0);
     const passRate =
       totalInspections > 0 ? Number(((passedCount / totalInspections) * 100).toFixed(2)) : 0;
@@ -142,6 +164,7 @@ export class KyselyDashboardRepository {
     const typeRows = await this.db
       .selectFrom('inspectionOrders')
       .select((eb) => ['orderType', eb.fn.countAll().as('count')])
+      .where(where)
       .groupBy('orderType')
       .execute();
 
@@ -154,7 +177,7 @@ export class KyselyDashboardRepository {
       else if (stage === 'oqc') stageDistribution.oqcCount += count;
     }
 
-    const mrbInReviewCount = await this.countMrbInReview();
+    const mrbInReviewCount = await this.countMrbInReview(permissions);
 
     // 原生 SQL 的结果列名会被 CamelCasePlugin 按 snake_case -> camelCase 重写，
     // 这里显式加带引号的别名固定键名（与 batch-trace-repository 的写法一致）。
@@ -169,12 +192,13 @@ export class KyselyDashboardRepository {
              count(*)::int AS total,
              count(*) FILTER (WHERE status IN ('PASSED', 'COMPLETED'))::int AS passed
       FROM inspection_orders
+      WHERE ${where}
       GROUP BY 1, 2
     `.execute(this.db);
 
     const trendSeries = this.buildTrend(dayRows.rows);
 
-    const defectRows = await this.queryFailedItems(TOP_DEFECT_LIMIT);
+    const defectRows = await this.queryFailedItems(TOP_DEFECT_LIMIT, this.pbacAliased(permissions));
     const topDefects = defectRows.map((row) => ({
       defectName: row.name,
       category: row.category,
@@ -197,7 +221,9 @@ export class KyselyDashboardRepository {
     };
   }
 
-  public async getStats(): Promise<DashboardStats> {
+  public async getStats(permissions?: readonly MaterialPermission[]): Promise<DashboardStats> {
+    const where = this.pbac(permissions);
+    const whereAliased = this.pbacAliased(permissions);
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
 
@@ -205,11 +231,13 @@ export class KyselyDashboardRepository {
       .selectFrom('inspectionOrders')
       .select((eb) => eb.fn.countAll().as('total'))
       .where('createdAt', '>=', todayStart)
+      .where(where)
       .executeTakeFirst();
 
     const statusRows = await this.db
       .selectFrom('inspectionOrders')
       .select((eb) => ['status', eb.fn.countAll().as('count')])
+      .where(where)
       .groupBy('status')
       .execute();
 
@@ -220,14 +248,18 @@ export class KyselyDashboardRepository {
       statusCounts[row.status] = count;
       totalOrders += count;
     }
-    const passedCount =
-      (statusCounts['PASSED'] ?? 0) + (statusCounts['COMPLETED'] ?? 0) + (statusCounts['IN_MRB_REVIEW'] ?? 0);
-    const yieldRate = totalOrders > 0 ? Number(((passedCount / totalOrders) * 100).toFixed(2)) : 0;
+    const yieldedCount =
+      (statusCounts['PASSED'] ?? 0) +
+      (statusCounts['COMPLETED'] ?? 0) +
+      (statusCounts['IN_MRB_REVIEW'] ?? 0);
+    const yieldRate =
+      totalOrders > 0 ? Number(((yieldedCount / totalOrders) * 100).toFixed(2)) : 0;
 
     const mrbPendingRow = await this.db
       .selectFrom('mrbReviews')
       .select((eb) => eb.fn.countAll().as('total'))
       .where('status', '=', 'PENDING_REVIEW')
+      .where(this.pbacMrb(permissions))
       .executeTakeFirst();
 
     const interceptedRow = await sql<{ total: string }>`
@@ -236,7 +268,7 @@ export class KyselyDashboardRepository {
       WHERE action = 'GATE_BLOCKED'
     `.execute(this.db);
 
-    const defectRows = await this.queryFailedItems(TOP_DEFECT_LIMIT);
+    const defectRows = await this.queryFailedItems(TOP_DEFECT_LIMIT, whereAliased);
     const defectTotal = defectRows.reduce((sum, row) => sum + row.count, 0);
     const defectDistribution = defectRows.map((row) => ({
       name: row.name,
@@ -247,7 +279,7 @@ export class KyselyDashboardRepository {
     const defectDayRows = await sql<{ day: string; total: string }>`
       SELECT to_char(o.created_at, 'YYYY-MM-DD') AS day, count(*)::int AS total
       FROM inspection_orders o, jsonb_array_elements(o.items) AS item
-      WHERE item->>'result' = 'FAILED'
+      WHERE item->>'result' = 'FAILED' AND ${whereAliased}
       GROUP BY 1
     `.execute(this.db);
 
@@ -260,6 +292,7 @@ export class KyselyDashboardRepository {
              count(*)::int AS total,
              count(*) FILTER (WHERE status IN ('PASSED', 'COMPLETED', 'IN_MRB_REVIEW'))::int AS passed
       FROM inspection_orders
+      WHERE ${where}
       GROUP BY 1
     `.execute(this.db);
 
@@ -277,25 +310,39 @@ export class KyselyDashboardRepository {
     };
   }
 
+  /** MRB 表过滤（无供应商列：限定供应商的规则不匹配，全规则被跳过时 1=0） */
+  private pbacMrb(permissions: readonly MaterialPermission[] | undefined): Expression<SqlBool> {
+    return permissions !== undefined
+      ? buildMaterialPermissionWhere(permissions, {
+          targetRef: 'mrb_reviews',
+          hasSupplierColumn: false,
+        })
+      : sql<SqlBool>`1 = 1`;
+  }
+
   /** MRB 评审中（待评审 + 会签中）数量 */
-  private async countMrbInReview(): Promise<number> {
+  private async countMrbInReview(permissions?: readonly MaterialPermission[]): Promise<number> {
     const row = await this.db
       .selectFrom('mrbReviews')
       .select((eb) => eb.fn.countAll().as('total'))
       .where('status', 'in', ['PENDING_REVIEW', 'UNDER_REVIEW'])
+      .where(this.pbacMrb(permissions))
       .executeTakeFirst();
 
     return row ? Number(row.total) : 0;
   }
 
   /** 检验项缺陷 TopN（JSONB 明细里 result=FAILED 的指标项按名称归类） */
-  private async queryFailedItems(limit: number): Promise<Array<{ name: string; category: string; count: number }>> {
+  private async queryFailedItems(
+    limit: number,
+    where: Expression<SqlBool>
+  ): Promise<Array<{ name: string; category: string; count: number }>> {
     const result = await sql<{ name: string; category: string; count: string }>`
       SELECT item->>'name' AS name,
              coalesce(item->>'metricCategory', 'DIMENSION') AS category,
              count(*)::int AS count
       FROM inspection_orders o, jsonb_array_elements(o.items) AS item
-      WHERE item->>'result' = 'FAILED'
+      WHERE item->>'result' = 'FAILED' AND ${where}
       GROUP BY 1, 2
       ORDER BY count DESC, name ASC
       LIMIT ${limit}

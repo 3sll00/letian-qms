@@ -40,8 +40,10 @@ export class DecideMrbDispositionUseCase {
       }
 
       if (securityCtx) {
+        // 从物料主数据解析真实分类；查不到时 UNKNOWN 不命中任何白名单（fail-closed）
+        const material = await ctx.materials.getMaterialByCode(review.materialCode);
         securityCtx.assertAccess({
-          targetCategory: review.materialCode.split('-')[0] ?? 'STANDARD',
+          targetCategory: material?.categoryCode ?? 'UNKNOWN',
           targetMaterialCode: review.materialCode,
         });
       }
@@ -57,9 +59,10 @@ export class DecideMrbDispositionUseCase {
       // 锁定批次
       await ctx.locks.acquireXactLock(review.batchNo);
 
+      const effectiveConcessionUrl = cmd.concessionAttachmentUrl || review.concessionAttachmentUrl;
       // 特采让步校验：必须已上传客户书面同意书附件
       if (cmd.disposition === 'CONCESSION') {
-        if (!review.concessionAttachmentUrl) {
+        if (!effectiveConcessionUrl) {
           throw new ApplicationError(
             'CONCESSION_NOT_SIGNED_OFF',
             '特采让步接收必须先经过客户书面签核同意，当前未签核或未通过',
@@ -72,6 +75,7 @@ export class DecideMrbDispositionUseCase {
         ...review,
         disposition: cmd.disposition,
         status: 'DISPOSED',
+        concessionAttachmentUrl: effectiveConcessionUrl,
         ...(cmd.dispositionReason !== undefined ? { dispositionNotes: cmd.dispositionReason } : {}),
         updatedAt: new Date().toISOString(),
       };

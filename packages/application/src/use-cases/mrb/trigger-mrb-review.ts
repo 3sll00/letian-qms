@@ -1,3 +1,11 @@
+
+function mapOrderStageToSourceType(stage?: string): MRBFailCategory {
+  if (stage === "IQC") return "INCOMING_FAIL";
+  if (stage === "IPQC") return "PROCESS_FAIL";
+  if (stage === "OQC" || stage === "FQC") return "SHIPMENT_FAIL";
+  if (stage === "OUTSOURCE") return "SUBCONTRACT_FAIL";
+  return "PROCESS_FAIL";
+}
 import type {
   MRBReview as MRBReviewDTO,
   CreateMRBReviewRequest,
@@ -40,8 +48,10 @@ export class TriggerMrbReviewUseCase {
       const orderDTO = order;
 
       if (securityCtx) {
+        // 从物料主数据解析真实分类；查不到时 UNKNOWN 不命中任何白名单（fail-closed）
+        const material = await ctx.materials.getMaterialByCode(orderDTO.materialCode);
         securityCtx.assertAccess({
-          targetCategory: orderDTO.materialCode.split('-')[0] ?? 'STANDARD',
+          targetCategory: material?.categoryCode ?? 'UNKNOWN',
           targetMaterialCode: orderDTO.materialCode,
         });
       }
@@ -74,7 +84,7 @@ export class TriggerMrbReviewUseCase {
       const mrbRecord: MRBReviewDTO = {
         id: crypto.randomUUID(),
         mrbNo: reviewNo,
-        sourceType: failCategory as MRBFailCategory,
+        sourceType: (cmd.sourceType && ["INCOMING_FAIL", "PROCESS_FAIL", "SHIPMENT_FAIL", "SUBCONTRACT_FAIL"].includes(cmd.sourceType) ? cmd.sourceType : mapOrderStageToSourceType(orderDTO.inspectionType)) as MRBFailCategory,
         sourceOrderNo: orderDTO.orderNo,
         batchNo: orderDTO.batchNo,
         materialCode: orderDTO.materialCode,

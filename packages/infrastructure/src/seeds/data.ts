@@ -25,6 +25,7 @@ import type {
 } from '@letian/contracts';
 import type {
   AuditLogInsert,
+  AuthorizationLogInsert,
   CustomerInsert,
   EmployeeInsert,
   IntegrationConfigInsert,
@@ -32,6 +33,7 @@ import type {
   InventoryCategoryInsert,
   MaterialInsert,
   OutboxEventInsert,
+  RoleInsert,
   SupplierInsert,
   WorkshopInsert,
 } from '../database/schema.js';
@@ -236,6 +238,71 @@ export const seedMaterials: MaterialInsert[] = [
     unit: 'PCS',
     confidentialityLevel: 1,
   },
+  // 009 委外检验 (机加工 / 热处理) 受托件成品物料
+  {
+    id: '10000000-0000-4000-8000-000000000011',
+    materialCode: 'CP-004',
+    materialName: '精密轴套',
+    specModel: 'Φ20×30mm / 45# 钢 / 精磨外圆',
+    categoryCode: 'CAT-FIN-BOLT',
+    unit: 'PCS',
+    confidentialityLevel: 2,
+  },
+  {
+    id: '10000000-0000-4000-8000-000000000012',
+    materialCode: 'CP-005',
+    materialName: '连接件',
+    specModel: 'M12 连接件 / 机加工成品',
+    categoryCode: 'CAT-FIN-BOLT',
+    unit: 'PCS',
+    confidentialityLevel: 2,
+  },
+  {
+    id: '10000000-0000-4000-8000-000000000013',
+    materialCode: 'CP-006',
+    materialName: '高强度螺栓',
+    specModel: 'M10×45 / 10.9级 / 热处理回厂',
+    categoryCode: 'CAT-FIN-BOLT',
+    unit: 'PCS',
+    confidentialityLevel: 3,
+  },
+  {
+    id: '10000000-0000-4000-8000-000000000014',
+    materialCode: 'CP-007',
+    materialName: '弹簧垫圈',
+    specModel: 'Φ10 / 65Mn / 热处理回厂',
+    categoryCode: 'CAT-FIN-NUT',
+    unit: 'PCS',
+    confidentialityLevel: 1,
+  },
+  // 008 出货检验 (OQC_SH) 销售出库成品物料（与 WPS 图片(9) 出货检验原型口径一致）
+  {
+    id: '10000000-0000-4000-8000-000000000015',
+    materialCode: 'CP-001',
+    materialName: '六角螺栓M10',
+    specModel: 'M10×30 / 8.8级 / 蓝白锌',
+    categoryCode: 'CAT-FIN-BOLT',
+    unit: 'PCS',
+    confidentialityLevel: 3,
+  },
+  {
+    id: '10000000-0000-4000-8000-000000000016',
+    materialCode: 'CP-002',
+    materialName: '六角螺栓M12',
+    specModel: 'M12×40 / 8.8级 / 发黑',
+    categoryCode: 'CAT-FIN-BOLT',
+    unit: 'PCS',
+    confidentialityLevel: 3,
+  },
+  {
+    id: '10000000-0000-4000-8000-000000000017',
+    materialCode: 'CP-003',
+    materialName: '法兰螺栓',
+    specModel: 'M8×25 / 法兰面 / 镀锌',
+    categoryCode: 'CAT-FIN-BOLT',
+    unit: 'PCS',
+    confidentialityLevel: 2,
+  },
 ];
 
 /** 物料编码 -> 物料名称，工单落库时补齐 material_name */
@@ -247,9 +314,37 @@ export function materialNameOf(materialCode: string): string {
   return found.materialName;
 }
 
+/**
+ * 员工 UUID -> 姓名，工单落库时补齐 inspector_name。
+ *
+ * 与迁移 010 的口径一致：检验人姓名是可重算的展示快照，必须与 inspector_id 指向的员工
+ * 保持一致；查不到员工时返回 undefined（由调用方决定是否省略该属性），不做姓名猜测。
+ */
+export function employeeNameOf(employeeId: string): string | undefined {
+  return seedEmployees.find((employee) => employee.id === employeeId)?.name;
+}
+
 // ============================================================================
 // 3. 供应商 / 客户 / 车间 / 员工
 // ============================================================================
+
+/**
+ * 角色字典（003 迁移新增 roles 表）。
+ * roleCode 同时被 material_permissions.role_code 与 employees.role_code 引用，
+ * 是登录签发 JWT 角色与"按角色批量配置"的唯一数据源。
+ */
+export const seedRoles: RoleInsert[] = [
+  { roleCode: 'ADMIN', roleName: '系统管理员', description: '系统所有资源与数据的完全控制权', sortOrder: 0 },
+  { roleCode: 'QA_MANAGER', roleName: '质量主管', description: '质量总览与全量物料数据权限', sortOrder: 10 },
+  { roleCode: 'PROCESS_ENGINEER', roleName: '工艺工程师', description: '质检方案与工艺参数维护', sortOrder: 20 },
+  { roleCode: 'IQC_INSPECTOR', roleName: 'IQC检验员', description: '来料检验', sortOrder: 30 },
+  { roleCode: 'IPQC_INSPECTOR', roleName: 'IPQC检验员', description: '过程检验', sortOrder: 40 },
+  { roleCode: 'OQC_INSPECTOR', roleName: 'OQC检验员', description: '出货检验', sortOrder: 50 },
+  { roleCode: 'INSPECTOR', roleName: '通用质检员', description: '质检基础权限角色', sortOrder: 55 },
+  { roleCode: 'SURFACE_TREATMENT_ENGINEER', roleName: '表面处理工程师', description: '表面处理工序质量', sortOrder: 60 },
+  { roleCode: 'WORKSHOP_LEADER', roleName: '车间班组长', description: '车间现场管理', sortOrder: 70 },
+  { roleCode: 'RESTRICTED_VIEWER', roleName: '受限访问', description: '演示用受限角色（默认停用规则）', sortOrder: 90 },
+];
 
 export const seedSuppliers: SupplierInsert[] = [
   {
@@ -286,6 +381,22 @@ export const seedSuppliers: SupplierInsert[] = [
     supplierName: '无锡超匠工光轴制造有限公司',
     contactPerson: '郑经理',
     phone: '13522226666',
+  },
+  {
+    // 009 委外检验 - 机加工工艺外协厂商
+    id: '13000000-0000-4000-8000-000000000006',
+    supplierCode: 'SUP-006',
+    supplierName: '苏州机加工厂',
+    contactPerson: '顾厂长',
+    phone: '13711112222',
+  },
+  {
+    // 009 委外检验 - 热处理工艺外协厂商
+    id: '13000000-0000-4000-8000-000000000007',
+    supplierCode: 'SUP-007',
+    supplierName: '上海热处理厂',
+    contactPerson: '沈经理',
+    phone: '13833334444',
   },
 ];
 
@@ -338,6 +449,16 @@ export const seedWorkshops: WorkshopInsert[] = [
 
 export const seedEmployees: EmployeeInsert[] = [
   {
+    id: '11111111-1111-1111-1111-111111111111',
+    employeeCode: 'EMP-9999',
+    name: '张三 (测试质检员)',
+    department: '品质保证部',
+    phone: '13899999999',
+    email: 'zhangsan@letian.com',
+    isActive: true,
+    roleCode: 'QA_MANAGER',
+  },
+  {
     id: EMPLOYEE_IDS.zhangQiang,
     employeeCode: 'EMP-1042',
     name: '张强',
@@ -345,6 +466,7 @@ export const seedEmployees: EmployeeInsert[] = [
     phone: '13800000001',
     email: 'zhangqiang@letian.com',
     isActive: true,
+    roleCode: 'QA_MANAGER',
   },
   {
     id: EMPLOYEE_IDS.liWei,
@@ -354,6 +476,7 @@ export const seedEmployees: EmployeeInsert[] = [
     phone: '13800000002',
     email: 'liwei@letian.com',
     isActive: true,
+    roleCode: 'PROCESS_ENGINEER',
   },
   {
     id: EMPLOYEE_IDS.liuFang,
@@ -363,6 +486,7 @@ export const seedEmployees: EmployeeInsert[] = [
     phone: '13800000003',
     email: 'liufang@letian.com',
     isActive: true,
+    roleCode: 'OQC_INSPECTOR',
   },
   {
     id: EMPLOYEE_IDS.wangJianGuo,
@@ -372,6 +496,7 @@ export const seedEmployees: EmployeeInsert[] = [
     phone: '13800000004',
     email: 'wangjianguo@letian.com',
     isActive: true,
+    roleCode: 'WORKSHOP_LEADER',
   },
   {
     id: EMPLOYEE_IDS.zhaoZhiMing,
@@ -381,6 +506,7 @@ export const seedEmployees: EmployeeInsert[] = [
     phone: '13800000005',
     email: 'zhaozhiming@letian.com',
     isActive: true,
+    roleCode: 'IPQC_INSPECTOR',
   },
   {
     id: EMPLOYEE_IDS.sunDeSheng,
@@ -390,6 +516,7 @@ export const seedEmployees: EmployeeInsert[] = [
     phone: '13800000006',
     email: 'sundesheng@letian.com',
     isActive: true,
+    roleCode: 'PROCESS_ENGINEER',
   },
   {
     id: EMPLOYEE_IDS.zhouHaiBo,
@@ -399,6 +526,7 @@ export const seedEmployees: EmployeeInsert[] = [
     phone: '13800000007',
     email: 'zhouhaibo@letian.com',
     isActive: true,
+    roleCode: 'SURFACE_TREATMENT_ENGINEER',
   },
   {
     id: EMPLOYEE_IDS.chenJing,
@@ -408,6 +536,7 @@ export const seedEmployees: EmployeeInsert[] = [
     phone: '13800000008',
     email: 'chenjing@letian.com',
     isActive: true,
+    roleCode: 'IQC_INSPECTOR',
   },
 ];
 
@@ -1043,6 +1172,28 @@ export interface SeedOrderSpec {
   /** 方案快照生成时间戳 */
   snapshotAt: string;
   itemKind: ItemResultKind;
+  // 008 出货检验 (OQC) 销售出库关联字段：仅出货检验 (OQC_SH) 工单需要填写
+  /** 销售出库单号，如 SO-20231012-01 */
+  salesOrderNo?: string;
+  /** 出库日期，如 2023-10-12 */
+  dispatchDate?: string;
+  /** 客户名称（快照自客户主数据，便于出库单直接展示） */
+  customerName?: string;
+  /** 客户采购订单号/合同号，如 PO-20231012-01 */
+  salesOrderPoNo?: string;
+  /** ERP 出库单审核状态：待审核 / 已审核 / 已拦截 */
+  erpStatus?: string;
+  /** 检验人姓名（冗余自员工主数据，出货台账需直接展示） */
+  inspectorName?: string;
+  // 009 委外检验 (OQC 七分类: 表面处理/机加工/热处理) 台账字段
+  /** ERP 委外加工单号，如 WW-20260706-010 */
+  outsourceNo?: string;
+  /** 加工类型/工艺分类：镀锌 / 镀镍 / 发黑 / 磷化 / 达克罗 / 热处理 / 机加工 */
+  processType?: string;
+  /** 委外件回厂登记日期，如 2026-07-06 */
+  returnDate?: string;
+  /** 加工商名称快照，如 苏州机加工厂 */
+  vendorName?: string;
 }
 
 export const seedOrders: SeedOrderSpec[] = [
@@ -1152,6 +1303,11 @@ export const seedOrders: SeedOrderSpec[] = [
     batchNo: 'B20231010-03',
     materialCode: 'MAT-BLT-109-M10',
     supplierCode: 'SUP-004',
+    // 009 委外检验台账字段：委外加工单号留空由读取侧回落批次号，其余三列显式落库，
+    // 避免历史委外行在「加工类型 / 加工商 / 回厂日期」三列上退回假数据或主数据编码。
+    processType: '镀锌',
+    vendorName: '恒信表面处理厂',
+    returnDate: '2023-10-12',
     inspectorId: EMPLOYEE_IDS.zhouHaiBo,
     totalQty: 42000,
     sampleQty: 20,
@@ -1172,6 +1328,12 @@ export const seedOrders: SeedOrderSpec[] = [
     materialCode: 'MAT-BLT-109-M10',
     customerCode: 'CUST-001',
     inspectorId: EMPLOYEE_IDS.liuFang,
+    salesOrderNo: 'SO-20231012-01',
+    dispatchDate: '2023-10-12',
+    customerName: '上海通用汽车零部件采购部',
+    salesOrderPoNo: 'PO-20231012-01',
+    erpStatus: '已审核',
+    inspectorName: '刘芳',
     totalQty: 42000,
     sampleQty: 200,
     status: 'COMPLETED',
@@ -1248,6 +1410,12 @@ export const seedOrders: SeedOrderSpec[] = [
     materialCode: 'MAT-BLT-109-M10',
     customerCode: 'CUST-003',
     inspectorId: EMPLOYEE_IDS.liuFang,
+    salesOrderNo: 'SO-20231013-04',
+    dispatchDate: '2023-10-13',
+    customerName: '金风科技风电紧固件集采中心',
+    salesOrderPoNo: 'PO-20231013-04',
+    erpStatus: '已审核',
+    inspectorName: '刘芳',
     totalQty: 42000,
     sampleQty: 200,
     status: 'COMPLETED',
@@ -1266,6 +1434,10 @@ export const seedOrders: SeedOrderSpec[] = [
     batchNo: 'B20231013-05',
     materialCode: 'MAT-35CRMO-08',
     supplierCode: 'SUP-004',
+    // 009 委外检验台账字段：同上，口径与 011 迁移的供应商主数据回填保持一致
+    processType: '热处理',
+    vendorName: '恒信表面处理厂',
+    returnDate: '2023-10-13',
     inspectorId: EMPLOYEE_IDS.zhouHaiBo,
     totalQty: 15000,
     sampleQty: 20,
@@ -1287,6 +1459,12 @@ export const seedOrders: SeedOrderSpec[] = [
     materialCode: 'MAT-BLT-109-M10',
     customerCode: 'CUST-003',
     inspectorId: EMPLOYEE_IDS.liuFang,
+    salesOrderNo: 'SO-20231013-06',
+    dispatchDate: '2023-10-13',
+    customerName: '金风科技风电紧固件集采中心',
+    salesOrderPoNo: 'PO-20231013-06',
+    erpStatus: '已拦截',
+    inspectorName: '刘芳',
     totalQty: 42000,
     sampleQty: 200,
     status: 'COMPLETED',
@@ -1295,6 +1473,284 @@ export const seedOrders: SeedOrderSpec[] = [
     inspectionNotes: '出货抽检发现通规不止，经 MRB 让步接收决议后归档',
     snapshotAt: '2023-10-13T13:00:00.000Z',
     itemKind: 'HAS_FAILED',
+  },
+  // ------------------------------------------------------------------
+  // 009 委外检验 - 机加工检验台账 (OQC_MACH)
+  // ------------------------------------------------------------------
+  // 009 委外检验 - 表面处理检验台账 (OQC_SF)
+  {
+    id: '30000000-0000-4000-8000-000000000025',
+    orderNo: 'OQC-SF-20260706-0001',
+    orderType: 'OQC_SF',
+    planCode: 'QP-OQC-SF',
+    versionNo: 'v2.0',
+    batchNo: 'WW-20260706-001',
+    outsourceNo: 'WW-20260706-001',
+    processType: '镀锌',
+    returnDate: '2026-07-06',
+    materialCode: 'MAT-BLT-109-M10',
+    supplierCode: 'SUP-004',
+    vendorName: '东莞表面处理厂',
+    inspectorId: EMPLOYEE_IDS.zhouHaiBo,
+    totalQty: 500,
+    sampleQty: 500,
+    status: 'PENDING',
+    judgment: null,
+    isMandatoryGate: true,
+    inspectionNotes: '委外表面处理（镀锌）回厂待检验',
+    snapshotAt: '2026-07-06T08:00:00.000Z',
+    itemKind: 'PENDING',
+  },
+  {
+    id: '30000000-0000-4000-8000-000000000026',
+    orderNo: 'OQC-SF-20260705-0008',
+    orderType: 'OQC_SF',
+    planCode: 'QP-OQC-SF',
+    versionNo: 'v2.0',
+    batchNo: 'WW-20260705-008',
+    outsourceNo: 'WW-20260705-008',
+    processType: '镀镍',
+    returnDate: '2026-07-05',
+    materialCode: 'MAT-BLT-88-M12',
+    supplierCode: 'SUP-004',
+    vendorName: '深圳电镀厂',
+    inspectorId: EMPLOYEE_IDS.zhouHaiBo,
+    inspectorName: '张检验',
+    totalQty: 300,
+    sampleQty: 300,
+    status: 'PASSED',
+    judgment: 'PASSED',
+    isMandatoryGate: true,
+    inspectionNotes: '委外表面处理（镀镍）回厂检验合格',
+    snapshotAt: '2026-07-05T08:00:00.000Z',
+    itemKind: 'ALL_PASSED',
+  },
+  {
+    id: '30000000-0000-4000-8000-000000000027',
+    orderNo: 'OQC-SF-20260705-0007',
+    orderType: 'OQC_SF',
+    planCode: 'QP-OQC-SF',
+    versionNo: 'v2.0',
+    batchNo: 'WW-20260705-007',
+    outsourceNo: 'WW-20260705-007',
+    processType: '发黑',
+    returnDate: '2026-07-05',
+    materialCode: 'MAT-NUT-10-M10',
+    supplierCode: 'SUP-004',
+    vendorName: '广州发黑厂',
+    inspectorId: EMPLOYEE_IDS.zhouHaiBo,
+    inspectorName: '李检验',
+    totalQty: 200,
+    sampleQty: 200,
+    status: 'FAILED',
+    judgment: 'FAILED',
+    isMandatoryGate: true,
+    inspectionNotes: '委外表面处理（发黑）膜厚不合格，转 MRB 评审',
+    snapshotAt: '2026-07-05T08:00:00.000Z',
+    itemKind: 'HAS_FAILED',
+  },
+  // ------------------------------------------------------------------
+  // 009 委外检验 - 机加工检验台账 (OQC_MACH)
+  {
+    id: '30000000-0000-4000-8000-000000000021',
+    orderNo: 'OQC-MC-20260706-0001',
+    orderType: 'OQC_MACH',
+    planCode: 'QP-OQC-SF',
+    versionNo: 'v2.0',
+    batchNo: 'WW-20260706-010',
+    outsourceNo: 'WW-20260706-010',
+    processType: '机加工',
+    returnDate: '2026-07-06',
+    materialCode: 'CP-004',
+    supplierCode: 'SUP-006',
+    vendorName: '苏州机加工厂',
+    inspectorId: EMPLOYEE_IDS.wangJianGuo,
+    totalQty: 100,
+    sampleQty: 100,
+    status: 'PENDING',
+    judgment: null,
+    isMandatoryGate: false,
+    inspectionNotes: '委外机加工（精密轴套）回厂待检验',
+    snapshotAt: '2026-07-06T08:00:00.000Z',
+    itemKind: 'PENDING',
+  },
+  {
+    id: '30000000-0000-4000-8000-000000000022',
+    orderNo: 'OQC-MC-20260705-0005',
+    orderType: 'OQC_MACH',
+    planCode: 'QP-OQC-SF',
+    versionNo: 'v2.0',
+    batchNo: 'WW-20260705-005',
+    outsourceNo: 'WW-20260705-005',
+    processType: '机加工',
+    returnDate: '2026-07-05',
+    materialCode: 'CP-005',
+    supplierCode: 'SUP-006',
+    vendorName: '昆山加工中心',
+    inspectorId: EMPLOYEE_IDS.wangJianGuo,
+    inspectorName: '王检验',
+    totalQty: 200,
+    sampleQty: 200,
+    status: 'PASSED',
+    judgment: 'PASSED',
+    isMandatoryGate: false,
+    inspectionNotes: '委外机加工（连接件）回厂检验合格',
+    snapshotAt: '2026-07-05T08:00:00.000Z',
+    itemKind: 'ALL_PASSED',
+  },
+  // ------------------------------------------------------------------
+  // 009 委外检验 - 热处理检验台账 (OQC_HEAT)
+  // ------------------------------------------------------------------
+  {
+    id: '30000000-0000-4000-8000-000000000023',
+    orderNo: 'OQC-HT-20260706-0001',
+    orderType: 'OQC_HEAT',
+    planCode: 'QP-OQC-SF',
+    versionNo: 'v2.0',
+    batchNo: 'WW-20260706-015',
+    outsourceNo: 'WW-20260706-015',
+    processType: '热处理',
+    returnDate: '2026-07-06',
+    materialCode: 'CP-006',
+    supplierCode: 'SUP-007',
+    vendorName: '上海热处理厂',
+    inspectorId: EMPLOYEE_IDS.zhangQiang,
+    inspectorName: '张检验',
+    totalQty: 500,
+    sampleQty: 500,
+    status: 'INSPECTING',
+    judgment: null,
+    isMandatoryGate: false,
+    inspectionNotes: '委外热处理（高强度螺栓）回厂检验录入中',
+    snapshotAt: '2026-07-06T08:00:00.000Z',
+    itemKind: 'PENDING',
+  },
+  {
+    id: '30000000-0000-4000-8000-000000000024',
+    orderNo: 'OQC-HT-20260705-0003',
+    orderType: 'OQC_HEAT',
+    planCode: 'QP-OQC-SF',
+    versionNo: 'v2.0',
+    batchNo: 'WW-20260705-013',
+    outsourceNo: 'WW-20260705-013',
+    processType: '热处理',
+    returnDate: '2026-07-05',
+    materialCode: 'CP-007',
+    supplierCode: 'SUP-007',
+    vendorName: '无锡热处理',
+    inspectorId: EMPLOYEE_IDS.liWei,
+    inspectorName: '李检验',
+    totalQty: 1000,
+    sampleQty: 1000,
+    status: 'PASSED',
+    judgment: 'PASSED',
+    isMandatoryGate: false,
+    inspectionNotes: '委外热处理（弹簧垫圈）回厂检验合格',
+    snapshotAt: '2026-07-05T08:00:00.000Z',
+    itemKind: 'ALL_PASSED',
+  },
+  // ------------------------------------------------------------------
+  // 008 出货检验 (OQC_SH) 销售出库放行台账
+  // 与 WPS 图片(9) 出货检验原型逐列一致的 4 条记录（检验编号 / 销售出库单号 / 出库日期 /
+  // 客户 / 订单号 / 成品编码 / 成品名称 / 数量 / ERP状态 / 检验状态 / 检验人 / 操作）
+  // 注意：列表按 created_at DESC 排序，种子行 created_at 同为播种时刻，
+  // 因此此处按原型展示顺序的「逆序」写入，读出来的顺序才与原型一致。
+  // ------------------------------------------------------------------
+
+  {
+    id: '30000000-0000-4000-8000-000000000031',
+    orderNo: 'OQC-SH-20260705-0007',
+    orderType: 'OQC_SH',
+    planCode: 'QP-OQC-SH',
+    versionNo: 'v1.2',
+    batchNo: 'LOT-20260705-0007',
+    materialCode: 'CP-003',
+    inspectorId: EMPLOYEE_IDS.wangJianGuo,
+    inspectorName: '王检验',
+    salesOrderNo: 'SO-20260705-07',
+    dispatchDate: '2026-07-05',
+    customerName: '客户D工业',
+    salesOrderPoNo: 'PO-D-004',
+    erpStatus: '已拦截',
+    totalQty: 2000,
+    sampleQty: 2000,
+    status: 'COMPLETED',
+    judgment: 'FAILED',
+    isMandatoryGate: true,
+    inspectionNotes: '销售出库单 SO-20260705-07 出货抽检不合格，ERP 已拦截出库',
+    snapshotAt: '2026-07-05T16:00:00.000Z',
+    itemKind: 'HAS_FAILED',
+  },
+  {
+    id: '30000000-0000-4000-8000-000000000030',
+    orderNo: 'OQC-SH-20260705-0008',
+    orderType: 'OQC_SH',
+    planCode: 'QP-OQC-SH',
+    versionNo: 'v1.2',
+    batchNo: 'LOT-20260705-0008',
+    materialCode: 'CP-001',
+    inspectorId: EMPLOYEE_IDS.liWei,
+    inspectorName: '李检验',
+    salesOrderNo: 'SO-20260705-08',
+    dispatchDate: '2026-07-05',
+    customerName: '客户C集团',
+    salesOrderPoNo: 'PO-C-003',
+    erpStatus: '已审核',
+    totalQty: 8000,
+    sampleQty: 8000,
+    status: 'COMPLETED',
+    judgment: 'PASSED',
+    isMandatoryGate: true,
+    inspectionNotes: '销售出库单 SO-20260705-08 出货检验合格，已放行归档',
+    snapshotAt: '2026-07-05T15:00:00.000Z',
+    itemKind: 'ALL_PASSED',
+  },
+  {
+    id: '30000000-0000-4000-8000-000000000029',
+    orderNo: 'OQC-SH-20260706-0002',
+    orderType: 'OQC_SH',
+    planCode: 'QP-OQC-SH',
+    versionNo: 'v1.2',
+    batchNo: 'LOT-20260706-0002',
+    materialCode: 'CP-002',
+    inspectorId: EMPLOYEE_IDS.zhangQiang,
+    inspectorName: '张检验',
+    salesOrderNo: 'SO-20260706-02',
+    dispatchDate: '2026-07-06',
+    customerName: '客户B制造',
+    salesOrderPoNo: 'PO-B-002',
+    erpStatus: '待审核',
+    totalQty: 3000,
+    sampleQty: 3000,
+    status: 'INSPECTING',
+    judgment: null,
+    isMandatoryGate: true,
+    inspectionNotes: '销售出库单 SO-20260706-02 检验录入中',
+    snapshotAt: '2026-07-06T09:00:00.000Z',
+    itemKind: 'PENDING',
+  },
+  {
+    id: '30000000-0000-4000-8000-000000000028',
+    orderNo: 'OQC-SH-20260706-0001',
+    orderType: 'OQC_SH',
+    planCode: 'QP-OQC-SH',
+    versionNo: 'v1.2',
+    batchNo: 'LOT-20260706-0001',
+    materialCode: 'CP-001',
+    inspectorId: EMPLOYEE_IDS.liuFang,
+    salesOrderNo: 'SO-20260706-01',
+    dispatchDate: '2026-07-06',
+    customerName: '客户A科技',
+    salesOrderPoNo: 'PO-A-001',
+    erpStatus: '待审核',
+    totalQty: 5000,
+    sampleQty: 5000,
+    status: 'PENDING',
+    judgment: null,
+    isMandatoryGate: true,
+    inspectionNotes: '销售出库单 SO-20260706-01 待检验，ERP 出库单尚待审核',
+    snapshotAt: '2026-07-06T08:00:00.000Z',
+    itemKind: 'PENDING',
   },
 ];
 
@@ -1802,6 +2258,16 @@ export const MAIN_CHAIN_ROOT_BATCH = 'COIL-20230925-01';
 
 export const seedMaterialPermissions: MaterialPermission[] = [
   {
+    id: '70000000-0000-4000-8000-000000000099',
+    userId: '11111111-1111-1111-1111-111111111111',
+    userName: '张三 (测试质检员)',
+    roleCode: 'QA_MANAGER',
+    materialCategories: ['*'],
+    materialCodes: [],
+    supplierCodes: [],
+    isActive: true,
+  },
+  {
     // 通配规则：可见全部物料分类
     id: '70000000-0000-4000-8000-000000000001',
     userId: EMPLOYEE_IDS.zhangQiang,
@@ -2143,5 +2609,140 @@ export const seedOutboxEvents: OutboxEventInsert[] = [
     processedAt: null,
     traceId: 'trace-20231013-1430-010',
     errorReason: null,
+  },
+];
+
+// ============================================================================
+// 12. 权限校验日志（authorization_logs）
+// ============================================================================
+
+export const seedAuthorizationLogs: AuthorizationLogInsert[] = [
+  {
+    id: '71000000-0000-4000-8000-000000000001',
+    userId: EMPLOYEE_IDS.zhangQiang,
+    userName: '张强',
+    roleCode: 'QA_MANAGER',
+    resourceType: 'DASHBOARD',
+    resourceId: 'OVERVIEW',
+    materialCode: null,
+    materialCategory: null,
+    supplierCode: null,
+    action: 'READ',
+    decision: 'ALLOWED',
+    matchedRuleId: '70000000-0000-4000-8000-000000000001',
+    detail: '质量主管全量通配规则，放行看板质量指标查询',
+    createdAt: new Date(Date.now() - 3600000 * 24 * 2),
+  },
+  {
+    id: '71000000-0000-4000-8000-000000000002',
+    userId: EMPLOYEE_IDS.chenJing,
+    userName: '陈静',
+    roleCode: 'IQC_INSPECTOR',
+    resourceType: 'INSPECTION_ORDER',
+    resourceId: '40000000-0000-4000-8000-000000000001',
+    materialCode: 'MAT-304SS-05',
+    materialCategory: 'CAT-RAW-WIRE',
+    supplierCode: 'SUP-001',
+    action: 'READ',
+    decision: 'ALLOWED',
+    matchedRuleId: '70000000-0000-4000-8000-000000000002',
+    detail: '匹配来料线材分类与江苏大明不锈钢供应商准入规则',
+    createdAt: new Date(Date.now() - 3600000 * 24),
+  },
+  {
+    id: '71000000-0000-4000-8000-000000000003',
+    userId: EMPLOYEE_IDS.chenJing,
+    userName: '陈静',
+    roleCode: 'IQC_INSPECTOR',
+    resourceType: 'INSPECTION_ORDER',
+    resourceId: '40000000-0000-4000-8000-000000000005',
+    materialCode: 'MAT-PKG-BOX-01',
+    materialCategory: 'CAT-PKG',
+    supplierCode: 'SUP-005',
+    action: 'READ',
+    decision: 'DENIED',
+    matchedRuleId: null,
+    detail: '未获得包材类供应商 SUP-005 的检验权限，行级过滤拒绝',
+    createdAt: new Date(Date.now() - 3600000 * 20),
+  },
+  {
+    id: '71000000-0000-4000-8000-000000000004',
+    userId: EMPLOYEE_IDS.zhouHaiBo,
+    userName: '周海波',
+    roleCode: 'IPQC_INSPECTOR',
+    resourceType: 'INSPECTION_ORDER',
+    resourceId: '40000000-0000-4000-8000-000000000007',
+    materialCode: 'MAT-BLT-109-M10',
+    materialCategory: 'CAT-WIP-BLANK',
+    supplierCode: null,
+    action: 'EVALUATE',
+    decision: 'ALLOWED',
+    matchedRuleId: '70000000-0000-4000-8000-000000000004',
+    detail: '匹配冷镦成型件半成品检验权限',
+    createdAt: new Date(Date.now() - 3600000 * 16),
+  },
+  {
+    id: '71000000-0000-4000-8000-000000000005',
+    userId: EMPLOYEE_IDS.liuFang,
+    userName: '刘芳',
+    roleCode: 'OQC_INSPECTOR',
+    resourceType: 'INSPECTION_ORDER',
+    resourceId: '40000000-0000-4000-8000-000000000009',
+    materialCode: 'MAT-SCR-HEX-M8',
+    materialCategory: 'CAT-FIN',
+    supplierCode: null,
+    action: 'READ',
+    decision: 'ALLOWED',
+    matchedRuleId: '70000000-0000-4000-8000-000000000003',
+    detail: '匹配成品出货检验全量成品权限',
+    createdAt: new Date(Date.now() - 3600000 * 12),
+  },
+  {
+    id: '71000000-0000-4000-8000-000000000006',
+    userId: EMPLOYEE_IDS.wangJianGuo,
+    userName: '王建国',
+    roleCode: 'RESTRICTED_VIEWER',
+    resourceType: 'INSPECTION_PLAN',
+    resourceId: '30000000-0000-4000-8000-000000000001',
+    materialCode: 'MAT-304SS-05',
+    materialCategory: 'CAT-RAW-WIRE',
+    supplierCode: null,
+    action: 'READ',
+    decision: 'DENIED',
+    matchedRuleId: '70000000-0000-4000-8000-000000000005',
+    detail: '受限访问角色规则处于停用状态，拒绝访问质检方案',
+    createdAt: new Date(Date.now() - 3600000 * 8),
+  },
+  {
+    id: '71000000-0000-4000-8000-000000000007',
+    userId: EMPLOYEE_IDS.zhangQiang,
+    userName: '张强',
+    roleCode: 'QA_MANAGER',
+    resourceType: 'MRB_REVIEW',
+    resourceId: '50000000-0000-4000-8000-000000000001',
+    materialCode: 'MAT-304SS-05',
+    materialCategory: 'CAT-RAW-WIRE',
+    supplierCode: 'SUP-001',
+    action: 'READ',
+    decision: 'ALLOWED',
+    matchedRuleId: '70000000-0000-4000-8000-000000000001',
+    detail: '质量主管通配权限放行 MRB 评审单查阅',
+    createdAt: new Date(Date.now() - 3600000 * 4),
+  },
+  {
+    id: '71000000-0000-4000-8000-000000000008',
+    userId: EMPLOYEE_IDS.zhangQiang,
+    userName: '张强',
+    roleCode: 'QA_MANAGER',
+    resourceType: 'BATCH_TRACE',
+    resourceId: 'B20231012-01',
+    materialCode: 'MAT-304SS-05',
+    materialCategory: 'CAT-RAW-WIRE',
+    supplierCode: 'SUP-001',
+    action: 'READ',
+    decision: 'ALLOWED',
+    matchedRuleId: '70000000-0000-4000-8000-000000000001',
+    detail: '追溯图谱穿透查询放行',
+    createdAt: new Date(Date.now() - 3600000 * 1),
   },
 ];

@@ -4,6 +4,49 @@ import { extendZodWithOpenApi } from '@asteasolutions/zod-to-openapi';
 extendZodWithOpenApi(z);
 
 /**
+ * 不合格品待审核池状态枚举
+ */
+export const PendingDefectStatusEnum = z.enum([
+  'PENDING_INITIATE', // 待发起评审 (各检验环节不合格品自动汇入)
+  'INITIATED',        // 已发起评审 (已生成 MRB 评审单)
+  'DISMISSED',        // 已误判撤销/免审归档
+]).openapi('PendingDefectStatus');
+
+/**
+ * 不合格待审核池单据条目 Schema (统一待审核池★)
+ */
+export const PendingDefectItemSchema = z.object({
+  id: z.string().uuid().openapi({ description: '不合格记录 UUID' }),
+  inspectionOrderId: z.string().uuid().openapi({ description: '来源检验工单 UUID' }),
+  orderNo: z.string().openapi({ description: '来源检验单号', example: 'IQC20260918-001' }),
+  inspectionType: z.string().openapi({ description: '检验类型 (IQC/IPQC/OQC_SF/OQC_SH等)' }),
+  batchNo: z.string().openapi({ description: '生产/来料批次号', example: 'LOT-2026-0918-01' }),
+  materialCode: z.string().openapi({ description: '物料编码', example: 'CL-001' }),
+  materialName: z.string().openapi({ description: '物料名称', example: '冷镦钢 10B21' }),
+  supplierName: z.string().optional().openapi({ description: '供应商名称' }),
+  customerName: z.string().optional().openapi({ description: '客户名称' }),
+  defectQty: z.number().int().openapi({ description: '不良数量', example: 50 }),
+  totalQty: z.number().int().openapi({ description: '报检总数量', example: 500 }),
+  defectDescription: z.string().openapi({ description: '不合格现象/超差实测描述' }),
+  defectItemCode: z.string().optional().openapi({ description: '具体不合格的指标项编码' }),
+  status: PendingDefectStatusEnum.default('PENDING_INITIATE').openapi({ description: '待审核池状态' }),
+  mrbId: z.string().uuid().optional().openapi({ description: '关联的 MRB 评审单 ID (发起后回填)' }),
+  inspectorId: z.string().uuid().optional().openapi({ description: '质检员 UUID' }),
+  inspectorName: z.string().optional().openapi({ description: '质检员姓名' }),
+  createdAt: z.string().datetime().openapi({ description: '汇入待审核池时间' }),
+}).openapi('PendingDefectItem');
+
+/**
+ * 质检主管逐条发起评审请求 Schema
+ */
+export const InitiateReviewRequestSchema = z.object({
+  pendingDefectId: z.string().uuid().openapi({ description: '待审核池条目 UUID' }),
+  flowId: z.string().uuid().optional().openapi({ description: '选用的评审流程定义 ID' }),
+  urgencyLevel: z.enum(['NORMAL', 'URGENT', 'CRITICAL']).default('NORMAL').openapi({ description: '紧急程度' }),
+  reviewNotes: z.string().optional().openapi({ description: '发起说明/建议处置方向' }),
+}).openapi('InitiateReviewRequest');
+
+/**
  * 不合格品评审状态枚举 (4 态严格闭环)
  */
 export const MRBStatusEnum = z.enum([
@@ -88,6 +131,7 @@ export const MRBReviewSchema = z.object({
   mrbNo: z.string().openapi({ description: '评审单号', example: 'MRB20260706-001' }),
   sourceType: MRBFailCategoryEnum.openapi({ description: '不合格来源分类' }),
   sourceOrderNo: z.string().openapi({ description: '关联的原始检验单号', example: 'IQC20260706-001' }),
+  pendingDefectId: z.string().uuid().optional().openapi({ description: '关联的不合格待审核池记录 UUID' }),
   batchNo: z.string().openapi({ description: '关联物料/生产批次号', example: 'LOT-2026-0701' }),
   materialCode: z.string().openapi({ description: '物料编码', example: 'CL-001' }),
   materialName: z.string().openapi({ description: '物料名称', example: '冷镦钢 10B21' }),
@@ -125,11 +169,11 @@ export const PaginatedMRBRecordsSchema = z.object({
   items: z.array(MRBReviewSchema).openapi({ description: 'MRB 评审单据明细列表' }),
 }).openapi('PaginatedMRBRecords');
 
-
 export const ReviewNodeStatusEnum = z.enum([
   'PENDING',
   'APPROVED',
   'REJECTED',
+  'EXEMPT',
 ]).openapi('ReviewNodeStatus');
 
 export const ConcessionSignOffSchema = z.object({
@@ -162,6 +206,7 @@ export const MRBReviewNodeSchema = z.object({
 export const CreateMRBReviewRequestSchema = z.object({
   sourceType: MRBFailCategoryEnum,
   sourceOrderNo: z.string().min(1),
+  pendingDefectId: z.string().uuid().optional(),
   batchNo: z.string().min(1),
   materialCode: z.string().min(1),
   materialName: z.string().min(1),
@@ -176,5 +221,4 @@ export const SubmitNodeReviewRequestSchema = z.object({
 }).openapi('SubmitNodeReviewRequest');
 
 export const MRBDispositionDecisionRequestSchema = DisposeMRBRequestSchema;
-
 export const MRBMetricsOverviewSchema = PaginatedMRBRecordsSchema;

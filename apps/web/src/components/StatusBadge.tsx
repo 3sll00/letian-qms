@@ -13,59 +13,59 @@ interface StatusBadgeProps {
 
 export function getToneByStatus(status: string): BadgeTone {
   const s = status.toUpperCase();
-  if (['PASS', 'PASSED', 'COMPLETED', 'QUALIFIED', 'RESOLVED', 'CLOSED', 'ACTIVE', 'DELIVERED', 'NORMAL', 'DISPOSED', 'ONLINE'].includes(s)) {
+  if (['PASS', 'PASSED', 'COMPLETED', 'QUALIFIED', 'RESOLVED', 'CLOSED', 'ACTIVE', 'DELIVERED', 'NORMAL', 'DISPOSED', 'ONLINE', '已合格', '合格', '正常', '已启用'].includes(s)) {
     return 'green';
   }
-  if (['FAIL', 'FAILED', 'REJECT', 'REJECTED', 'DEFECTIVE', 'CRITICAL', 'SUSPENDED', 'BLOCKED', 'INTERCEPTED'].includes(s)) {
+  if (['FAIL', 'FAILED', 'REJECT', 'REJECTED', 'DEFECTIVE', 'CRITICAL', 'SUSPENDED', 'BLOCKED', 'INTERCEPTED', '不合格', '异常', '失败', '阻断'].includes(s)) {
     return 'red';
   }
-  if (['CONCESSION', 'PENDING', 'PENDING_REVIEW', 'UNDER_REVIEW', 'REVIEWING', 'REVIEW', 'WARNING', 'ON_LEAVE', 'HIGH', 'RE_INSPECTING'].includes(s)) {
+  if (['CONCESSION', 'PENDING', 'PENDING_REVIEW', 'UNDER_REVIEW', 'REVIEWING', 'REVIEW', 'WARNING', 'ON_LEAVE', 'HIGH', 'RE_INSPECTING', '特采', '待评审', '待检', '待检验'].includes(s)) {
     return 'amber';
   }
-  if (['IN_PROGRESS', 'RUNNING', 'PROCESSING', 'MEDIUM', 'INSPECTING', 'STORED', 'IN_MRB_REVIEW'].includes(s)) {
+  if (['IN_PROGRESS', 'RUNNING', 'PROCESSING', 'MEDIUM', 'INSPECTING', 'STORED', 'IN_MRB_REVIEW', '检验中', '评审中', '已审核'].includes(s)) {
     return 'blue';
   }
   return 'slate';
 }
 
-export function StatusBadge({ status, tone, children, className, dot = true }: StatusBadgeProps) {
+export function StatusBadge({ status, tone, children, className, dot = false }: StatusBadgeProps) {
   const currentTone = tone || getToneByStatus(status);
 
   const toneClasses: Record<BadgeTone, { bg: string; text: string; border: string; dotColor: string }> = {
     green: {
-      bg: 'bg-emerald-950/60',
-      text: 'text-emerald-400',
-      border: 'border-emerald-500/30',
-      dotColor: 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]',
+      bg: 'bg-emerald-50',
+      text: 'text-emerald-600',
+      border: 'border-emerald-200',
+      dotColor: 'bg-emerald-500',
     },
     red: {
-      bg: 'bg-rose-950/60',
-      text: 'text-rose-400',
-      border: 'border-rose-500/30',
-      dotColor: 'bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.8)] animate-pulse',
+      bg: 'bg-rose-50',
+      text: 'text-rose-600',
+      border: 'border-rose-200',
+      dotColor: 'bg-rose-500',
     },
     amber: {
-      bg: 'bg-amber-950/60',
-      text: 'text-amber-400',
-      border: 'border-amber-500/30',
-      dotColor: 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.8)]',
+      bg: 'bg-amber-50',
+      text: 'text-amber-600',
+      border: 'border-amber-200',
+      dotColor: 'bg-amber-500',
     },
     blue: {
-      bg: 'bg-sky-950/60',
-      text: 'text-sky-400',
-      border: 'border-sky-500/30',
-      dotColor: 'bg-sky-400 shadow-[0_0_8px_rgba(56,189,248,0.8)]',
+      bg: 'bg-blue-50',
+      text: 'text-blue-600',
+      border: 'border-blue-200',
+      dotColor: 'bg-blue-500',
     },
     purple: {
-      bg: 'bg-purple-950/60',
-      text: 'text-purple-400',
-      border: 'border-purple-500/30',
-      dotColor: 'bg-purple-400 shadow-[0_0_8px_rgba(192,132,252,0.8)]',
+      bg: 'bg-purple-50',
+      text: 'text-purple-600',
+      border: 'border-purple-200',
+      dotColor: 'bg-purple-500',
     },
     slate: {
-      bg: 'bg-slate-800/80',
-      text: 'text-slate-300',
-      border: 'border-slate-700',
+      bg: 'bg-slate-100',
+      text: 'text-slate-600',
+      border: 'border-slate-200',
       dotColor: 'bg-slate-400',
     },
   };
@@ -75,14 +75,14 @@ export function StatusBadge({ status, tone, children, className, dot = true }: S
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border font-mono tracking-wide',
+        'inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-normal border',
         style.bg,
         style.text,
         style.border,
         className
       )}
     >
-      {dot && <span className={cn('w-1.5 h-1.5 rounded-full inline-block', style.dotColor)} />}
+      {dot && <span className={cn('w-1.5 h-1.5 rounded-full inline-block mr-0.5', style.dotColor)} />}
       <span>{children || status}</span>
     </span>
   );

@@ -4,6 +4,7 @@ import { zodValidatorPlugin, errorHandlerPlugin, authPlugin } from './plugins';
 import { createApiContainer, type ApiContainer } from './container';
 import {
   authController,
+  reviewFlowsController,
   dashboardController,
   releaseGatesController,
   inspectionsController,
@@ -15,6 +16,8 @@ import {
   integrationController,
   masterDataController,
   exportController,
+  reportTemplatesController,
+  permissionsController,
 } from './controllers';
 
 export interface BuildAppOptions {
@@ -57,7 +60,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   // 5. 开发态登录入口（免鉴权）：非生产环境注册，生产环境下 authController 自身不注册任何路由
-  await app.register(authController, { prefix: '/api/v1/auth' });
+  await app.register(authController, { prefix: '/api/v1/auth', container });
 
   // 6. 注册对齐 OpenAPI 规范的所有业务控制器 (前缀: /api/v1)
   //    全部业务路由挂在受保护作用域内：先执行 authenticate，再进入各控制器
@@ -76,6 +79,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
       // MRB 不合格品评审与处置
       await v1.register(mrbController, { prefix: '/mrb', container });
+
+      // MRB 评审流程设置
+      await v1.register(reviewFlowsController, { prefix: '/review-flows', container });
 
       // 操作审计日志与统计卡片
       await v1.register(auditController, { prefix: '/audit', container });
@@ -99,6 +105,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
       // 报表与检验数据导出
       await v1.register(exportController, { prefix: '/export', container });
+
+      // 质检报告多模板与四段式导出
+      await v1.register(reportTemplatesController, { container });
+
+      // 系统管理 - 物料权限管理、角色字典与校验日志
+      await v1.register(permissionsController, { prefix: '/permissions', container });
     },
     { prefix: '/api/v1' }
   );

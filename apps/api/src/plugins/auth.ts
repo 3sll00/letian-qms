@@ -27,7 +27,13 @@ declare module 'fastify' {
   }
 }
 
-const JWT_SECRET = process.env.JWT_SECRET || 'letian-qms-default-secret-key-for-jwt-tokens-2026';
+/**
+ * 使用时读取密钥，与签发侧 (controllers/auth.controller.ts) 保持一致。
+ * dotenv 在运行时才把 .env 写入 process.env，模块级常量会固化 import 时刻的旧值。
+ */
+function jwtSecret(): string {
+  return process.env.JWT_SECRET || 'letian-qms-default-secret-key-for-jwt-tokens-2026';
+}
 
 export function generateTestToken(payload: Partial<CurrentUser>): string {
   const defaultUser: CurrentUser = {
@@ -37,7 +43,7 @@ export function generateTestToken(payload: Partial<CurrentUser>): string {
     department: '品质保证部',
     permissions: ['*'],
   };
-  return jwt.sign({ ...defaultUser, ...payload }, JWT_SECRET, { expiresIn: '1d' });
+  return jwt.sign({ ...defaultUser, ...payload }, jwtSecret(), { expiresIn: '1d' });
 }
 
 const authPluginAsync: FastifyPluginAsync = async (fastify) => {
@@ -54,7 +60,7 @@ const authPluginAsync: FastifyPluginAsync = async (fastify) => {
 
     const token = parts[1] as string;
     try {
-      const decoded = jwt.verify(token, JWT_SECRET) as Record<string, unknown>;
+      const decoded = jwt.verify(token, jwtSecret()) as Record<string, unknown>;
 
       // 可选字段在缺失时必须整体省略，而不是赋 undefined
       // （tsconfig 开启了 exactOptionalPropertyTypes）

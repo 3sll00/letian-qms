@@ -1,3 +1,4 @@
+import { SupplierSchema, CustomerSchema, MaterialSchema, WorkshopSchema, EmployeeSchema, InventoryCategorySchema } from "@letian/contracts";
 import { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { ApiContainer } from '../container';
@@ -182,4 +183,76 @@ export const masterDataController: FastifyPluginAsync<{ container: ApiContainer 
 
     return reply.status(200).send(roots);
   });
+  // 1.1 创建供应商
+  fastify.post('/suppliers', { schema: { body: SupplierSchema } }, async (request, reply) => {
+    const data = request.body as any;
+    const created = await masterData.saveSupplier({
+      supplierCode: data.supplierCode,
+      supplierName: data.supplierName,
+      contactPerson: data.contactPerson,
+      phone: data.phone,
+    });
+    return reply.status(201).send(created);
+  });
+
+  // 2.1 创建客户
+  fastify.post('/customers', { schema: { body: CustomerSchema } }, async (request, reply) => {
+    const data = request.body as any;
+    const created = await masterData.saveCustomer({
+      customerCode: data.customerCode,
+      customerName: data.customerName,
+      contactPerson: data.contactPerson,
+      phone: data.phone,
+    });
+    return reply.status(201).send(created);
+  });
+
+  // 3.1 创建物料存货档案
+  fastify.post('/inventory', { schema: { body: MaterialSchema } }, async (request, reply) => {
+    const data = request.body as any;
+    const created = await masterData.saveMaterial({
+      materialCode: data.materialCode,
+      materialName: data.materialName,
+      specModel: data.specModel,
+      categoryCode: data.categoryCode,
+      unit: data.unit || "个",
+    });
+    return reply.status(201).send(created);
+  });
+
+  // 4.1 创建生产车间
+  fastify.post('/workshops', { schema: { body: WorkshopSchema } }, async (request, reply) => {
+    const data = request.body as any;
+    const created = await masterData.saveWorkshop({
+      workshopCode: data.workshopCode,
+      workshopName: data.workshopName,
+    });
+    return reply.status(201).send(created);
+  });
+
+  // 5.1 创建职员/检验员
+  fastify.post('/employees', { schema: { body: EmployeeSchema } }, async (request, reply) => {
+    const data = request.body as any;
+    const created = await masterData.saveEmployee({
+      employeeCode: data.employeeCode,
+      name: data.name,
+      department: data.department,
+      phone: data.phone,
+      email: data.email,
+    });
+    return reply.status(201).send(created);
+  });
+
+  // 6.1 创建存货分类
+  fastify.post('/categories', { schema: { body: InventoryCategorySchema } }, async (request, reply) => {
+    const data = request.body as any;
+    const created = await masterData.saveInventoryCategory({
+      categoryCode: data.categoryCode,
+      categoryName: data.categoryName,
+      parentCode: data.parentCode,
+      level: data.level ?? 1,
+    });
+    return reply.status(201).send(created);
+  });
+
 };

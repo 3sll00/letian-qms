@@ -12,16 +12,19 @@
     "seed": "tsx src/seeds/runner.ts"
   },
   "dependencies": {
+    "@letian/application": "workspace:*",
     "@letian/contracts": "workspace:*",
     "@letian/domain": "workspace:*",
-    "@letian/application": "workspace:*",
+    "@types/mssql": "^12.3.0",
+    "dotenv": "^16.4.5",
     "kysely": "^0.27.3",
-    "pg": "^8.11.5",
-    "dotenv": "^16.4.5"
+    "mssql": "^12.7.2",
+    "mysql2": "^3.24.4",
+    "pg": "^8.11.5"
   },
   "devDependencies": {
     "@types/pg": "^8.11.4",
-    "typescript": "^5.4.5",
-    "tsx": "^4.7.2"
+    "tsx": "^4.7.2",
+    "typescript": "^5.4.5"
   }
 }

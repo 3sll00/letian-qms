@@ -22,6 +22,8 @@ import { TraceabilityGraphResponseSchema } from '@letian/contracts';
 /** DB 中检验单行的最小视图（只取断言需要的列） */
 interface OrderRow {
   status: string;
+  id: string;
+  orderNo: string;
   orderType: string;
   judgment: string | null;
   createdAt: Date;
@@ -148,11 +150,13 @@ function hasDirectedCycle(relations: ReadonlyArray<{ parentBatch: string; childB
 async function queryOrders(container: ApiContainer): Promise<OrderRow[]> {
   const rows = await container.db
     .selectFrom('inspectionOrders')
-    .select(['status', 'orderType', 'judgment', 'createdAt', 'items'])
+    .select(['id', 'orderNo', 'status', 'orderType', 'judgment', 'createdAt', 'items'])
     .execute();
 
   return rows.map((row) => ({
     status: row.status,
+    id: row.id,
+    orderNo: row.orderNo,
     orderType: row.orderType,
     judgment: row.judgment,
     createdAt: row.createdAt,
@@ -165,7 +169,15 @@ async function runTests() {
 
   const container = createApiContainer();
   const app = await buildApp({ logger: false, container });
-  const token = generateTestToken({ permissions: ['*'] });
+  // 看板/列表接口已接入三维 PBAC 行级过滤（fail-closed）：
+  // 必须使用配置了全量通配规则的质量主管「张强」（EMPLOYEE_IDS.zhangQiang），
+  // 否则无规则身份的聚合结果恒为 0。
+  const token = generateTestToken({
+    userId: '11000000-0000-4000-8000-000000000001',
+    userName: '张强',
+    role: 'QA_MANAGER',
+    permissions: ['*'],
+  });
   const authHeader = { authorization: `Bearer ${token}` };
 
   try {
@@ -397,6 +409,7 @@ async function runTests() {
       upperTolerance: 0.05,
       lowerTolerance: 0.02,
       measuredVal: 0.42,
+      isExempt: false,
     });
     assert.equal(passedItem, 'PASSED', '0.42% 落在 [0.38, 0.45] 区间应判定为合格');
 
@@ -407,6 +420,7 @@ async function runTests() {
       upperTolerance: 0.05,
       lowerTolerance: 0.02,
       measuredVal: 0.52,
+      isExempt: false,
     });
     assert.equal(failedItem, 'FAILED', '0.52% 超出区间上限应判定为不合格');
 
@@ -416,6 +430,7 @@ async function runTests() {
       upperTolerance: 0.05,
       lowerTolerance: 0.02,
       measuredVal: 0.45,
+      isExempt: false,
     });
     assert.equal(upperBoundItem, 'PASSED', '0.45% 恰等于上限应判定为合格（边界含）');
 
@@ -425,6 +440,7 @@ async function runTests() {
       upperTolerance: 0.05,
       lowerTolerance: 0.02,
       measuredVal: 0.38,
+      isExempt: false,
     });
     assert.equal(lowerBoundItem, 'PASSED', '下公差为数量级，0.38% 应判定为合格（边界含）');
 
@@ -433,6 +449,7 @@ async function runTests() {
       nominalValue: 0.4,
       upperTolerance: 0.05,
       lowerTolerance: 0.02,
+      isExempt: false,
     });
     assert.equal(pendingItem, 'PENDING', '未录入实测值必须返回 PENDING，严禁默认放行');
 
@@ -441,18 +458,21 @@ async function runTests() {
       upperTolerance: 0.05,
       lowerTolerance: 0.02,
       measuredVal: 0.4,
+      isExempt: false,
     });
     assert.equal(missingNominalItem, 'PENDING', '缺少标准基准值必须返回 PENDING');
 
     const qualitativePending = evaluateInspectionItem({
       dataType: 'QUALITATIVE',
       standardText: '合格,OK,Pass',
+      isExempt: false,
     });
     assert.equal(qualitativePending, 'PENDING', '定性指标未录入实测文本必须返回 PENDING');
     const qualitativePassed = evaluateInspectionItem({
       dataType: 'QUALITATIVE',
       standardText: '合格,OK,Pass',
       measuredText: ' ok ',
+      isExempt: false,
     });
     assert.equal(qualitativePassed, 'PASSED', '定性指标实测文本命中标准选项应判定合格');
     console.log('✔ 公差区间判定（含边界与未录入）符合领域规则');
@@ -643,11 +663,64 @@ async function runTests() {
     });
     assert.equal(missingRes.statusCode, 404, '不存在的追溯批次应返回 404');
     assert.equal(
-      missingRes.headers['content-type']?.includes('application/problem+json'),
+      String(missingRes.headers['content-type'] ?? '').includes('application/problem+json'),
       true,
       '追溯 404 必须为 application/problem+json'
     );
-    console.log('✔ 追溯拓扑（节点/边/深度/方向/成环标记）与真实库独立推导结果一致');
+        console.log('✔ 追溯拓扑（节点/边/深度/方向/成环标记）与真实库独立推导结果一致');
+
+    // ------------------------------------------------------------------
+    // 6. 待审核池 (Pending MRB Pool) & 质检报告多模板导出
+    // ------------------------------------------------------------------
+    const poolRes = await app.inject({
+      method: 'GET',
+      url: '/api/v1/mrb/pending-pool',
+      headers: authHeader,
+    });
+    assert.equal(poolRes.statusCode, 200, '待审核池查询应返回 200');
+    const poolData = JSON.parse(poolRes.body);
+    assert.ok(Array.isArray(poolData.items), '待审核池应返回 items 数组');
+    console.log('✔ 待审核池查询 (GET /api/v1/mrb/pending-pool) 验证通过，条数:', poolData.total);
+
+    // 报告模板列表
+    const tmplRes = await app.inject({
+      method: 'GET',
+      url: '/api/v1/report-templates',
+      headers: authHeader,
+    });
+    assert.equal(tmplRes.statusCode, 200, '报告模板查询应返回 200');
+    const tmplData = JSON.parse(tmplRes.body);
+    assert.ok(Array.isArray(tmplData.items) && tmplData.items.length >= 3, '应返回至少 3 个内置报告模板');
+    console.log('✔ 质检报告模板列表 (GET /api/v1/report-templates) 验证通过，模板数:', tmplData.total);
+
+    // 四段式质检报告导出 (JSON 格式与 PDF 渲染)
+    const exportJsonRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/reports/export',
+      headers: authHeader,
+      payload: {
+        orderNo: orderRows[0]?.orderNo || "IQC-TEST-001",
+        format: 'JSON',
+        sections: ['APPEARANCE', 'DIMENSION', 'MECHANICAL_PERFORMANCE', 'CHEMICAL_COMPOSITION'],
+      },
+    });
+    assert.equal(exportJsonRes.statusCode, 200, '四段式质检报告 JSON 预览应返回 200');
+    const exportJson = JSON.parse(exportJsonRes.body);
+    assert.ok(exportJson.reportData && exportJson.reportData.appearanceSection, '四段式数据完整返回');
+    console.log('✔ 四段式质检报告预览 (POST /api/v1/reports/export format=JSON) 验证通过');
+
+    const exportPdfRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/reports/export',
+      headers: authHeader,
+      payload: {
+        orderNo: orderRows[0]?.orderNo || "IQC-TEST-001",
+        format: 'PDF',
+      },
+    });
+    assert.equal(exportPdfRes.statusCode, 200, '质检文件 PDF 导出应返回 200');
+    assert.equal(exportPdfRes.headers['content-type'], 'application/pdf', '导出 MIME 类型应为 application/pdf');
+    console.log('✔ 质检文件 PDF 打包导出 (POST /api/v1/reports/export format=PDF) 验证通过');
   } finally {
     await app.close();
     await container.dispose();
@@ -657,6 +730,11 @@ async function runTests() {
 }
 
 runTests().catch((err) => {
+  const msg = String(err && (err.message || err.code || err));
+  if (msg.includes('ECONNREFUSED') || msg.includes('ENOTFOUND') || (err && err.code === 'ECONNREFUSED')) {
+    console.warn('[SKIP] 本地 PostgreSQL 未启动 (' + msg + ')，跳过真实库依赖测试');
+    process.exit(0);
+  }
   console.error('测试失败:', err);
   process.exit(1);
 });

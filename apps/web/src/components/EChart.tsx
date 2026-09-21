@@ -5,9 +5,10 @@ interface EChartsProps {
   option: echarts.EChartsOption;
   style?: React.CSSProperties;
   className?: string;
+  theme?: string;
 }
 
-export function EChart({ option, style, className }: EChartsProps) {
+export function EChart({ option, style, className, theme }: EChartsProps) {
   const chartRef = useRef<HTMLDivElement>(null);
   const instanceRef = useRef<echarts.ECharts | null>(null);
 
@@ -15,12 +16,18 @@ export function EChart({ option, style, className }: EChartsProps) {
     if (!chartRef.current) return;
 
     if (!instanceRef.current) {
-      instanceRef.current = echarts.init(chartRef.current, 'dark', {
+      instanceRef.current = echarts.init(chartRef.current, theme || undefined, {
         renderer: 'canvas',
       });
     }
 
-    instanceRef.current.setOption(option, true);
+    // Ensure chart has clean transparent or white background
+    const finalOption = {
+      backgroundColor: 'transparent',
+      ...option,
+    };
+
+    instanceRef.current.setOption(finalOption, true);
 
     const handleResize = () => {
       instanceRef.current?.resize();
@@ -31,7 +38,7 @@ export function EChart({ option, style, className }: EChartsProps) {
     return () => {
       window.removeEventListener('resize', handleResize);
     };
-  }, [option]);
+  }, [option, theme]);
 
   useEffect(() => {
     return () => {

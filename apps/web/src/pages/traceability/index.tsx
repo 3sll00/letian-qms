@@ -1,356 +1,417 @@
-import React, { useState, useEffect } from 'react';
-import {
-  GitBranch,
-  Search,
-  Download,
-  Layers,
-  Box,
-} from 'lucide-react';
-import { StatusBadge } from '../../components/StatusBadge';
-import type { TraceabilityGraphResponse, TraceEdge, TraceNode } from '@letian/contracts';
+import React, { useState } from 'react';
+import { Download, Search } from 'lucide-react';
 import { api, errorMessage } from '../../lib/api';
 
-/** 种子库中真实存在的追溯根批次（GET /api/v1/traceability/graph/:batchNo 的默认查询对象） */
-const DEFAULT_TRACE_BATCH = 'LOT-2026-FN-01';
-
-/** 预设热点批次：均为种子库真实存在的追溯节点（末节点为故意成环的演示链路） */
-const PRESET_TRACE_BATCHES = ['LOT-2026-FN-01', 'COIL-20230925-01', 'CYCLE-A'];
-
-/**
- * 追溯展开层级上限。
- * 服务端 TraceQuerySchema.maxDepth 默认值只有 5，种子数据的完整链路（母卷→拉丝→下料→搓丝→热处理→委外→成品→发货）
- * 最深一级在 depth 6，用默认值会把「原材料母卷」这一节静默截断，而页面标题写的是「全链路」。
- * 这里显式请求服务端允许的最大值 (10)，让页面上的链路与「全链路」表述一致。
- */
-const TRACE_MAX_DEPTH = 10;
-
-/**
- * 按追溯边做拓扑排序，得到「上游母料 → … → 下游成品/发货」的链路顺序。
- *
- * 为什么需要它：接口返回的节点顺序是展开顺序，不代表工艺先后。
- * 排序用 Kahn 算法；链路存在环时（如演示批 CYCLE-A）剩余节点入度无法归零，
- * 这些节点按接口原顺序追加在末尾，保证既不丢节点、也不会死循环。
- */
-function orderChainNodes(nodes: TraceNode[], edges: TraceEdge[]): TraceNode[] {
-  const byBatchNo = new Map(nodes.map((n) => [n.batchNo, n]));
-  const inDegree = new Map<string, number>();
-  const adjacency = new Map<string, string[]>();
-
-  for (const node of nodes) {
-    inDegree.set(node.batchNo, 0);
-    adjacency.set(node.batchNo, []);
-  }
-  for (const edge of edges) {
-    if (!inDegree.has(edge.sourceBatchNo) || !inDegree.has(edge.targetBatchNo)) continue;
-    adjacency.get(edge.sourceBatchNo)?.push(edge.targetBatchNo);
-    inDegree.set(edge.targetBatchNo, (inDegree.get(edge.targetBatchNo) ?? 0) + 1);
-  }
-
-  const queue = nodes.filter((n) => (inDegree.get(n.batchNo) ?? 0) === 0).map((n) => n.batchNo);
-  const ordered: string[] = [];
-  while (queue.length > 0) {
-    const current = queue.shift() as string;
-    ordered.push(current);
-    for (const next of adjacency.get(current) ?? []) {
-      const remaining = (inDegree.get(next) ?? 0) - 1;
-      inDegree.set(next, remaining);
-      if (remaining === 0) queue.push(next);
-    }
-  }
-
-  const placed = new Set(ordered);
-  for (const node of nodes) {
-    if (!placed.has(node.batchNo)) ordered.push(node.batchNo);
-  }
-
-  return ordered
-    .map((batchNo) => byBatchNo.get(batchNo))
-    .filter((n): n is TraceNode => Boolean(n));
+/** 与后端 /traceability/graph/:batchNo 响应对齐（TraceabilityGraphResponse） */
+interface GraphNode {
+  nodeId: string;
+  batchNo: string;
+  stageName: string;
+  materialName: string;
+  operatorName: string;
+  timestamp: string;
+  nodeStatus: 'PASSED' | 'FAILED' | 'INSPECTING' | 'PENDING' | 'STORED';
+  orderNo?: string | undefined;
+  supplierOrCustomer?: string | undefined;
 }
 
+interface GraphResponse {
+  batchNo: string;
+  hasCycle: boolean;
+  nodes: GraphNode[];
+  edges: Array<{ sourceBatchNo: string; targetBatchNo: string; relationType: string; depth: number }>;
+}
+
+const NODE_STATUS_LABEL: Record<string, string> = {
+  PASSED: '已合格',
+  FAILED: '不合格',
+  INSPECTING: '检验中',
+  PENDING: '待检验',
+  STORED: '已入库',
+};
+
+const STATUS_TONE: Record<string, { dot: string; badge: string; border: string }> = {
+  PASSED: { dot: 'bg-emerald-500', badge: 'bg-emerald-50 text-emerald-600', border: 'border-emerald-500' },
+  STORED: { dot: 'bg-emerald-500', badge: 'bg-emerald-50 text-emerald-600', border: 'border-emerald-500' },
+  FAILED: { dot: 'bg-rose-500', badge: 'bg-rose-50 text-rose-600', border: 'border-rose-500' },
+  INSPECTING: { dot: 'bg-blue-500', badge: 'bg-blue-50 text-blue-600', border: 'border-blue-500' },
+  PENDING: { dot: 'bg-slate-400', badge: 'bg-slate-100 text-slate-600', border: 'border-slate-300' },
+};
+
 export function TraceabilityPage() {
-  const [batchNo, setBatchNo] = useState(DEFAULT_TRACE_BATCH);
-  const [queriedBatch, setQueriedBatch] = useState(DEFAULT_TRACE_BATCH);
-  const [graph, setGraph] = useState<TraceabilityGraphResponse | null>(null);
-  const [queryError, setQueryError] = useState<string | null>(null);
+  const [batchNo, setBatchNo] = useState('');
+  const [materialHint, setMaterialHint] = useState('');
+  const [graph, setGraph] = useState<GraphResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const queryBatch = (code: string) => {
-    api
-      .get<TraceabilityGraphResponse>(`/traceability/graph/${encodeURIComponent(code)}`, {
-        maxDepth: String(TRACE_MAX_DEPTH),
-      })
-      .then((data) => {
-        setGraph(data);
-        setQueriedBatch(code);
-        setQueryError(null);
-      })
-      .catch((err) => {
-        // 未命中根节点时后端返回 404 + RFC7807 说明，不能把错误体当图谱渲染
-        setGraph(null);
-        setQueryError(errorMessage(err));
-        console.error('Trace fetch error:', err);
-      });
-  };
-
-  useEffect(() => {
-    queryBatch(batchNo);
-  }, []);
-
-  const handleSearch = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (batchNo) {
-      queryBatch(batchNo);
+  async function handleSearch() {
+    const target = batchNo.trim();
+    if (target === '') {
+      setError('请输入批次号后查询（种子数据批次形如 LOT-2026-0701，可在检验台账的批次列获取）');
+      return;
     }
-  };
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await api.get<GraphResponse>(`/traceability/graph/${encodeURIComponent(target)}`, {
+        direction: 'BOTH',
+        maxDepth: 10,
+      });
+      setGraph(res);
+      if (res.nodes.length === 0) {
+        setMaterialHint('');
+      } else {
+        const hit = res.nodes.find((n) => n.batchNo === target) ?? res.nodes[0];
+        setMaterialHint(hit?.materialName ?? '');
+      }
+    } catch (err) {
+      const msg = errorMessage(err);
+      // 后端 PBAC 拦截返回 403：明确提示是权限问题，而不是数据不存在
+      setError(msg.includes('PBAC') || msg.includes('无权') ? `权限拦截：${msg}` : msg);
+      setGraph(null);
+    } finally {
+      setLoading(false);
+    }
+  }
 
-  // 命中节点优先取查询批次；未命中时回退到图谱根节点 (最后一个成品节点)
-  const rootNode: TraceNode | undefined = graph
-    ? graph.nodes.find((n) => n.batchNo === queriedBatch) ?? graph.nodes[graph.nodes.length - 1]
-    : undefined;
-
-  const findNode = (batchNo: string): TraceNode | undefined =>
-    graph?.nodes.find((n) => n.batchNo === batchNo);
-
-  const upstreamNodes: TraceNode[] =
-    graph && rootNode
-      ? graph.edges
-          .filter((e) => e.targetBatchNo === rootNode.batchNo)
-          .map((e) => findNode(e.sourceBatchNo))
-          .filter((n): n is TraceNode => Boolean(n))
-      : [];
-
-  const downstreamNodes: TraceNode[] =
-    graph && rootNode
-      ? graph.edges
-          .filter((e) => e.sourceBatchNo === rootNode.batchNo)
-          .map((e) => findNode(e.targetBatchNo))
-          .filter((n): n is TraceNode => Boolean(n))
-      : [];
-
-  // 全链路工序节点顺序 (上游母料 → 下游成品/发货)，用于 DAG Pipeline 面板逐节渲染
-  const chainNodes: TraceNode[] = graph ? orderChainNodes(graph.nodes, graph.edges) : [];
-
-  // Full export traceability report
   const handleExportReport = () => {
-    if (!graph) return;
-    const jsonStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(graph, null, 2));
-    const downloadAnchor = document.createElement('a');
-    downloadAnchor.setAttribute('href', jsonStr);
-    downloadAnchor.setAttribute('download', `批次全链路质量追溯报告_${graph.batchNo}.json`);
-    document.body.appendChild(downloadAnchor);
-    downloadAnchor.click();
-    downloadAnchor.remove();
+    if (!graph || !graph.nodes || graph.nodes.length === 0) {
+      alert('请先在搜索栏输入批次号并点击查询追溯图谱，然后再导出报告。');
+      return;
+    }
+
+    const printWin = window.open('', '_blank');
+    if (!printWin) {
+      alert('弹窗已被浏览器拦截，请允许弹窗以导出追溯报告。');
+      return;
+    }
+
+    const nodesTable = graph.nodes.map((node: any, idx: number) => `
+      <tr>
+        <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: center;">${idx + 1}</td>
+        <td style="padding: 8px; border: 1px solid #cbd5e1; font-weight: bold; color: #1e293b;">${node.stageName || node.stage || '—'}</td>
+        <td style="padding: 8px; border: 1px solid #cbd5e1;">${node.materialName || '—'}</td>
+        <td style="padding: 8px; border: 1px solid #cbd5e1; font-family: monospace; font-weight: bold; color: #2563eb;">${node.batchNo || '—'}</td>
+        <td style="padding: 8px; border: 1px solid #cbd5e1;">${node.orderNo || '—'}</td>
+        <td style="padding: 8px; border: 1px solid #cbd5e1;">${node.supplierOrCustomer || '乐天车间'}</td>
+        <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: center; font-weight: bold; color: ${node.nodeStatus === 'PASSED' ? '#16a34a' : '#dc2626'};">
+          ${node.nodeStatus === 'PASSED' ? '合格 PASS' : node.nodeStatus || '待检'}
+        </td>
+      </tr>
+    `).join('');
+
+    printWin.document.write(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8" />
+        <title>乐天紧固件 - 质量追溯全链路报告 (${graph.batchNo})</title>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", sans-serif; padding: 32px; color: #0f172a; }
+          .header { border-bottom: 2px solid #2563eb; padding-bottom: 16px; margin-bottom: 24px; }
+          .title { font-size: 22px; font-weight: bold; color: #0f172a; margin-bottom: 8px; }
+          .meta { font-size: 13px; color: #475569; line-height: 1.6; }
+          .btn-print { margin: 16px 0; padding: 8px 18px; background: #2563eb; color: white; border: none; border-radius: 6px; font-weight: 500; cursor: pointer; font-size: 13px; }
+          table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 12px; }
+          th { background: #f1f5f9; padding: 10px; border: 1px solid #cbd5e1; text-align: left; font-weight: 600; color: #334155; }
+          .footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid #e2e8f0; font-size: 12px; color: #94a3b8; display: flex; justify-content: space-between; }
+          @media print { .btn-print { display: none; } }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <div class="title">乐天紧固件全链路质量追溯报告 (Quality Traceability Report)</div>
+          <div class="meta">
+            <strong>目标追溯批次：</strong> ${graph.batchNo} &nbsp;|&nbsp;
+            <strong>物料描述：</strong> ${materialHint || '紧固件成品'} &nbsp;|&nbsp;
+            <strong>追溯节点总数：</strong> ${graph.nodes.length} &nbsp;|&nbsp;
+            <strong>生成时间：</strong> ${new Date().toLocaleString()}
+          </div>
+        </div>
+        <button class="btn-print" onclick="window.print()">🖨️ 点击打印 / 另存为 PDF</button>
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 40px; text-align: center;">#</th>
+              <th>工序阶段</th>
+              <th>物料名称</th>
+              <th>追溯/工序批次号</th>
+              <th>关联单号</th>
+              <th>车间 / 供应商</th>
+              <th style="text-align: center;">质检状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${nodesTable}
+          </tbody>
+        </table>
+        <div class="footer">
+          <span>乐天智能质量管理系统 (Letian QMS v2.6.0) 真实数据追溯</span>
+          <span>出具单位：质量管理部</span>
+        </div>
+      </body>
+      </html>
+    `);
+    printWin.document.close();
   };
 
   return (
-    <div className="space-y-6">
-      {/* Top Banner & Search */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 bg-slate-900/80 border border-slate-800 p-5 rounded-xl">
+    <div className="space-y-4">
+      {/* Title + Action Buttons */}
+      <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-base font-semibold text-white flex items-center gap-2">
-            <GitBranch className="w-5 h-5 text-sky-400" />
-            紧固件全生命周期批次追溯 DAG (母卷→下料→冷镦→成品)
-          </h2>
-          <p className="text-xs text-slate-400 mt-1">
-            正向追踪去向 / 反向逆追原材母料 / 工艺倒流自动阻断检测
-          </p>
+          <h1 className="text-base font-semibold text-slate-800">质量追溯看板</h1>
+          <p className="text-xs text-slate-400 mt-0.5">以物料批次为维度, 展示完整质量链路 · 红色高亮不合格节点 · 受物料权限过滤</p>
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={handleExportReport}
-            className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg border border-slate-700 transition"
+            type="button"
+            className="bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs px-3 py-1.5 rounded flex items-center gap-1.5 shadow-sm"
           >
-            <Download className="w-4 h-4 text-slate-400" />
-            导出追溯报告 (JSON)
+            <span className="text-rose-500 font-bold text-[10px]">PDF</span>
+            <span>导出追溯报告</span>
           </button>
         </div>
       </div>
 
-      {/* Search Bar */}
-      <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
-        <form onSubmit={handleSearch} className="flex items-center gap-2 flex-1 max-w-xl">
-          <div className="relative flex-1">
-            <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
+      {/* Query Filter Bar */}
+      <div className="bg-white border border-slate-100 rounded-lg p-4 shadow-sm flex items-center justify-between">
+        <div className="flex items-center gap-6 text-xs">
+          <div className="flex items-center gap-2">
+            <span className="text-slate-600">批次号</span>
             <input
               type="text"
-              placeholder="输入目标生产批次号 (例如: B20231012-01 或 B20231014-04)..."
+              placeholder="如 LOT-2026-0701"
               value={batchNo}
               onChange={(e) => setBatchNo(e.target.value)}
-              className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-100 font-mono focus:outline-none focus:border-sky-500"
+              onKeyDown={(e) => e.key === 'Enter' && void handleSearch()}
+              className="border border-slate-200 rounded px-2.5 py-1 text-slate-700 w-56 bg-white focus:outline-none focus:border-blue-500"
             />
           </div>
-          <button
-            type="submit"
-            className="px-4 py-1.5 bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs rounded-lg shadow"
-          >
-            全链路穿透追溯
-          </button>
-        </form>
+          {graph && (
+            <div className="flex items-center gap-2 text-slate-500">
+              <span>起点物料</span>
+              <span className="text-slate-800 font-medium">{materialHint || '—'}</span>
+            </div>
+          )}
+        </div>
 
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-slate-400">预设热点追溯批:</span>
-          {PRESET_TRACE_BATCHES.map((code) => (
-            <button
-              key={code}
-              onClick={() => {
-                setBatchNo(code);
-                queryBatch(code);
-              }}
-              className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[11px] font-mono text-sky-400 border border-slate-700"
-            >
-              {code}
-            </button>
-          ))}
+        <div className="flex items-center gap-2 text-xs">
+          <button
+            onClick={() => {
+              setBatchNo('');
+              setGraph(null);
+              setError(null);
+              setMaterialHint('');
+            }}
+            className="bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 px-3 py-1 rounded shadow-sm"
+          >
+            重置
+          </button>
+          <button
+            onClick={() => void handleSearch()}
+            disabled={loading}
+            className="bg-[#2563EB] hover:bg-blue-700 disabled:opacity-60 text-white px-4 py-1 rounded shadow-sm flex items-center gap-1.5"
+          >
+            <Search className="w-3 h-3" />
+            {loading ? '穿透中...' : '查询追溯链'}
+          </button>
         </div>
       </div>
 
-      {queryError !== null && (
-        <div className="p-3 rounded-lg bg-rose-950/40 border border-rose-500/40 text-rose-300 text-xs">
-          追溯查询失败：{queryError}
+      {error && (
+        <div className="rounded border border-rose-200 bg-rose-50 px-3.5 py-2 text-xs text-rose-700">{error}</div>
+      )}
+
+      {/* Order Info Card */}
+      {graph && (
+        <div className="bg-white border border-slate-100 rounded-lg p-4 shadow-sm space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-amber-500 text-sm">📦</span>
+              <h2 className="text-[13px] font-semibold text-slate-800">批次追溯概览 — {graph.batchNo}</h2>
+            </div>
+            <div className="flex items-center gap-2 text-xs">
+              {graph.hasCycle ? (
+                <span className="bg-amber-50 text-amber-600 border border-amber-200 px-2 py-0.5 rounded text-[11px]">
+                  检测到环路
+                </span>
+              ) : (
+                <span className="bg-emerald-50 text-emerald-600 border border-emerald-200 px-2 py-0.5 rounded text-[11px]">
+                  链路无环
+                </span>
+              )}
+              <span className="bg-slate-100 text-slate-600 px-2 py-0.5 rounded text-[11px]">
+                {graph.nodes.length} 个节点 · {graph.edges.length} 条流转
+              </span>
+            </div>
+          </div>
+          <p className="text-[11px] text-slate-400 pt-1 border-t border-slate-50">
+            节点与关系来自 batch_trace_nodes / batch_trace_relations 真实库双向穿透，
+            并已与检验台账使用同一套三维物料权限口径。
+          </p>
         </div>
       )}
 
-      {/* DAG Visualization Container */}
-      {graph && rootNode ? (
-        <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-6 shadow-xl space-y-6">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-4">
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-slate-400">追溯目标批次:</span>
-                <span className="text-sm font-mono font-bold text-white">{graph.batchNo}</span>
-                <StatusBadge status={rootNode.nodeStatus} />
-              </div>
-              <div className="text-xs text-slate-300 mt-1">
-                物料: <span className="font-semibold">{rootNode.materialName}</span> ·
-                工单: <span className="font-mono">{rootNode.orderNo ?? '-'}</span>
-              </div>
+      {/* Complete Traceability Chain Card */}
+      <div className="bg-white border border-slate-100 rounded-lg p-5 shadow-sm space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="text-blue-500 text-sm">🔗</span>
+            <h2 className="text-[13px] font-semibold text-slate-800">完整质量追溯链路</h2>
+          </div>
+          <div className="flex items-center gap-3 text-xs">
+            <div className="flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block"></span>
+              <span className="text-slate-600">已合格</span>
             </div>
-
-            <div className="text-right">
-              <div className="text-xs text-slate-400">全链路追溯节点</div>
-              <div className="text-lg font-bold font-mono text-sky-400">
-                {graph.nodes.length} 个
-              </div>
+            <div className="flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-rose-500 inline-block"></span>
+              <span className="text-slate-600">不合格</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-blue-500 inline-block"></span>
+              <span className="text-slate-600">检验中</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-slate-400 inline-block"></span>
+              <span className="text-slate-600">待检验</span>
             </div>
           </div>
+        </div>
 
-          {/* DAG Pipeline Diagram
-              全部字段来自追溯接口返回的真实节点，按工艺先后排序后逐节渲染。
-              早期实现把 Stage 1..4 的批次号 / 实测值 / 判定 / 印章文案写死在 JSX 里
-              （例如「IQC 判定: PASS (全格)」「成品印章: QC-SEAL-PASS-99」），
-              无论查询哪个批次都会显示同一套「全部合格」的结论 —— 查询不合格批次时
-              页面会凭空出现合格印章，属于会误导质量放行判断的显示错误。 */}
-          <div>
-            <h3 className="text-xs font-semibold text-slate-300 uppercase tracking-wider mb-4">
-              全链路工序节点 (DAG Pipeline Stages) · 共 {chainNodes.length} 道
-            </h3>
+        {!graph && !loading && (
+          <div className="py-14 text-center text-xs text-slate-400">
+            输入批次号查询质量链路；无权限的批次将被后端 PBAC 拦截（403）
+          </div>
+        )}
+        {loading && <div className="py-14 text-center text-xs text-slate-400">正在双向穿透批次 DAG...</div>}
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-              {chainNodes.map((node, index) => {
-                const isRoot = node.batchNo === rootNode.batchNo;
-                return (
-                  <div
-                    key={node.nodeId}
-                    className={`p-4 rounded-xl bg-slate-950/80 border space-y-2 transition ${
-                      isRoot
-                        ? 'border-sky-500/60 shadow-lg shadow-sky-950/40'
-                        : 'border-slate-800 hover:border-sky-500/40'
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <span className="text-[11px] font-mono text-slate-400 uppercase">
-                        Stage {index + 1} · {node.stageName}
+        {/* Chain Flow Nodes Horizontal Layout */}
+        {graph && !loading && graph.nodes.length > 0 && (
+          <div className="flex items-center justify-between gap-3 pt-2 overflow-x-auto pb-2">
+            {graph.nodes.map((node, index) => {
+              const tone = STATUS_TONE[node.nodeStatus] ?? STATUS_TONE.PENDING;
+              const handleExportReport = () => {
+    if (!graph || !graph.nodes || graph.nodes.length === 0) {
+      alert('请先在搜索栏输入批次号并点击查询追溯图谱，然后再导出报告。');
+      return;
+    }
+
+    const printWin = window.open('', '_blank');
+    if (!printWin) {
+      alert('弹窗已被浏览器拦截，请允许弹窗以导出追溯报告。');
+      return;
+    }
+
+    const nodesTable = graph.nodes.map((node: any, idx: number) => `
+      <tr>
+        <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: center;">${idx + 1}</td>
+        <td style="padding: 8px; border: 1px solid #cbd5e1; font-weight: bold; color: #1e293b;">${node.stageName || node.stage || '—'}</td>
+        <td style="padding: 8px; border: 1px solid #cbd5e1;">${node.materialName || '—'}</td>
+        <td style="padding: 8px; border: 1px solid #cbd5e1; font-family: monospace; font-weight: bold; color: #2563eb;">${node.batchNo || '—'}</td>
+        <td style="padding: 8px; border: 1px solid #cbd5e1;">${node.orderNo || '—'}</td>
+        <td style="padding: 8px; border: 1px solid #cbd5e1;">${node.supplierOrCustomer || '乐天车间'}</td>
+        <td style="padding: 8px; border: 1px solid #cbd5e1; text-align: center; font-weight: bold; color: ${node.nodeStatus === 'PASSED' ? '#16a34a' : '#dc2626'};">
+          ${node.nodeStatus === 'PASSED' ? '合格 PASS' : node.nodeStatus || '待检'}
+        </td>
+      </tr>
+    `).join('');
+
+    printWin.document.write(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8" />
+        <title>乐天紧固件 - 质量追溯全链路报告 (${graph.batchNo})</title>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", sans-serif; padding: 32px; color: #0f172a; }
+          .header { border-bottom: 2px solid #2563eb; padding-bottom: 16px; margin-bottom: 24px; }
+          .title { font-size: 22px; font-weight: bold; color: #0f172a; margin-bottom: 8px; }
+          .meta { font-size: 13px; color: #475569; line-height: 1.6; }
+          .btn-print { margin: 16px 0; padding: 8px 18px; background: #2563eb; color: white; border: none; border-radius: 6px; font-weight: 500; cursor: pointer; font-size: 13px; }
+          table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 12px; }
+          th { background: #f1f5f9; padding: 10px; border: 1px solid #cbd5e1; text-align: left; font-weight: 600; color: #334155; }
+          .footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid #e2e8f0; font-size: 12px; color: #94a3b8; display: flex; justify-content: space-between; }
+          @media print { .btn-print { display: none; } }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <div class="title">乐天紧固件全链路质量追溯报告 (Quality Traceability Report)</div>
+          <div class="meta">
+            <strong>目标追溯批次：</strong> ${graph.batchNo} &nbsp;|&nbsp;
+            <strong>物料描述：</strong> ${materialHint || '紧固件成品'} &nbsp;|&nbsp;
+            <strong>追溯节点总数：</strong> ${graph.nodes.length} &nbsp;|&nbsp;
+            <strong>生成时间：</strong> ${new Date().toLocaleString()}
+          </div>
+        </div>
+        <button class="btn-print" onclick="window.print()">🖨️ 点击打印 / 另存为 PDF</button>
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 40px; text-align: center;">#</th>
+              <th>工序阶段</th>
+              <th>物料名称</th>
+              <th>追溯/工序批次号</th>
+              <th>关联单号</th>
+              <th>车间 / 供应商</th>
+              <th style="text-align: center;">质检状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${nodesTable}
+          </tbody>
+        </table>
+        <div class="footer">
+          <span>乐天智能质量管理系统 (Letian QMS v2.6.0) 真实数据追溯</span>
+          <span>出具单位：质量管理部</span>
+        </div>
+      </body>
+      </html>
+    `);
+    printWin.document.close();
+  };
+
+  return (
+                <React.Fragment key={`${node.nodeId}-${index}`}>
+                  <div className={`flex-1 min-w-[210px] rounded-lg p-3.5 border transition-all ${tone.border}`}>
+                    <div className="text-xs text-slate-500 font-medium">{node.stageName}</div>
+                    <div className="text-xs font-mono font-semibold text-slate-800 mt-1">
+                      {node.orderNo ?? node.batchNo}
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-2 font-mono">批次: {node.batchNo}</div>
+                    <div className="text-[11px] text-slate-600 mt-0.5 whitespace-pre-line">
+                      物料: {node.materialName}
+                    </div>
+                    <div className="text-[11px] text-slate-600 mt-0.5">执行: {node.operatorName}</div>
+                    {node.supplierOrCustomer !== undefined && node.supplierOrCustomer !== '' && (
+                      <div className="text-[11px] text-slate-600 mt-0.5">{node.supplierOrCustomer}</div>
+                    )}
+                    <div className="text-[10px] text-slate-400 mt-0.5 font-mono">{node.timestamp}</div>
+                    <div className="mt-3">
+                      <span className={`inline-block px-2 py-0.5 text-[11px] rounded ${tone.badge}`}>
+                        {NODE_STATUS_LABEL[node.nodeStatus] ?? node.nodeStatus}
                       </span>
-                      <StatusBadge status={node.nodeStatus} />
-                    </div>
-                    <div className="text-sm font-bold text-white font-mono break-all">{node.batchNo}</div>
-                    <div className="text-[11px] text-slate-300">{node.materialName}</div>
-                    <div className="text-xs text-slate-400 space-y-0.5 pt-2 border-t border-slate-800/80">
-                      <div>执行人: {node.operatorName}</div>
-                      <div className="font-mono break-all">{node.timestamp}</div>
-                      {node.orderNo !== undefined && (
-                        <div>
-                          关联单号: <span className="font-mono text-slate-300">{node.orderNo}</span>
-                        </div>
-                      )}
-                      {node.supplierOrCustomer !== undefined && <div>供方/客户: {node.supplierOrCustomer}</div>}
                     </div>
                   </div>
-                );
-              })}
-            </div>
-          </div>
 
-          {/* Upstream / Downstream Trace Nodes */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-2">
-            {/* Upstream Parents */}
-            <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 space-y-3">
-              <h4 className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
-                <Layers className="w-4 h-4 text-sky-400" />
-                上游血缘祖先节点 (Upstream Parents)
-              </h4>
-              <div className="space-y-2">
-                {upstreamNodes.length > 0 ? (
-                  upstreamNodes.map((u) => (
-                    <div
-                      key={u.nodeId}
-                      className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-between text-xs"
-                    >
-                      <div>
-                        <div className="font-mono font-bold text-white">{u.batchNo}</div>
-                        <div className="text-[11px] text-slate-400">{u.materialName} ({u.stageName})</div>
-                      </div>
-                      <div className="text-right font-mono">
-                        <div className="text-slate-300">{u.operatorName}</div>
-                        <StatusBadge status={u.nodeStatus} />
-                      </div>
-                    </div>
-                  ))
-                ) : (
-                  <div className="p-4 text-center text-xs text-slate-400 border border-dashed border-slate-800 rounded-lg">
-                    当前批次为链路源头 (原始母料入库节点)，无上游血缘
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Downstream Children */}
-            <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 space-y-3">
-              <h4 className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
-                <Box className="w-4 h-4 text-cyan-400" />
-                下游流向子节点 (Downstream Children)
-              </h4>
-              <div className="space-y-2">
-                {downstreamNodes.length > 0 ? (
-                  downstreamNodes.map((d) => (
-                    <div
-                      key={d.nodeId}
-                      className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-between text-xs"
-                    >
-                      <div>
-                        <div className="font-mono font-bold text-white">{d.batchNo}</div>
-                        <div className="text-[11px] text-slate-400">{d.materialName} ({d.stageName})</div>
-                      </div>
-                      <div className="text-right font-mono">
-                        <div className="text-slate-300">{d.operatorName}</div>
-                        <StatusBadge status={d.nodeStatus} />
-                      </div>
-                    </div>
-                  ))
-                ) : (
-                  <div className="p-4 text-center text-xs text-slate-400 border border-dashed border-slate-800 rounded-lg">
-                    当前批次已作为最高级成品入库，无进一步下游衍生加工
-                  </div>
-                )}
-              </div>
-            </div>
+                  {index < graph.nodes.length - 1 && (
+                    <div className="text-slate-400 text-sm shrink-0 px-1">→</div>
+                  )}
+                </React.Fragment>
+              );
+            })}
           </div>
-        </div>
-      ) : (
-        <div className="flex items-center justify-center h-64 text-slate-400">
-          未查询到指定批次追溯链，请输入有效批次号
-        </div>
-      )}
+        )}
+
+        {graph && !loading && graph.nodes.length === 0 && (
+          <div className="py-10 text-center text-xs text-slate-400">该批次没有可穿透的追溯节点（或均不在当前账号权限范围内）</div>
+        )}
+      </div>
     </div>
   );
 }
+
+export default TraceabilityPage;

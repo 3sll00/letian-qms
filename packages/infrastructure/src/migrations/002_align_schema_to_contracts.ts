@@ -24,7 +24,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`ALTER TABLE inspection_plans DROP CONSTRAINT IF EXISTS inspection_plans_inspection_stage_check`.execute(db);
   await sql`
     ALTER TABLE inspection_plans ADD CONSTRAINT inspection_plans_inspection_stage_check
-      CHECK (inspection_stage IN ('IQC', 'IPQC_CT', 'IPQC_RL', 'IPQC_FN', 'OQC_SF', 'OQC_SH'))
+      CHECK (inspection_stage IN ('IQC', 'IPQC_CT', 'IPQC_RL', 'IPQC_FN', 'OQC_SF', 'OQC_SH', 'OQC_HEAT', 'OQC_BLACK', 'OQC_ZINC', 'OQC_NICKEL', 'OQC_PHOSPH', 'OQC_DACRO', 'OQC_MACH'))
   `.execute(db);
 
   // 版本状态：契约 PlanVersionStatusEnum 为 DRAFT/ACTIVE/INACTIVE，001 写成了 ARCHIVED
@@ -40,7 +40,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`ALTER TABLE inspection_orders DROP CONSTRAINT IF EXISTS inspection_orders_order_type_check`.execute(db);
   await sql`
     ALTER TABLE inspection_orders ADD CONSTRAINT inspection_orders_order_type_check
-      CHECK (order_type IN ('IQC', 'IPQC_CT', 'IPQC_RL', 'IPQC_FN', 'OQC_SF', 'OQC_SH'))
+      CHECK (order_type IN ('IQC', 'IPQC_CT', 'IPQC_RL', 'IPQC_FN', 'OQC_SF', 'OQC_SH', 'OQC_HEAT', 'OQC_BLACK', 'OQC_ZINC', 'OQC_NICKEL', 'OQC_PHOSPH', 'OQC_DACRO', 'OQC_MACH'))
   `.execute(db);
 
   // 状态：契约 8 态（含 MRB 会签与返工复检），001 只有 4 态且含契约中不存在的 CANCELLED

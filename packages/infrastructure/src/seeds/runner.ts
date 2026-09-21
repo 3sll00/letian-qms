@@ -6,8 +6,9 @@
  *   包目录内：   pnpm run seed
  *
  * 行为：
- *   1. 用一条 TRUNCATE 清空全部 18 张业务表（表之间没有外键，无需 RESTART IDENTITY，
- *      主键是 UUID 而非自增序列）；audit_logs 只有 BEFORE UPDATE/DELETE 触发器，
+ *   1. 用一条 TRUNCATE 清空全部 20 张业务表（有外键引用的表全部列入同一条语句，
+ *      PostgreSQL 允许直接清空而无需 CASCADE；主键是 UUID 而非自增序列）；
+ *      audit_logs 只有 BEFORE UPDATE/DELETE 触发器，
  *      TRUNCATE 是允许的，且本脚本绝不对它做 UPDATE / DELETE。
  *   2. 通过真实仓储类（KyselyInspectionPlanRepository / InspectionOrder / MRBReview /
  *      ReviewFlow / BatchTrace / MaterialPermission）写入方案、工单、MRB、流程、
@@ -38,6 +39,7 @@ import {
   EMPLOYEE_IDS,
   SAMPLING,
   seedAuditLogs,
+  seedAuthorizationLogs,
   seedCategories,
   seedCustomers,
   seedEmployees,
@@ -49,11 +51,13 @@ import {
   seedOutboxEvents,
   seedPlans,
   seedReviewFlows,
+  seedRoles,
   seedSuppliers,
   seedSyncLogs,
   seedTraceEdges,
   seedTraceNodes,
   seedWorkshops,
+  employeeNameOf,
   materialNameOf,
   planVersionOf,
   type ItemResultKind,
@@ -66,7 +70,7 @@ import {
 // 0. 需要清空 / 统计的 18 张业务表（CamelCasePlugin 运行时名 -> snake_case 物理名）
 // ============================================================================
 
-/** 18 张业务表（与 001/002 迁移 + contract 表清单一致） */
+/** 20 张业务表（与 001/002/003 迁移 + contract 表清单一致） */
 const BUSINESS_TABLES: readonly (keyof Database)[] = [
   'materials',
   'inventoryCategories',
@@ -86,6 +90,8 @@ const BUSINESS_TABLES: readonly (keyof Database)[] = [
   'integrationConfigs',
   'integrationSyncLogs',
   'materialPermissions',
+  'roles',
+  'authorizationLogs',
 ];
 
 /** 物理表名（用于打印汇总，便于与 psql 输出对照） */
@@ -108,6 +114,8 @@ const TABLE_PHYSICAL_NAMES: Readonly<Record<string, string>> = {
   integrationConfigs: 'integration_configs',
   integrationSyncLogs: 'integration_sync_logs',
   materialPermissions: 'material_permissions',
+  roles: 'roles',
+  authorizationLogs: 'authorization_logs',
 };
 
 // ============================================================================
@@ -174,6 +182,8 @@ function toOrderItem(metric: SeedMetric, seq: number, kind: ItemResultKind): Ins
     sampleSize: metric.sampleSize,
     unit: metric.unit,
     result: 'PENDING',
+    isExempt: false,
+    isManuallyModified: false,
   };
 
   if (kind === 'PENDING') {
@@ -233,13 +243,16 @@ function deriveQty(sampleQty: number, kind: ItemResultKind): { passQty: number; 
 // ============================================================================
 
 /**
- * 幂等播种：先 TRUNCATE 18 张业务表，再按依赖顺序写入演示数据。
+ * 幂等播种：先 TRUNCATE 20 张业务表，再按依赖顺序写入演示数据。
+ *
+ * 依赖顺序：roles 必须先于 material_permissions（后者有 role_code 外键），
+ * employees 先于 material_permissions（后者有 user_id 外键）。
  *
  * @param db Kysely 实例（须已注册 CamelCasePlugin，与运行时一致）
  */
 export async function seed(db: Kysely<Database>): Promise<void> {
   // ------------------------------------------------------------------
-  // 2.1 清空 18 张业务表（单条 TRUNCATE；UUID 主键无需 RESTART IDENTITY）
+  // 2.1 清空 20 张业务表（单条 TRUNCATE；UUID 主键无需 RESTART IDENTITY）
   // ------------------------------------------------------------------
   await sql`
     TRUNCATE TABLE
@@ -260,11 +273,13 @@ export async function seed(db: Kysely<Database>): Promise<void> {
       outbox_events,
       integration_configs,
       integration_sync_logs,
-      material_permissions
+      material_permissions,
+      roles,
+      authorization_logs
   `.execute(db);
 
   // ------------------------------------------------------------------
-  // 2.2 ERP 主数据（无 save() 方法，直接 insertInto）
+  // 2.2 ERP 主数据 + 角色字典（无 save() 方法，直接 insertInto）
   // ------------------------------------------------------------------
   await db.insertInto('inventoryCategories').values(seedCategories).execute();
   await db.insertInto('materials').values(seedMaterials).execute();
@@ -272,6 +287,7 @@ export async function seed(db: Kysely<Database>): Promise<void> {
   await db.insertInto('customers').values(seedCustomers).execute();
   await db.insertInto('workshops').values(seedWorkshops).execute();
   await db.insertInto('employees').values(seedEmployees).execute();
+  await db.insertInto('roles').values(seedRoles).execute();
 
   // ------------------------------------------------------------------
   // 2.3 质检方案（走仓储，保证 items / sampling_config 的 JSONB 映射一致）
@@ -313,6 +329,8 @@ export async function seed(db: Kysely<Database>): Promise<void> {
     }
     const version = planVersionOf(spec.planCode, spec.versionNo);
     const { passQty, failQty } = deriveQty(spec.sampleQty, spec.itemKind);
+    // 检验人姓名：显式指定优先，否则由员工档案反查，避免落库后 inspector_name 为空
+    const inspectorName = spec.inspectorName ?? employeeNameOf(spec.inspectorId);
 
     const order = {
       id: spec.id,
@@ -335,6 +353,17 @@ export async function seed(db: Kysely<Database>): Promise<void> {
       ...(spec.supplierCode !== undefined ? { supplierCode: spec.supplierCode } : {}),
       ...(spec.customerCode !== undefined ? { customerCode: spec.customerCode } : {}),
       ...(spec.judgment !== null ? { overallDecision: spec.judgment } : {}),
+      ...(spec.salesOrderNo !== undefined ? { salesOrderNo: spec.salesOrderNo } : {}),
+      ...(spec.dispatchDate !== undefined ? { dispatchDate: spec.dispatchDate } : {}),
+      ...(spec.customerName !== undefined ? { customerName: spec.customerName } : {}),
+      ...(spec.salesOrderPoNo !== undefined ? { salesOrderPoNo: spec.salesOrderPoNo } : {}),
+      ...(spec.erpStatus !== undefined ? { erpStatus: spec.erpStatus } : {}),
+      ...(inspectorName !== undefined ? { inspectorName } : {}),
+      // 009 委外检验 (OQC 七分类) 台账字段
+      ...(spec.outsourceNo !== undefined ? { outsourceNo: spec.outsourceNo } : {}),
+      ...(spec.processType !== undefined ? { processType: spec.processType } : {}),
+      ...(spec.returnDate !== undefined ? { returnDate: spec.returnDate } : {}),
+      ...(spec.vendorName !== undefined ? { vendorName: spec.vendorName } : {}),
     };
 
     await orderRepo.save(order);
@@ -395,6 +424,7 @@ export async function seed(db: Kysely<Database>): Promise<void> {
   // ------------------------------------------------------------------
   await db.insertInto('auditLogs').values(seedAuditLogs).execute();
   await db.insertInto('outboxEvents').values(seedOutboxEvents).execute();
+  await db.insertInto('authorizationLogs').values(seedAuthorizationLogs).execute();
 
   // ------------------------------------------------------------------
   // 2.11 打印行数汇总
@@ -431,7 +461,7 @@ export async function printRowCountSummary(db: Kysely<Database>): Promise<void> 
     console.log(`[Seeder]   ${item.table.padEnd(width)} | ${String(item.count).padStart(4)}`);
   }
   console.log(`[Seeder]   ${'-'.repeat(width)}-+------`);
-  console.log(`[Seeder]   ${'TOTAL (18 tables)'.padEnd(width)} | ${String(total).padStart(4)}`);
+  console.log(`[Seeder]   ${'TOTAL (20 tables)'.padEnd(width)} | ${String(total).padStart(4)}`);
   console.log('[Seeder] ==============================================');
   console.log('');
 }

@@ -40,8 +40,10 @@ export class SaveInspectionDraftUseCase {
       }
 
       if (securityCtx) {
+        // 从物料主数据解析真实分类；查不到时 UNKNOWN 不命中任何白名单（fail-closed）
+        const material = await ctx.materials.getMaterialByCode(orderDto.materialCode);
         securityCtx.assertAccess({
-          targetCategory: 'STANDARD_PARTS',
+          targetCategory: material?.categoryCode ?? 'UNKNOWN',
           targetMaterialCode: orderDto.materialCode,
           ...(orderDto.supplierCode !== undefined ? { targetSupplierCode: orderDto.supplierCode } : {}),
         });
@@ -65,6 +67,9 @@ export class SaveInspectionDraftUseCase {
         id: orderDto.id ?? cmd.orderId,
         // 契约 DTO 未包含批量总数，domain 构造必填；sampleQty 恒存在，该占位值不影响任何流程计算与输出
         batchQty: orderDto.sampleQty,
+        // 草稿由谁暂存，谁就是该工单的检验人（与提交实测值保持同一口径）
+        inspectorId: cmd.operatorId,
+        inspectorName: cmd.operatorName,
       });
 
       try {

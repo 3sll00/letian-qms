@@ -53,12 +53,28 @@ paths:
           in: query
           schema:
             type: string
-            enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH]
+            enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH, OQC_HEAT, OQC_BLACK, OQC_ZINC, OQC_NICKEL, OQC_PHOSPH, OQC_DACRO, OQC_MACH]
         - name: status
           in: query
           schema:
             type: string
             enum: [PENDING, INSPECTING, DRAFT, PASSED, FAILED, IN_MRB_REVIEW, RE_INSPECTING, COMPLETED]
+        - name: statuses
+          in: query
+          description: 状态多选，逗号分隔（如 `PENDING,INSPECTING`）；与 `status` 互斥，优先 `statuses`
+          schema:
+            type: string
+        - name: inspectionState
+          in: query
+          description: >-
+            台账「检验状态」派生口径筛选（待检验/检验中/已合格/不合格）。
+            由后端按 status + judgment 统一翻译：PENDING=status IN (PENDING,DRAFT)；
+            INSPECTING=status IN (INSPECTING,RE_INSPECTING)；
+            PASSED=status IN (COMPLETED,PASSED) AND judgment IS DISTINCT FROM 'FAILED'；
+            FAILED=status IN (FAILED,IN_MRB_REVIEW) OR (status IN (COMPLETED,PASSED) AND judgment='FAILED')。
+          schema:
+            type: string
+            enum: [PENDING, INSPECTING, PASSED, FAILED]
         - name: batchNo
           in: query
           schema:
@@ -69,6 +85,61 @@ paths:
             type: string
         - name: supplierCode
           in: query
+          schema:
+            type: string
+        - name: keyword
+          in: query
+          description: 跨字段模糊检索（批次号 / 物料 / 检验单号 / 出库单号 / 客户订单号 / 客户）
+          schema:
+            type: string
+        - name: salesOrderNo
+          in: query
+          description: 销售出库单号模糊匹配（出货检验 OQC 台账，008 字段扩展）
+          schema:
+            type: string
+        - name: customerName
+          in: query
+          description: 客户名称模糊匹配（出货检验 OQC 台账，008 字段扩展）
+          schema:
+            type: string
+        - name: salesOrderPoNo
+          in: query
+          description: 客户采购订单号模糊匹配（出货检验 OQC 台账，008 字段扩展）
+          schema:
+            type: string
+        - name: dispatchDate
+          in: query
+          description: 出库日期精确匹配 YYYY-MM-DD（出货检验 OQC 台账，008 字段扩展）
+          schema:
+            type: string
+        - name: erpStatus
+          in: query
+          description: ERP 出库单审核状态精确匹配：待审核 / 已审核 / 已拦截（008 字段扩展）
+          schema:
+            type: string
+        - name: docKeyword
+          in: query
+          description: 单号模糊匹配，同时命中 `order_no` 与 `receipt_no`（来料检验台账「检验单号 / 入库单号」检索口径）
+          schema:
+            type: string
+        - name: materialKeyword
+          in: query
+          description: 物料模糊匹配，同时命中 `material_code` 与 `material_name`
+          schema:
+            type: string
+        - name: outsourceNo
+          in: query
+          description: 委外加工单号模糊匹配（009 委外检验扩展）
+          schema:
+            type: string
+        - name: processType
+          in: query
+          description: 加工类型精确匹配（009 委外检验扩展，如 镀锌 / 热处理）
+          schema:
+            type: string
+        - name: partner
+          in: query
+          description: 往来单位模糊匹配：同时命中加工商 / 供应商名称与编码（009 委外检验扩展）
           schema:
             type: string
         - name: page
@@ -394,9 +465,13 @@ components:
           format: uuid
         orderNo:
           type: string
+          description: >-
+            检验单号，规则 {类型前缀}-{YYYYMMDD}-{4位流水号}；出货检验为 OQC-SH-YYYYMMDD-NNNN。
+            创建时可省略，由服务端按该规则在事务内取号（同一前缀+同一日期内严格递增、并发不重号）
+          example: OQC-SH-20260706-0001
         inspectionType:
           type: string
-          enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH]
+          enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH, OQC_HEAT, OQC_BLACK, OQC_ZINC, OQC_NICKEL, OQC_PHOSPH, OQC_DACRO, OQC_MACH]
         status:
           type: string
           enum: [PENDING, INSPECTING, DRAFT, PASSED, FAILED, IN_MRB_REVIEW, RE_INSPECTING, COMPLETED]
@@ -426,6 +501,79 @@ components:
           type: string
         inspectionNotes:
           type: string
+        receiptNo:
+          type: string
+          description: 采购入库单号（006 来料检验扩展）
+        receiptDate:
+          type: string
+          description: 采购入库日期（006 来料检验扩展）
+        specification:
+          type: string
+          description: 规格型号
+        spec:
+          type: string
+          description: 规格型号别名
+        unit:
+          type: string
+          description: 计量单位
+        totalQty:
+          type: number
+          description: 来料批次总数量
+        workOrderNo:
+          type: string
+          description: MES 生产工单号（007 过程检验 IPQC 扩展）
+        blankingLength:
+          type: number
+          description: 下料/断料长度 mm（007 过程检验 IPQC 扩展）
+        operatorName:
+          type: string
+          description: 工序机台操作员姓名（007）
+        operatorId:
+          type: string
+          description: 工序操作员工号（007）
+        equipmentCode:
+          type: string
+          description: 生产机台设备编号（007）
+        equipmentName:
+          type: string
+          description: 生产设备名称（007）
+        threadSpec:
+          type: string
+          description: 牙纹/螺纹规格（007）
+        inspectionTeam:
+          type: string
+          description: 终检班组（007）
+        processStep:
+          type: string
+          description: 工序名称/阶段（007）
+        completedAt:
+          type: string
+          format: date-time
+          description: 检验终判完成时间（007）
+        salesOrderNo:
+          type: string
+          description: 销售出库单号（008 出货检验 OQC 扩展，如 SO-20260706-01）
+        dispatchDate:
+          type: string
+          description: 销售出库日期（008 出货检验 OQC 扩展，如 2026-07-06）
+        salesOrderPoNo:
+          type: string
+          description: 客户采购订单号/合同号（008 出货检验 OQC 扩展，如 PO-A-001）
+        erpStatus:
+          type: string
+          description: ERP 出库单审核状态：待审核 / 已审核 / 已拦截（008 出货检验 OQC 扩展）
+        outsourceNo:
+          type: string
+          description: ERP 委外加工单号（009 委外检验扩展，如 WW-20260706-001）
+        processType:
+          type: string
+          description: 加工类型/工艺分类（009 委外检验扩展，如 镀锌）
+        returnDate:
+          type: string
+          description: 委外件回厂登记日期 YYYY-MM-DD（009 委外检验扩展）
+        vendorName:
+          type: string
+          description: 加工商/外协厂商名称快照（009 委外检验扩展）
         planVersionId:
           type: string
           format: uuid
@@ -490,9 +638,15 @@ components:
       type: object
       required: [inspectionType, materialCode, materialName, batchNo, sampleQty]
       properties:
+        orderNo:
+          type: string
+          description: >-
+            检验单号；省略时由服务端按 {类型前缀}-{YYYYMMDD}-{4位流水号} 规则生成
+            （出货检验 OQC_SH 示例见下），显式传入时以其为准（兼容 ERP/MES 外部单号）
+          example: OQC-SH-20260706-0001
         inspectionType:
           type: string
-          enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH]
+          enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH, OQC_HEAT, OQC_BLACK, OQC_ZINC, OQC_NICKEL, OQC_PHOSPH, OQC_DACRO, OQC_MACH]
         materialCode:
           type: string
         materialName:
@@ -511,6 +665,93 @@ components:
           type: number
         isMandatoryGate:
           type: boolean
+        totalQty:
+          type: number
+          description: 来料批次总数量（006 来料检验扩展）
+        furnaceHeatNo:
+          type: string
+          description: 炉批号（支持智能关联溯源）
+        receiptNo:
+          type: string
+          description: 采购入库单号，来自 ERP Dlyndx（006 来料检验扩展）
+          example: RK-20260706-001
+        receiptDate:
+          type: string
+          description: 采购入库日期（006 来料检验扩展）
+          example: '2026-07-06'
+        specification:
+          type: string
+          description: 规格型号，来自 ERP Ptype.Standard（006 来料检验扩展）
+          example: Φ20mm
+        spec:
+          type: string
+          description: 规格型号别名（兼容简写）
+          example: Φ20mm
+        unit:
+          type: string
+          description: 计量单位
+          example: 件
+        inspectorName:
+          type: string
+          description: 检验人姓名
+          example: 张检验
+        workOrderNo:
+          type: string
+          description: MES 生产工单号（007 过程检验扩展）
+        blankingLength:
+          type: number
+          description: 断料/下料长度 mm（007 过程检验扩展）
+        operatorName:
+          type: string
+          description: 操作员姓名（007 过程检验扩展）
+        operatorId:
+          type: string
+          description: 操作员工号（007 过程检验扩展）
+        equipmentCode:
+          type: string
+          description: 设备编号（007 过程检验扩展）
+        equipmentName:
+          type: string
+          description: 设备名称（007 过程检验扩展）
+        threadSpec:
+          type: string
+          description: 牙纹/螺纹规格（007 过程检验扩展）
+        inspectionTeam:
+          type: string
+          description: 终检组/检验班组（007 过程检验扩展）
+        processStep:
+          type: string
+          description: 工序阶段/工序名称（007 过程检验扩展）
+        salesOrderNo:
+          type: string
+          description: 销售出库单号（008 出货检验扩展）
+        dispatchDate:
+          type: string
+          description: 出库日期 YYYY-MM-DD（008 出货检验扩展）
+        salesOrderPoNo:
+          type: string
+          description: 客户采购订单号（008 出货检验扩展）
+        erpStatus:
+          type: string
+          description: ERP 出库单审核状态：待审核 / 已审核 / 已拦截（008 出货检验扩展）
+        outsourceNo:
+          type: string
+          description: ERP 委外加工单号（009 委外检验扩展）
+        processType:
+          type: string
+          description: 加工类型/工艺分类（009 委外检验扩展）
+        returnDate:
+          type: string
+          description: 委外件回厂登记日期 YYYY-MM-DD（009 委外检验扩展）
+        vendorName:
+          type: string
+          description: 加工商/外协厂商名称（009 委外检验扩展）
+        completedAt:
+          type: string
+          description: 检验完成时间
+        planVersionId:
+          type: string
+          format: uuid
 
     SubmitMeasurementsRequest:
       type: object
@@ -778,4 +1019,3 @@ components:
         createdAt:
           type: string
           format: date-time
-

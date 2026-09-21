@@ -27,21 +27,25 @@ export class TogglePlanVersionUseCase {
         throw new ApplicationError('PLAN_NOT_FOUND', `未找到质检方案 [${cmd.planId}]`, 404);
       }
 
+      // 从物料主数据解析真实分类；查不到时 UNKNOWN 不命中任何白名单（fail-closed）
+      const material = await ctx.materials.getMaterialByCode(planDto.materialCode ?? "");
+      const materialCategory = material?.categoryCode ?? 'UNKNOWN';
+
       // 包装为 domain 聚合以执行版本启停状态机行为
       const plan = new InspectionPlan({
         id: planDto.id ?? cmd.planId,
         planCode: planDto.planCode,
         planName: planDto.planName,
-        materialCode: planDto.materialCode,
-        materialCategory: 'STANDARD_PARTS',
+        materialCode: planDto.materialCode ?? undefined,
+        materialCategory,
         inspectionType: planDto.inspectionType,
         versions: planDto.versions ? [...planDto.versions] : [],
       });
 
       if (securityCtx) {
         securityCtx.assertAccess({
-          targetCategory: plan.getMaterialCategory(),
-          targetMaterialCode: plan.getMaterialCode(),
+          targetCategory: plan.getMaterialCategory() ?? "*",
+          targetMaterialCode: plan.getMaterialCode() ?? "*",
         });
       }
 

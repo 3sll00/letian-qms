@@ -13,3 +13,6 @@ export * from './release-gates/check-release-gate.js';
 export * from './traceability/penetrate-batch-dag.js';
 export * from './export/export-report.js';
 export * from './export/export-trace-report.js';
+export * from './permissions/check-permission.js';
+
+export * from './mrb/pending-mrb-pool-use-case.js';

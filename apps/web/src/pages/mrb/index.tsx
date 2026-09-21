@@ -66,7 +66,24 @@ const MRB_SIGNOFF_NODES: MrbSignOffNode[] = [
   },
 ];
 
-export function MrbPage() {
+import { ReviewWorkflowView } from './ReviewWorkflowView';
+
+interface MrbPageProps {
+  initialSub?: string;
+}
+
+export function MrbPage({ initialSub = 'records' }: MrbPageProps) {
+  const [activeSubView, setActiveSubView] = useState<'records' | 'workflows'>(
+    initialSub === 'workflows' || initialSub === 'workflow' ? 'workflows' : 'records'
+  );
+
+  useEffect(() => {
+    if (initialSub === 'workflows' || initialSub === 'workflow') {
+      setActiveSubView('workflows');
+    } else {
+      setActiveSubView('records');
+    }
+  }, [initialSub]);
   const [records, setRecords] = useState<MrbReviewRecord[]>([]);
   const [activeTab, setActiveTab] = useState<'ALL' | 'PENDING' | 'APPROVED' | 'REJECTED'>('ALL');
   const [selectedRecord, setSelectedRecord] = useState<MrbReviewRecord | null>(null);
@@ -143,6 +160,36 @@ export function MrbPage() {
 
   return (
     <div className="space-y-6">
+      {/* Top MRB Module Sub-Navigation */}
+      <div className="flex items-center gap-3 border-b border-slate-800 pb-3">
+        <button
+          onClick={() => setActiveSubView('records')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
+            activeSubView === 'records'
+              ? 'bg-sky-600 text-white shadow-md'
+              : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+          }`}
+        >
+          <FileSignature className="w-4 h-4" />
+          <span>MRB 评审台账与会签席位</span>
+        </button>
+        <button
+          onClick={() => setActiveSubView('workflows')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
+            activeSubView === 'workflows'
+              ? 'bg-sky-600 text-white shadow-md'
+              : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+          }`}
+        >
+          <ShieldAlert className="w-4 h-4" />
+          <span>MRB 评审流程设置</span>
+        </button>
+      </div>
+
+      {activeSubView === 'workflows' ? (
+        <ReviewWorkflowView />
+      ) : (
+        <>
       {/* 5 Big MRB Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3.5">
         <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4 shadow flex items-center justify-between">
@@ -472,6 +519,8 @@ export function MrbPage() {
           )}
         </div>
       </div>
+    </>
+      )}
     </div>
   );
 }

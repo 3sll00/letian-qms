@@ -215,7 +215,7 @@ function buildItems(
       name: tpl.name,
       dataType: tpl.dataType,
       metricCategory: tpl.metricCategory,
-      result: 'PENDING',
+      result: "PENDING", isExempt: false, isManuallyModified: false,
     };
     if (tpl.standardText !== undefined) item.standardText = tpl.standardText;
     if (tpl.sampleSize !== undefined) item.sampleSize = tpl.sampleSize;
@@ -570,7 +570,7 @@ export const mockDatabase: {
       sampleSize: 5,
       measuredVal: 0.42,
       unit: '%',
-      result: 'PASSED',
+      result: 'PASSED', isExempt: false, isManuallyModified: false,
       remark: '化学直读光谱分析',
     },
     {
@@ -583,7 +583,7 @@ export const mockDatabase: {
       sampleSize: 10,
       measuredText: '合格',
       unit: '—',
-      result: 'PASSED',
+      result: 'PASSED', isExempt: false, isManuallyModified: false,
       remark: '目视检查 100% 合格',
     },
   ],

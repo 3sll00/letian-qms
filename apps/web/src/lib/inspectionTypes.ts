@@ -32,6 +32,13 @@ export const INSPECTION_TYPES: Record<
   IPQC_FN: { group: 'FQC', label: 'FQC 成品入库终检' },
   OQC_SF: { group: 'OQC', label: 'OQC 委外加工检验' },
   OQC_SH: { group: 'OQC', label: 'OQC 出货检验' },
+  OQC_HEAT: { group: 'OQC', label: 'OQC 委外热处理' },
+  OQC_BLACK: { group: 'OQC', label: 'OQC 委外发黑' },
+  OQC_ZINC: { group: 'OQC', label: 'OQC 委外镀锌' },
+  OQC_NICKEL: { group: 'OQC', label: 'OQC 委外镀镍' },
+  OQC_PHOSPH: { group: 'OQC', label: 'OQC 委外磷化' },
+  OQC_DACRO: { group: 'OQC', label: 'OQC 委外达克罗' },
+  OQC_MACH: { group: 'OQC', label: 'OQC 委外机加工' },
 };
 
 /** 展示分组 → 包含的契约成员 与 录入表单默认提交的细分类型 */
@@ -42,7 +49,7 @@ export const INSPECTION_GROUPS: Record<
   IQC: { members: ['IQC'], submitType: 'IQC' },
   IPQC: { members: ['IPQC_CT', 'IPQC_RL', 'IPQC_FN'], submitType: 'IPQC_CT' },
   FQC: { members: ['IPQC_FN'], submitType: 'IPQC_FN' },
-  OQC: { members: ['OQC_SF', 'OQC_SH'], submitType: 'OQC_SH' },
+  OQC: { members: ['OQC_SF', 'OQC_SH', 'OQC_HEAT', 'OQC_BLACK', 'OQC_ZINC', 'OQC_NICKEL', 'OQC_PHOSPH', 'OQC_DACRO', 'OQC_MACH'], submitType: 'OQC_SH' },
 };
 
 export const INSPECTION_FILTER_TABS: readonly InspectionFilterTab[] = [
@@ -90,3 +97,160 @@ export function inspectionTypeMatchesGroup(type: InspectionType, group: string):
   if (group === 'ALL') return true;
   return isInspectionGroup(group) && INSPECTION_GROUPS[group].members.includes(type);
 }
+
+// ==========================================
+// 证书导出与打印标准数据模型 (PDF 导出专用)
+// ==========================================
+
+export interface ChemicalElementValue {
+  element: string; // C, Si, Mn, P, S, Cr, Ni, Mo, Cu 等
+  standard?: string; // 标准要求值，例如 ≤0.08 或 18.00-20.00
+  standardMin?: number;
+  standardMax?: number;
+  actual?: string; // 实际测试值，例如 0.04 或 18.25
+  actualValue?: string;
+  unit?: string;
+}
+
+export interface ChemicalComposition {
+  elements?: ChemicalElementValue[];
+  [key: string]: any;
+}
+
+export interface MechanicalPropertyItem {
+  name: string; // 抗拉强度 Rm, 屈服强度 Rp0.2, 断后伸长率 A, 硬度等
+  standard: string; // 标准值，例如 ≥800 MPa 或 32-39 HRC
+  actual: string; // 实测值，例如 845 MPa 或 35.5 HRC
+  unit?: string;
+  result?: string;
+}
+
+export interface MechanicalProperties {
+  items?: MechanicalPropertyItem[];
+  [key: string]: any;
+}
+
+export interface DimensionItem {
+  name: string; // 螺纹通止规、外径、杆长、头部厚度等
+  standard: string;
+  actual: string;
+  result: '合格' | '不合格';
+}
+
+// 模板一：《质量保证证书》导出模型 (用于 IQC / IPQC / OQC)
+export interface QualityCertificateData {
+  certNo: string; // 证书编号
+  date?: string;
+  issueDate?: string; // 签发日期
+  inspectionType?: 'IQC' | 'IPQC' | 'OQC' | string; // 检验类型
+  inspectionTypeLabel?: string; // 来料检验 / 过程检验 / 出货检验
+  customer?: string; // 订货单位 / 客户
+  customerAddress?: string; // 客户送货/收货地址（来自 ERP）
+  projectNo?: string; // 项目号（来自 ERP）
+  shortProjectNo?: string; // 短项目号（来自 ERP）
+  manufactureDate?: string; // 制造日期（来自 ERP/MES）
+  supplier?: string; // 供货单位 (IQC用)
+  contractNo?: string; // 合同号 / 订单号
+  deliveryNo?: string;
+  productName: string; // 产品名称
+  specification?: string; // 规格型号
+  spec?: string;
+  heatNo?: string; // 炉号 / 批号
+  batchNo?: string; // 生产/检验批号
+  lotNo?: string;
+  quantity: string; // 检验/出货数量
+  steelGrade?: string; // 材质牌号 (如 304SS, ML40Cr, 35K)
+  materialGrade?: string;
+  surfaceFinish?: string; // 表面处理
+  standard: string; // 执行标准
+  performanceGrade?: string; // 性能等级 (如 8.8, 10.9, A2-70)
+  chemicalComposition: ChemicalComposition;
+  mechanicalProperties: MechanicalProperties;
+  dimensions?: DimensionItem[];
+  overallConclusion?: '合格' | '特采' | '不合格' | string;
+  inspector: string;
+  reviewer?: string;
+  approver?: string;
+  remarks?: string;
+  [key: string]: any;
+}
+
+// 模板二：《MANUFACTURING CERT》导出模型 (用于 委外检验 Outsource)
+export interface OutsourceTestResult {
+  coatingThickness?: {
+    standard: string; // 如 8 - 12 μm
+    actual: string; // 如 9.8 μm
+    points?: string[]; // 多点测量值
+  };
+  saltSprayHours?: {
+    standard: string; // 如 ≥480h 无红锈
+    actual: string; // 如 720h 合格
+  };
+  adhesion?: {
+    standard: string; // 如 划格法 0级
+    actual: string; // 如 0级 无脱落
+  };
+  deEmbrittlement?: {
+    standard: string; // 如 200℃±10℃, ≥4小时
+    actual: string; // 如 205℃, 4.5小时
+  };
+  surfaceHardness?: {
+    standard: string; // 如 32-39 HRC
+    actual: string; // 如 35.5 HRC
+  };
+  coreHardness?: {
+    standard: string; // 如 32-39 HRC
+    actual: string; // 如 34.0 HRC
+  };
+  caseDepth?: {
+    standard: string; // 如 0.15-0.25 mm
+    actual: string; // 如 0.19 mm
+  };
+  torqueStrength?: {
+    standard: string; // 如 ≥55 N·m
+    actual: string; // 如 62 N·m
+  };
+  tensileStrength?: {
+    standard: string; // 如 ≥800 MPa
+    actual: string; // 如 850 MPa
+  };
+}
+
+export interface ManufacturingCertData {
+  certNo?: string;
+  certificateNo?: string;
+  date?: string;
+  dateOfIssue?: string;
+  customerName?: string;
+  purchaseOrderNo?: string;
+  orderNo?: string;
+  subcontractNo?: string; // 委外工单号
+  subcontractor?: string; // 委外加工商
+  vendorName?: string;
+  processName?: string; // 委外加工工序 (热处理/表面处理/达克罗等)
+  productDescription?: string; // 产品/工件描述
+  partName?: string;
+  partSpec?: string;
+  dimension?: string; // 规格尺寸
+  steelGrade?: string; // 钢号/材质
+  materialGrade?: string;
+  heatNo?: string; // 炉号
+  batchNo?: string; // 批次号
+  quantity?: string;
+  quantityPcs?: string; // 数量 (PCS)
+  weightKg?: string; // 重量 (KG)
+  standardsApplied?: string; // 适用标准规范
+  standard?: string;
+  testResults?: OutsourceTestResult;
+  tests?: any[];
+  visualInspection?: 'Pass' | 'Fail' | string;
+  complianceStatement?: string;
+  overallDecision?: string;
+  inspectorName?: string;
+  qaManagerName?: string;
+  remarks?: string;
+  [key: string]: any;
+}
+
+export type QualityCertData = QualityCertificateData;
+

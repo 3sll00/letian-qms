@@ -6,3 +6,4 @@ export * from './repositories/index.js';
 export * from './adapters/index.js';
 export * from './tx/index.js';
 export * from './mocks/mock-data.js';
+export * from './scripts/sync-master-data.js';

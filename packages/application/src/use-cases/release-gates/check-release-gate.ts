@@ -62,8 +62,10 @@ export class CheckReleaseGateUseCase {
       if (securityCtx) {
         const firstOrder = orders[0];
         if (firstOrder) {
+          // 从物料主数据解析真实分类；查不到时 UNKNOWN 不命中任何白名单（fail-closed）
+          const material = await ctx.materials.getMaterialByCode(firstOrder.materialCode);
           securityCtx.assertAccess({
-            targetCategory: 'STANDARD_PARTS',
+            targetCategory: material?.categoryCode ?? 'UNKNOWN',
             targetMaterialCode: firstOrder.materialCode,
             ...(firstOrder.supplierCode !== undefined
               ? { targetSupplierCode: firstOrder.supplierCode }

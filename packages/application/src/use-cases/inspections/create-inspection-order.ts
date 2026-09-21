@@ -3,7 +3,12 @@ import type {
   CreateInspectionOrderRequest,
   InspectionPlanVersion,
 } from '@letian/contracts';
-import { InspectionOrder } from '@letian/domain';
+import {
+  InspectionOrder,
+  formatInspectionOrderNo,
+  resolveInspectionOrderNoPrefix,
+  toInspectionOrderNoDayKey,
+} from '@letian/domain';
 import { ApplicationError } from '../../errors/application-error.js';
 import type { ISecurityContext } from '../../security/security-context.js';
 import type { IUnitOfWork } from '../../tx/unit-of-work.js';
@@ -19,6 +24,11 @@ export interface CreateInspectionOrderCommand extends Partial<CreateInspectionOr
   supplierName?: string;
   inspectorId?: string;
   inspectorName?: string;
+  /** 009 委外检验 (OQC 七分类) 台账字段 */
+  outsourceNo?: string;
+  processType?: string;
+  returnDate?: string;
+  vendorName?: string;
   mandatoryGate?: boolean;
   planId?: string;
   planVersionNo?: string;
@@ -41,8 +51,9 @@ export class CreateInspectionOrderUseCase {
       await ctx.locks.acquireXactLock(`LOCK_ORDER_${cmd.batchNo}`);
 
       // 2. PBAC 权限校验 (若传入上下文)
-      // 查询物料分类以进行三维 PBAC 校验
-      const materialCategory = 'STANDARD_PARTS';
+      // 从物料主数据解析真实分类编码；查不到时按 UNKNOWN 处理（任何白名单规则都不会命中，fail-closed）
+      const material = await ctx.materials.getMaterialByCode(cmd.materialCode);
+      const materialCategory = material?.categoryCode ?? 'UNKNOWN';
 
       if (securityCtx) {
         securityCtx.assertAccess({
@@ -100,7 +111,20 @@ export class CreateInspectionOrderUseCase {
 
       // 4. 构建检验单聚合根
       const orderId = crypto.randomUUID();
-      const generatedOrderNo = cmd.orderNo ?? `INS-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      // 检验单号：调用方显式传入时以其为准（兼容 ERP/MES 下发的外部单号与存量历史数据）；
+      // 未传时按领域编号规则 `{PREFIX}-{YYYYMMDD}-{NNNN}` 申请当日流水号
+      // （出货检验 OQC_SH => `OQC-SH-20260706-0001`）。
+      // 取号在 UoW 事务内原子完成，并发建单不重号；事务回滚则流水号一并回滚（见迁移 012）。
+      let generatedOrderNo = cmd.orderNo;
+      if (!generatedOrderNo) {
+        const now = new Date();
+        const dayKey = toInspectionOrderNoDayKey(now);
+        const seq = await ctx.inspectionOrders.allocateOrderNoSequence(
+          resolveInspectionOrderNoPrefix(cmd.inspectionType),
+          dayKey
+        );
+        generatedOrderNo = formatInspectionOrderNo(cmd.inspectionType, dayKey, seq);
+      }
 
       const order = new InspectionOrder({
         id: orderId,
@@ -113,6 +137,22 @@ export class CreateInspectionOrderUseCase {
         sampleQty: cmd.sampleSize ?? Math.min(cmd.batchQty, 5),
         supplierCode: cmd.supplierCode,
         supplierName: cmd.supplierName,
+        // 006 来料检验 (IQC) 采购入库/规格字段：由请求体透传（create 契约已声明），
+        // specification 缺省时回落到契约别名 spec，保证只传一个字段也能落库
+        receiptNo: cmd.receiptNo,
+        receiptDate: cmd.receiptDate,
+        specification: cmd.specification ?? cmd.spec,
+        unit: cmd.unit,
+        // 008 出货检验 (OQC_SH) 销售出库台账字段：由请求体透传（create 契约已声明）
+        customerName: cmd.customerName,
+        salesOrderNo: cmd.salesOrderNo,
+        dispatchDate: cmd.dispatchDate,
+        salesOrderPoNo: cmd.salesOrderPoNo,
+        erpStatus: cmd.erpStatus,
+        outsourceNo: cmd.outsourceNo,
+        processType: cmd.processType,
+        returnDate: cmd.returnDate,
+        vendorName: cmd.vendorName,
         isMandatoryGate: cmd.mandatoryGate ?? true,
       });
 

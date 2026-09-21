@@ -7,6 +7,8 @@ export * from './review-flow-repository.js';
 export * from './batch-trace-repository.js';
 export * from './audit-log-repository.js';
 export * from './material-permission-repository.js';
+export * from './role-repository.js';
+export * from './authorization-log-repository.js';
 export * from './outbox-repository.js';
 export * from './integration-repository.js';
 export * from './dashboard-repository.js';

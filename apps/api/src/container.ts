@@ -1,6 +1,7 @@
 import {
   AdvanceMrbStepUseCase,
   CheckReleaseGateUseCase,
+  CheckPermissionUseCase,
   CreateInspectionOrderUseCase,
   CreatePlanUseCase,
   CreateReinspectionUseCase,
@@ -14,6 +15,7 @@ import {
   TogglePlanVersionUseCase,
   TriggerMrbReviewUseCase,
   UpgradePlanVersionUseCase,
+  PendingMRBPoolUseCase,
   type IUnitOfWork,
 } from '@letian/application';
 import {
@@ -26,7 +28,10 @@ import {
   KyselyMRBReviewRepository,
   KyselyMasterDataRepository,
   KyselyMaterialPermissionRepository,
+  KyselyRoleRepository,
+  KyselyAuthorizationLogRepository,
   KyselyReviewFlowRepository,
+  StandardReportEngine,
   createDatabaseConnection,
   createUnitOfWork,
 } from '@letian/infrastructure';
@@ -64,10 +69,13 @@ export interface ApiContainer {
     dashboard: KyselyDashboardRepository;
     reviewFlows: KyselyReviewFlowRepository;
     materialPermissions: KyselyMaterialPermissionRepository;
+    roles: KyselyRoleRepository;
+    authorizationLogs: KyselyAuthorizationLogRepository;
   };
 
   /** 应用层用例（写侧唯一入口） */
   readonly useCases: {
+    checkPermission: CheckPermissionUseCase;
     createInspectionOrder: CreateInspectionOrderUseCase;
     recordMeasurementsAndJudge: RecordMeasurementsAndJudgeUseCase;
     saveInspectionDraft: SaveInspectionDraftUseCase;
@@ -83,7 +91,9 @@ export interface ApiContainer {
     penetrateBatchDag: PenetrateBatchDagUseCase;
     exportInspectionReport: ExportInspectionReportUseCase;
     exportTraceReport: ExportTraceReportUseCase;
+    pendingMRBPool: PendingMRBPoolUseCase;
   };
+  readonly reportEngine: StandardReportEngine;
 
   /** 仅在容器自己创建了连接时才会真正销毁连接池 */
   dispose(): Promise<void>;
@@ -110,12 +120,15 @@ export function createApiContainer(options: CreateApiContainerOptions = {}): Api
     dashboard: new KyselyDashboardRepository(db),
     reviewFlows: new KyselyReviewFlowRepository(db),
     materialPermissions: new KyselyMaterialPermissionRepository(db),
+    roles: new KyselyRoleRepository(db),
+    authorizationLogs: new KyselyAuthorizationLogRepository(db),
   };
 
   // 追溯穿透用例被追溯报表用例复用，保证两处穿透逻辑与成环检测完全一致
   const penetrateBatchDag = new PenetrateBatchDagUseCase(uow);
 
   const useCases = {
+    checkPermission: new CheckPermissionUseCase(uow),
     createInspectionOrder: new CreateInspectionOrderUseCase(uow),
     recordMeasurementsAndJudge: new RecordMeasurementsAndJudgeUseCase(uow),
     saveInspectionDraft: new SaveInspectionDraftUseCase(uow),
@@ -131,12 +144,15 @@ export function createApiContainer(options: CreateApiContainerOptions = {}): Api
     penetrateBatchDag,
     exportInspectionReport: new ExportInspectionReportUseCase(uow),
     exportTraceReport: new ExportTraceReportUseCase(uow, penetrateBatchDag),
+    pendingMRBPool: new PendingMRBPoolUseCase(uow),
   };
+  const reportEngine = new StandardReportEngine();
   return {
     db,
     uow,
     repositories,
     useCases,
+    reportEngine,
     dispose: async () => {
       if (!externalDb) {
         await db.destroy();

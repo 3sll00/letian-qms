@@ -1,3 +1,4 @@
+﻿import { syncErpMasterData, syncMesAll, testMesConnection, queryMes, assertSafeMesDatabase, STRICT_MES_TARGET_DB } from '@letian/infrastructure';
 import { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import {
@@ -227,19 +228,35 @@ export const integrationController: FastifyPluginAsync<{ container: ApiContainer
       const systemType = body.systemType ?? targetToSystemType(body.target);
       const target = body.target ?? (systemType === 'ERP' ? 'ERP_MASTER_DATA' : 'MES_PRODUCTION_BATCHES');
 
-      const [materials, suppliers, customers, workshops, employees] = await Promise.all([
-        masterData.getMaterials(),
-        masterData.getSuppliers(),
-        masterData.getCustomers(),
-        masterData.getWorkshops(),
-        masterData.getEmployees(),
-      ]);
-      const batchOrders = await orders.listOrders({ page: 1, pageSize: 1 });
+            let recordsCount = 0;
+      let syncDetails: any = null;
 
-      const recordsCount =
-        systemType === 'ERP'
-          ? materials.length + suppliers.length + customers.length + workshops.length + employees.length
-          : batchOrders.total;
+      if (systemType === 'MES') {
+        try {
+          const mesResult = await syncMesAll();
+          recordsCount =
+            mesResult.syncedWorkshops +
+            mesResult.syncedInspectionOrders +
+            mesResult.syncedTraceNodes;
+          syncDetails = mesResult.details;
+        } catch (mesErr: any) {
+          fastify.log.error(mesErr, 'MES 数据同步异常');
+        }
+      } else {
+        const [materials, suppliers, customers, workshops, employees] = await Promise.all([
+          masterData.getMaterials(),
+          masterData.getSuppliers(),
+          masterData.getCustomers(),
+          masterData.getWorkshops(),
+          masterData.getEmployees(),
+        ]);
+        recordsCount =
+          materials.length +
+          suppliers.length +
+          customers.length +
+          workshops.length +
+          employees.length;
+      }
 
       const syncLogId = crypto.randomUUID();
       const batchNo = `SYNC-${systemType}-${Date.now().toString().slice(-8)}`;
@@ -256,14 +273,16 @@ export const integrationController: FastifyPluginAsync<{ container: ApiContainer
 
       await integration.appendSyncLog(
         syncLog,
-        systemType === 'ERP' ? '本地 ERP 主数据镜像清点' : '本地 MES 生产批次镜像清点'
+        systemType === 'ERP'
+          ? '本地 ERP 主数据镜像清点'
+          : `MES车间生产与质检实绩数据同步 (明细: ${JSON.stringify(syncDetails || {})})`
       );
 
       await appendDbAuditLog(container.uow, request, {
         action: 'SYNC_TRIGGER',
         resourceType: 'DATA_SYNC',
         resourceId: syncLogId,
-        diffPatch: { target, systemType, recordsCount },
+        diffPatch: { target, systemType, recordsCount, details: syncDetails },
       });
 
       return reply.status(200).send({
@@ -274,15 +293,167 @@ export const integrationController: FastifyPluginAsync<{ container: ApiContainer
         syncDirection: 'PULL',
         status: 'SUCCESS',
         recordsCount,
+        details: syncDetails,
         message:
           systemType === 'ERP'
             ? `已清点本地 ERP 主数据镜像 ${recordsCount} 条记录`
-            : `已清点本地 MES 生产批次镜像 ${recordsCount} 条记录`,
+            : `已从 MES 测试库 (mes_letian_test) 同步 ${recordsCount} 条生产质检数据`,
         syncedAt: syncLog.createdAt,
       });
     }
   );
 
+  // ERP主数据即时同步（供前端主数据页面一键同步调用）
+  fastify.post('/sync', async (request, reply) => {
+    try {
+      const result = await syncErpMasterData();
+      return reply.status(200).send({
+        success: true,
+        message: 'ERP主数据同步完成',
+        details: result,
+      });
+    } catch (err: any) {
+      return reply.status(500).send({
+        success: false,
+        message: err?.message || '同步异常',
+      });
+    }
+  });
+
+  // MES车间生产与质检数据即时同步（直连 mes_letian_test，安全隔离）
+  fastify.post('/mes/sync', async (request, reply) => {
+    try {
+      const result = await syncMesAll();
+      return reply.status(200).send({
+        success: result.success,
+        message: result.success ? 'MES车间生产与质检数据同步完成' : 'MES数据同步异常',
+        details: result,
+      });
+    } catch (err: any) {
+      return reply.status(500).send({
+        success: false,
+        message: err?.message || 'MES同步异常',
+      });
+    }
+  });
+
+  // MES测试数据库实时连接健康探测
+  fastify.get('/mes/status', async (_request, reply) => {
+    try {
+      const status = await testMesConnection();
+      return reply.status(200).send({
+        success: status.connected,
+        ...status,
+      });
+    } catch (err: any) {
+      return reply.status(500).send({
+        success: false,
+        connected: false,
+        database: STRICT_MES_TARGET_DB,
+        error: err?.message || '连接异常',
+      });
+    }
+  });
+
+  // 查询 MES 实时生产任务单列表 (只读 mes_letian_test.t_production_task)
+  fastify.get('/mes/tasks', async (request, reply) => {
+    try {
+      assertSafeMesDatabase();
+      const query = request.query as { search?: string; page?: string; pageSize?: string };
+      const page = Math.max(1, parseInt(query.page || '1', 10));
+      const pageSize = Math.min(100, Math.max(1, parseInt(query.pageSize || '20', 10)));
+      const offset = (page - 1) * pageSize;
+
+      let sql = `
+        SELECT 
+          t.id, t.bill_no, t.heat_number, t.steel_mill, t.cutting_length, t.production_num, t.bill_date,
+          m.code as materiel_code, m.name as materiel_name, m.spec as materiel_spec
+        FROM t_production_task t
+        LEFT JOIN t_materiel m ON t.materiel_id = m.id
+      `;
+      const params: any[] = [];
+      if (query.search) {
+        sql += ` WHERE t.bill_no LIKE ? OR t.heat_number LIKE ? OR m.code LIKE ? OR m.name LIKE ?`;
+        const s = `%${query.search}%`;
+        params.push(s, s, s, s);
+      }
+      sql += ` ORDER BY t.bill_date DESC LIMIT ? OFFSET ?`;
+      params.push(pageSize, offset);
+
+      const rows = await queryMes<any>(sql, params);
+      return reply.status(200).send({
+        page,
+        pageSize,
+        items: rows,
+      });
+    } catch (err: any) {
+      return reply.status(500).send({
+        error: err?.message || '查询MES任务单失败',
+      });
+    }
+  });
+
+  // 查询 MES 现场检验报告列表 (只读 mes_letian_test.t_check_report)
+  fastify.get('/mes/check-reports', async (request, reply) => {
+    try {
+      assertSafeMesDatabase();
+      const query = request.query as { search?: string; page?: string; pageSize?: string };
+      const page = Math.max(1, parseInt(query.page || '1', 10));
+      const pageSize = Math.min(100, Math.max(1, parseInt(query.pageSize || '20', 10)));
+      const offset = (page - 1) * pageSize;
+
+      let sql = `
+        SELECT 
+          r.id, r.bill_no, r.bill_date, r.check_date,
+          r.check_qty, r.qualified_qty, r.unqualified_qty, r.is_qualified, r.remarks,
+          t.bill_no as task_bill_no, t.heat_number, t.steel_mill,
+          m.code as materiel_code, m.name as materiel_name,
+          p.name as procedure_name,
+          u.realname as inspector_name
+        FROM t_check_report r
+        LEFT JOIN t_production_task t ON r.task_id = t.id
+        LEFT JOIN t_materiel m ON r.materiel_id = m.id
+        LEFT JOIN t_procedure p ON r.procedure_id = p.id
+        LEFT JOIN sys_user u ON r.create_user_id = u.id
+      `;
+      const params: any[] = [];
+      if (query.search) {
+        sql += ` WHERE r.bill_no LIKE ? OR t.bill_no LIKE ? OR t.heat_number LIKE ? OR m.name LIKE ?`;
+        const s = `%${query.search}%`;
+        params.push(s, s, s, s);
+      }
+      sql += ` ORDER BY r.create_time DESC LIMIT ? OFFSET ?`;
+      params.push(pageSize, offset);
+
+      const rows = await queryMes<any>(sql, params);
+      return reply.status(200).send({
+        page,
+        pageSize,
+        items: rows,
+      });
+    } catch (err: any) {
+      return reply.status(500).send({
+        error: err?.message || '查询MES检验单失败',
+      });
+    }
+  });
+
+  // 查询 MES 工序字典清单 (只读 mes_letian_test.t_procedure)
+  fastify.get('/mes/procedures', async (_request, reply) => {
+    try {
+      assertSafeMesDatabase();
+      const rows = await queryMes<any>(
+        'SELECT id, code, name, remarks FROM t_procedure ORDER BY code ASC'
+      );
+      return reply.status(200).send({
+        items: rows,
+      });
+    } catch (err: any) {
+      return reply.status(500).send({
+        error: err?.message || '查询MES工序列表失败',
+      });
+    }
+  });
   // 7. 历史数据同步流水（取自 integration_sync_logs）
   fastify.get(
     '/sync/history',

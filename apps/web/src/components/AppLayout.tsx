@@ -1,259 +1,339 @@
-import React, { useState } from 'react';
-import {
-  LayoutDashboard,
-  ClipboardCheck,
-  GitBranch,
-  ShieldAlert,
-  Server,
-  Database,
-  CalendarCheck,
-  FolderTree,
-  Bell,
-  Activity,
-  ChevronRight,
-  Menu,
-  Search,
-  Lock,
-} from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { api } from '../lib/api';
+import { Search, LogOut } from 'lucide-react';
 import { cn } from '../lib/utils';
+import type { SessionUser } from '../lib/api';
+
+// Import exact cropped sidebar icons
+import logoIcon from '../assets/logo_icon.png';
+import bellIcon from '../assets/bell_icon.png';
+import helpIcon from '../assets/help_icon.png';
+
+import dashboardIcon from '../assets/sidebar-icons/dashboard.png';
+import historyIcon from '../assets/sidebar-icons/history.png';
+import traceabilityIcon from '../assets/sidebar-icons/traceability.png';
+import iqcIcon from '../assets/sidebar-icons/iqc.png';
+import ipqcIcon from '../assets/sidebar-icons/ipqc.png';
+import outsourceIcon from '../assets/sidebar-icons/outsource.png';
+import oqcIcon from '../assets/sidebar-icons/oqc.png';
+import planDesignIcon from '../assets/sidebar-icons/plan_design.png';
+import mrbIcon from '../assets/sidebar-icons/mrb.png';
+import reviewWorkflowIcon from '../assets/sidebar-icons/review_workflow.png';
+import permissionsIcon from '../assets/sidebar-icons/permissions.png';
+import categoriesIcon from '../assets/sidebar-icons/categories.png';
+import logsIcon from '../assets/sidebar-icons/logs.png';
+import erpInventoryIcon from '../assets/sidebar-icons/erp_inventory.png';
+import erpSupplierIcon from '../assets/sidebar-icons/erp_supplier.png';
+import erpCustomerIcon from '../assets/sidebar-icons/erp_customer.png';
 
 export type NavItemKey =
   | 'dashboard'
-  | 'plans'
-  | 'inspections'
+  | 'history'
   | 'traceability'
+  | 'iqc'
+  | 'ipqc'
+  | 'outsource'
+  | 'oqc'
+  | 'plans'
+  | 'mrb-pending'
   | 'mrb'
-  | 'integration'
-  | 'master-data'
-  | 'categories';
+  | 'review-workflow'
+  | 'permissions'
+  | 'categories'
+  | 'logs'
+  | 'erp-inventory'
+  | 'erp-supplier'
+  | 'erp-customer';
 
-interface NavItem {
+interface NavMenuItem {
   key: NavItemKey;
   label: string;
-  subLabel: string;
-  icon: React.ComponentType<{ className?: string }>;
-  badge?: string;
-  badgeTone?: 'red' | 'blue' | 'emerald';
+  icon: string;
+  badge?: number;
 }
 
-const NAV_ITEMS: NavItem[] = [
+interface NavGroup {
+  groupName: string;
+  items: NavMenuItem[];
+}
+
+export const NAV_GROUPS: NavGroup[] = [
   {
-    key: 'dashboard',
-    label: '质量驾驶舱',
-    subLabel: 'KPI / 态势中枢',
-    icon: LayoutDashboard,
+    groupName: '质量总览',
+    items: [
+      { key: 'dashboard', label: '检验进度总览', icon: dashboardIcon },
+      { key: 'history', label: '检验进度明细', icon: historyIcon },
+      { key: 'traceability', label: '质量追溯看板', icon: traceabilityIcon },
+    ],
   },
   {
-    key: 'inspections',
-    label: '质检执行台',
-    subLabel: 'IQC/IPQC/FQC/下料',
-    icon: ClipboardCheck,
-    badge: '3 待检',
-    badgeTone: 'blue',
+    groupName: '检验管理',
+    items: [
+      { key: 'iqc', label: '来料检验(IQC)', icon: iqcIcon },
+      { key: 'ipqc', label: '过程检验(IPQC)', icon: ipqcIcon },
+      { key: 'outsource', label: '委外检验', icon: outsourceIcon },
+      { key: 'oqc', label: '出货检验 (OQC)', icon: oqcIcon },
+    ],
   },
   {
-    key: 'mrb',
-    label: 'MRB 评审流',
-    subLabel: '不合格品/特采签核',
-    icon: ShieldAlert,
-    badge: '1 阻断',
-    badgeTone: 'red',
+    groupName: '质检方案',
+    items: [
+      { key: 'plans', label: '质检方案设计', icon: planDesignIcon },
+    ],
   },
   {
-    key: 'traceability',
-    label: '批次追溯 DAG',
-    subLabel: '全链路树/防倒流',
-    icon: GitBranch,
+    groupName: '不合格品处置',
+    items: [
+      { key: 'mrb-pending', label: '不合格待审核池', icon: mrbIcon },
+      { key: 'mrb', label: 'MRB评审工单', icon: mrbIcon },
+      { key: 'review-workflow', label: '评审流程设置', icon: reviewWorkflowIcon },
+    ],
   },
   {
-    key: 'plans',
-    label: '检验计划中心',
-    subLabel: 'AQL/抽样规程',
-    icon: CalendarCheck,
+    groupName: '系统管理',
+    items: [
+      { key: 'permissions', label: '物料权限管理', icon: permissionsIcon },
+      { key: 'categories', label: '存货分类', icon: categoriesIcon },
+      { key: 'logs', label: '操作日志', icon: logsIcon },
+    ],
   },
   {
-    key: 'integration',
-    label: 'MES 集成中枢',
-    subLabel: '停机拦截/PLC指令',
-    icon: Server,
-    badge: '在线 48',
-    badgeTone: 'emerald',
-  },
-  {
-    key: 'master-data',
-    label: '主数据管理',
-    subLabel: '供应商/存货/车间/人员',
-    icon: Database,
-  },
-  {
-    key: 'categories',
-    label: '物料分类树',
-    subLabel: '母料/胚料/成品层级',
-    icon: FolderTree,
+    groupName: 'ERP基础档案',
+    items: [
+      { key: 'erp-inventory', label: '存货档案', icon: erpInventoryIcon },
+      { key: 'erp-supplier', label: '供应商', icon: erpSupplierIcon },
+      { key: 'erp-customer', label: '客户', icon: erpCustomerIcon },
+    ],
   },
 ];
 
 interface AppLayoutProps {
   currentKey: NavItemKey;
   onSelectKey: (key: NavItemKey) => void;
+  /** 当前登录用户（姓名 + 角色），渲染在顶栏右侧 */
+  user: SessionUser;
+  /** 退出登录回调 */
+  onLogout: () => void;
   children: React.ReactNode;
 }
 
-export function AppLayout({ currentKey, onSelectKey, children }: AppLayoutProps) {
-  const [collapsed, setCollapsed] = useState(false);
+function userInitial(name: string): string {
+  const text = name.trim();
+  if (text === '') return '?';
+  return /[一-龥]/.test(text[0] as string) ? (text[0] as string) : (text[0] as string).toUpperCase();
+}
+
+export function AppLayout({ currentKey, onSelectKey, user, onLogout, children }: AppLayoutProps) {
+  const [topSearch, setTopSearch] = useState('');
+  const [badges, setBadges] = useState<Record<string, number>>({});
+
+  const refreshBadges = useCallback(async () => {
+    try {
+      const counts: Record<string, number> = {
+        iqc: 0,
+        ipqc: 0,
+        outsource: 0,
+        oqc: 0,
+        'mrb-pending': 0,
+        mrb: 0,
+      };
+
+      // 1. 实时获取所有待检验状态单据并按工序分类归集
+      const res = await api.get<{ list?: any[]; items?: any[] }>('/inspections', {
+        status: 'PENDING',
+        limit: 100,
+      });
+      const list = res.list || res.items || [];
+      for (const item of list) {
+        const type = String(item.inspectionType || item.orderType || '').toUpperCase();
+        if (type.includes('IQC')) {
+          counts.iqc++;
+        } else if (type.includes('IPQC')) {
+          counts.ipqc++;
+        } else if (
+          type.includes('OUTSOURCE') ||
+          // 委外七分类 (OQC_SF/OQC_HEAT/OQC_MACH/OQC_BLACK/OQC_ZINC/OQC_NICKEL/OQC_PHOSPH/OQC_DACRO)
+          // 全部归入「委外检验」菜单；OQC_SH 属出货检验，走下一分支
+          (type.startsWith('OQC_') && type !== 'OQC_SH')
+        ) {
+          counts.outsource++;
+        } else if (type.includes('OQC')) {
+          counts.oqc++;
+        }
+      }
+
+      // 2. 实时获取 MRB 评审中工单数量
+      try {
+        const overview = await api.get<{ inMRBCount?: number; mrbInReviewCount?: number }>('/dashboard/overview');
+        counts.mrb = overview.inMRBCount ?? overview.mrbInReviewCount ?? 0;
+      } catch {
+        // ignore
+      }
+
+      // 3. 实时获取不合格待处置/待审核池单据
+      try {
+        const failedRes = await api.get<{ total?: number }>('/inspections', {
+          status: 'FAILED',
+          limit: 1,
+        });
+        counts['mrb-pending'] = failedRes.total ?? 0;
+      } catch {
+        // ignore
+      }
+
+      setBadges(counts);
+    } catch {
+      // 容错处理
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshBadges();
+    const timer = setInterval(() => {
+      void refreshBadges();
+    }, 30000);
+    return () => clearInterval(timer);
+  }, [refreshBadges, currentKey]);
+
+  // Find current breadcrumb
+  let activeGroup = '';
+  let activeItemLabel = '';
+  for (const group of NAV_GROUPS) {
+    const item = group.items.find((i) => i.key === currentKey);
+    if (item) {
+      activeGroup = group.groupName;
+      activeItemLabel = item.label;
+      break;
+    }
+  }
 
   return (
-    <div className="flex h-screen w-full bg-[#0B1120] text-slate-100 overflow-hidden select-none">
-      {/* Sidebar */}
-      <aside
-        className={cn(
-          'flex flex-col border-r border-slate-800 bg-[#0F172A] transition-all duration-300 z-30',
-          collapsed ? 'w-20' : 'w-64'
-        )}
-      >
-        {/* Brand Header */}
-        <div className="h-16 flex items-center px-4 border-b border-slate-800 justify-between bg-slate-900/60">
-          <div className="flex items-center gap-3 overflow-hidden">
-            <div className="w-10 h-10 rounded-lg bg-gradient-to-tr from-sky-600 to-blue-500 flex items-center justify-center font-bold text-white shadow-lg shadow-sky-500/20 shrink-0">
-              <Activity className="w-6 h-6 text-white" />
-            </div>
-            {!collapsed && (
-              <div className="truncate">
-                <div className="font-bold text-sm tracking-tight text-white flex items-center gap-1.5">
-                  乐天紧固件 QMS
-                  <span className="text-[10px] bg-sky-500/20 text-sky-400 px-1.5 py-0.5 rounded font-mono border border-sky-500/30">
-                    V2.5
-                  </span>
-                </div>
-                <div className="text-[11px] text-slate-400 truncate">质量管控与放行阻断中枢</div>
+    <div className="flex h-screen w-screen overflow-hidden bg-[#F5F7FA] text-[#1E293B] font-sans antialiased">
+      {/* Left Sidebar */}
+      <aside className="w-[195px] min-w-[195px] max-w-[195px] bg-[#1E293B] flex flex-col h-full border-r border-slate-800 select-none z-20 shrink-0">
+        {/* Brand Logo Header */}
+        <div className="h-[58px] flex items-center px-4 gap-2.5 border-b border-slate-800/80 shrink-0">
+          <img src={logoIcon} alt="Logo" className="w-7 h-7 rounded shadow-sm object-contain" />
+          <span className="text-white text-[15px] font-semibold tracking-wide">乐天QMS</span>
+        </div>
+
+        {/* Navigation Menus with custom scrollbar */}
+        <nav className="flex-1 overflow-y-auto py-2.5 px-2 space-y-3.5 scrollbar-thin">
+          {NAV_GROUPS.map((group) => (
+            <div key={group.groupName} className="space-y-0.5">
+              <div className="px-2.5 py-1 text-[11px] font-medium text-slate-400/80">
+                {group.groupName}
               </div>
-            )}
-          </div>
-          <button
-            onClick={() => setCollapsed(!collapsed)}
-            className="text-slate-400 hover:text-white p-1 rounded hover:bg-slate-800 transition"
-          >
-            {collapsed ? <ChevronRight className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
-          </button>
-        </div>
-
-        {/* Navigation list */}
-        <div className="flex-1 py-4 px-2 space-y-1.5 overflow-y-auto">
-          {!collapsed && (
-            <div className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-              核心业务域
+              <div className="space-y-0.5">
+                {group.items.map((item) => {
+                  const isActive = currentKey === item.key;
+                  return (
+                    <button
+                      key={item.key}
+                      onClick={() => onSelectKey(item.key)}
+                      className={cn(
+                        'w-full flex items-center justify-between px-2.5 py-2 rounded text-[13px] transition-colors group text-left relative',
+                        isActive
+                          ? 'bg-[#203055] text-white font-medium'
+                          : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
+                      )}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <img
+                          src={item.icon}
+                          alt={item.label}
+                          className="w-4 h-4 object-contain shrink-0 opacity-90 group-hover:opacity-100"
+                        />
+                        <span className="truncate">{item.label}</span>
+                      </div>
+                      {(() => {
+                        const count = badges[item.key] ?? (typeof item.badge === 'number' ? item.badge : 0);
+                        if (!count || count <= 0) return null;
+                        return (
+                          <span className="ml-1 shrink-0 bg-[#EF4444] text-white text-[10px] font-semibold px-1.5 py-0.2 rounded-full min-w-[18px] text-center leading-[16px]">
+                            {count > 99 ? '99+' : count}
+                          </span>
+                        );
+                      })()}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-          )}
-          {NAV_ITEMS.map((item) => {
-            const Icon = item.icon;
-            const active = currentKey === item.key;
-            return (
-              <button
-                key={item.key}
-                onClick={() => onSelectKey(item.key)}
-                className={cn(
-                  'w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all group relative',
-                  active
-                    ? 'bg-sky-600/20 text-sky-400 border border-sky-500/30 shadow-[inset_0_0_12px_rgba(14,165,233,0.15)]'
-                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-800/60'
-                )}
-                title={collapsed ? `${item.label} (${item.subLabel})` : undefined}
-              >
-                <Icon
-                  className={cn(
-                    'w-5 h-5 shrink-0 transition-colors',
-                    active ? 'text-sky-400' : 'text-slate-400 group-hover:text-slate-200'
-                  )}
-                />
-                {!collapsed && (
-                  <div className="flex-1 text-left truncate">
-                    <div className="leading-none text-[13px]">{item.label}</div>
-                    <div className="text-[11px] text-slate-400 mt-0.5 font-mono">{item.subLabel}</div>
-                  </div>
-                )}
-                {!collapsed && item.badge && (
-                  <span
-                    className={cn(
-                      'text-[10px] px-1.5 py-0.5 rounded font-mono font-medium border',
-                      item.badgeTone === 'red' &&
-                        'bg-rose-950/80 text-rose-400 border-rose-500/40 animate-pulse',
-                      item.badgeTone === 'blue' &&
-                        'bg-sky-950/80 text-sky-400 border-sky-500/40',
-                      item.badgeTone === 'emerald' &&
-                        'bg-emerald-950/80 text-emerald-400 border-emerald-500/40'
-                    )}
-                  >
-                    {item.badge}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Bottom Status Card */}
-        {!collapsed && (
-          <div className="p-3 m-2 rounded-lg bg-slate-900/80 border border-slate-800 text-xs space-y-2">
-            <div className="flex items-center justify-between text-slate-400">
-              <span className="flex items-center gap-1.5 text-emerald-400">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping inline-block" />
-                MES 阻断网关在线
-              </span>
-              <Lock className="w-3.5 h-3.5 text-rose-400" />
-            </div>
-            <div className="text-[11px] text-slate-400">当前拦截锁定: 1 批 (CH-04 下料机)</div>
-          </div>
-        )}
+          ))}
+        </nav>
       </aside>
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden bg-[#0B1120]">
-        {/* Top Header */}
-        <header className="h-16 border-b border-slate-800 bg-[#0F172A]/70 backdrop-blur px-6 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-3">
-            <h1 className="text-base font-semibold text-white tracking-wide flex items-center gap-2">
-              <span>
-                {NAV_ITEMS.find((n) => n.key === currentKey)?.label || '工作台'}
-              </span>
-              <span className="text-xs text-slate-400 font-normal">
-                | {NAV_ITEMS.find((n) => n.key === currentKey)?.subLabel}
-              </span>
-            </h1>
+      <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden">
+        {/* Top Navbar */}
+        <header className="h-[58px] bg-white border-b border-[#E2E8F0] px-6 flex items-center justify-between shrink-0 z-10">
+          {/* Breadcrumb */}
+          <div className="flex items-center gap-2 text-[13px] text-slate-500">
+            <span>{activeGroup}</span>
+            <span>/</span>
+            <span className="text-slate-900 font-bold">{activeItemLabel}</span>
           </div>
 
+          {/* Right Action Icons & User */}
           <div className="flex items-center gap-4">
-            {/* Quick Search */}
-            <div className="relative hidden md:block">
-              <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
+            {/* Global Search Box */}
+            <div className="relative w-[280px]">
               <input
                 type="text"
-                placeholder="快速全局搜索批次号 / 物料..."
-                className="bg-slate-900 border border-slate-700/80 rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-200 placeholder:text-slate-400 focus:outline-none focus:border-sky-500 w-64"
+                placeholder="搜索检验单号、物料编码..."
+                value={topSearch}
+                onChange={(e) => setTopSearch(e.target.value)}
+                className="w-full bg-slate-50 border border-slate-200 rounded-full pl-8 pr-3 py-1.5 text-[12px] text-slate-700 placeholder-slate-400 focus:outline-none focus:border-blue-500 focus:bg-white transition-all"
               />
+              <Search className="w-3.5 h-3.5 text-blue-500 absolute left-3 top-1/2 -translate-y-1/2" />
             </div>
 
-            {/* Notification */}
-            <button className="relative p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition">
-              <Bell className="w-4 h-4" />
-              <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-rose-500 rounded-full" />
+            {/* Notification Bell */}
+            <button
+              title="通知"
+              className="relative w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-100 transition-colors"
+            >
+              <img src={bellIcon} alt="通知" className="w-4 h-4 object-contain" />
             </button>
 
-            {/* Current user */}
-            <div className="flex items-center gap-2.5 pl-3 border-l border-slate-800">
-              <div className="w-8 h-8 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-xs font-semibold text-sky-400 font-mono">
-                QC
+            {/* Help Icon */}
+            <button
+              title="帮助"
+              className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-100 transition-colors"
+            >
+              <img src={helpIcon} alt="帮助" className="w-4 h-4 object-contain" />
+            </button>
+
+            {/* User Profile Avatar */}
+            <div className="flex items-center gap-2 pl-1 border-l border-slate-200">
+              <div
+                className="w-7 h-7 rounded-full bg-[#2563EB] text-white flex items-center justify-center text-xs font-medium shadow-sm shrink-0"
+                title={`${user.userName}（${user.roleName ?? user.role}）`}
+              >
+                {userInitial(user.userName)}
               </div>
-              <div className="text-left hidden sm:block">
-                <div className="text-xs font-medium text-slate-200 leading-none">张强 (工号1042)</div>
-                <div className="text-[10px] text-slate-400 mt-0.5">首席质量主管 · MRB 委员</div>
+              <div className="leading-tight">
+                <span className="block text-[13px] text-slate-700 font-medium">{user.userName}</span>
+                <span className="block text-[10px] text-slate-400">{user.roleName ?? user.role}</span>
               </div>
+              <button
+                type="button"
+                onClick={onLogout}
+                title="退出登录（切换用户）"
+                className="ml-1 w-7 h-7 flex items-center justify-center rounded text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
             </div>
           </div>
         </header>
 
-        {/* Content View Container */}
-        <main className="flex-1 overflow-y-auto p-6 bg-[#0B1120]">
-          {children}
+        {/* Scrollable Content Body */}
+        <main className="flex-1 overflow-y-auto bg-[#F5F7FA] p-6">
+          <div className="w-full mx-auto min-h-full">
+            {children}
+          </div>
         </main>
       </div>
     </div>

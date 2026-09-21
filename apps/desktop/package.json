@@ -1,0 +1,25 @@
+{
+  "name": "@letian/desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "乐天QMS 桌面客户端 (Electron 壳：加载 @letian/web 工作台，运行时可配置服务器地址)",
+  "author": "Letian Fastener",
+  "main": "out/main.cjs",
+  "scripts": {
+    "build": "esbuild src/main.ts src/preload.ts --bundle --platform=node --format=cjs --external:electron --out-extension:.js=.cjs --outdir=out && node scripts/sync-assets.mjs --settings-only",
+    "typecheck": "tsc --noEmit",
+    "copy:web": "node scripts/sync-assets.mjs",
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "smoke": "electron . --smoke && electron . --smoke-settings",
+    "package": "electron-builder --win nsis portable",
+    "package:demo": "electron-builder --win nsis portable -c.artifactName=LetianQMS-Demo-${version}.${ext}"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.21.5",
+    "typescript": "^5.4.5"
+  }
+}

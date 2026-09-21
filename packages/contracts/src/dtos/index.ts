@@ -20,7 +20,7 @@ export type TriggerSyncRequest = z.infer<typeof schemas.TriggerSyncRequestSchema
 export type TriggerSyncResponse = z.infer<typeof schemas.TriggerSyncResponseSchema>;
 
 // ============================================================================
-// 2. 检验方案、工单、指标与实测 DTOs
+// 2. 检验方案、工单、指标与实测 DTOs (含炉批号追溯与分类批量建方案)
 // ============================================================================
 export type InspectionType = z.infer<typeof schemas.InspectionTypeEnum>;
 export type InspectionStatus = z.infer<typeof schemas.InspectionStatusEnum>;
@@ -33,6 +33,7 @@ export type InspectionPlanItem = z.infer<typeof schemas.InspectionPlanItemSchema
 export type PlanVersionStatus = z.infer<typeof schemas.PlanVersionStatusEnum>;
 export type InspectionPlanVersion = z.infer<typeof schemas.InspectionPlanVersionSchema>;
 export type InspectionPlan = z.infer<typeof schemas.InspectionPlanSchema>;
+export type BatchCreateCategoryPlanRequest = z.infer<typeof schemas.BatchCreateCategoryPlanRequestSchema>;
 
 export type InspectionItem = z.infer<typeof schemas.InspectionItemSchema>;
 export type PlanSnapshot = z.infer<typeof schemas.PlanSnapshotSchema>;
@@ -44,10 +45,15 @@ export type RecordInspectionItemRequest = z.infer<typeof schemas.RecordInspectio
 export type BatchRecordInspectionItemsRequest = z.infer<typeof schemas.BatchRecordInspectionItemsRequestSchema>;
 export type InspectionProgressOverview = z.infer<typeof schemas.InspectionProgressOverviewSchema>;
 export type MandatoryGateCheckResponse = z.infer<typeof schemas.MandatoryGateCheckResponseSchema>;
+export type FurnaceHeatTraceResult = z.infer<typeof schemas.FurnaceHeatTraceResultSchema>;
 
 // ============================================================================
-// 3. 不合格品处置 (MRB) 与可配置审批流 DTOs
+// 3. 不合格品处置 (MRB)、待审核池与可配置审批流 DTOs
 // ============================================================================
+export type PendingDefectStatus = z.infer<typeof schemas.PendingDefectStatusEnum>;
+export type PendingDefectItem = z.infer<typeof schemas.PendingDefectItemSchema>;
+export type InitiateReviewRequest = z.infer<typeof schemas.InitiateReviewRequestSchema>;
+
 export type MRBStatus = z.infer<typeof schemas.MRBStatusEnum>;
 export type MRBDisposition = z.infer<typeof schemas.MRBDispositionEnum>;
 export type MRBFailCategory = z.infer<typeof schemas.MRBFailCategoryEnum>;
@@ -82,7 +88,44 @@ export type MaterialPermission = z.infer<typeof schemas.MaterialPermissionSchema
 export type UpdateMaterialPermissionRequest = z.infer<typeof schemas.UpdateMaterialPermissionRequestSchema>;
 
 // ============================================================================
-// 6. 不可变操作审计与度量统计 DTOs
+// 5.5 权限管理体系 DTOs（角色字典 / 校验日志 / 规则 CRUD / 校验工具 / 登录）
+// ============================================================================
+export type Role = z.infer<typeof schemas.RoleSchema>;
+export type AuthorizationDecision = z.infer<typeof schemas.AuthorizationDecisionEnum>;
+export type AuthorizationLog = z.infer<typeof schemas.AuthorizationLogSchema>;
+export type PermissionLogListResponse = z.infer<typeof schemas.PermissionLogListResponseSchema>;
+export type MaterialPermissionListResponse = z.infer<typeof schemas.MaterialPermissionListResponseSchema>;
+export type CreatePermissionRequest = z.infer<typeof schemas.CreatePermissionRequestSchema>;
+export type ApplyRolePermissionRequest = z.infer<typeof schemas.ApplyRolePermissionRequestSchema>;
+export type PermissionCheckRequest = z.infer<typeof schemas.PermissionCheckRequestSchema>;
+export type PermissionCheckResponse = z.infer<typeof schemas.PermissionCheckResponseSchema>;
+export type AuthUser = z.infer<typeof schemas.AuthUserSchema>;
+export type LoginRequest = z.infer<typeof schemas.LoginRequestSchema>;
+export type LoginResponse = z.infer<typeof schemas.LoginResponseSchema>;
+
+// ============================================================================
+// 6. 质检报告打印与多模板引擎 DTOs
+// ============================================================================
+export type ReportSection = z.infer<typeof schemas.ReportSectionEnum>;
+export type ReportTemplateScope = z.infer<typeof schemas.ReportTemplateScopeEnum>;
+export type QualityReportTemplate = z.infer<typeof schemas.QualityReportTemplateSchema>;
+export type AppearanceSectionItem = z.infer<typeof schemas.AppearanceSectionItemSchema>;
+export type DimensionSectionItem = z.infer<typeof schemas.DimensionSectionItemSchema>;
+export type MechanicalSectionItem = z.infer<typeof schemas.MechanicalSectionItemSchema>;
+export type ChemicalElementItem = z.infer<typeof schemas.ChemicalElementItemSchema>;
+export type QualityReportData = z.infer<typeof schemas.QualityReportDataSchema>;
+export type GenerateReportRequest = z.infer<typeof schemas.GenerateReportRequestSchema>;
+export type BatchExportReportRequest = z.infer<typeof schemas.BatchExportReportRequestSchema>;
+
+// ============================================================================
+// 7. 高级通用查询 DSL DTOs
+// ============================================================================
+export type FilterOperator = z.infer<typeof schemas.FilterOperatorEnum>;
+export type FilterCondition = z.infer<typeof schemas.FilterConditionSchema>;
+export type AdvancedQueryDsl = z.infer<typeof schemas.AdvancedQueryDslSchema>;
+
+// ============================================================================
+// 8. 不可变操作审计与度量统计 DTOs
 // ============================================================================
 export type AuditAction = z.infer<typeof schemas.AuditActionEnum>;
 export type AuditStatus = z.infer<typeof schemas.AuditStatusEnum>;
@@ -90,7 +133,7 @@ export type AuditLog = z.infer<typeof schemas.AuditLogSchema>;
 export type AuditStatsResponse = z.infer<typeof schemas.AuditStatsResponseSchema>;
 
 // ============================================================================
-// 7. RFC 7807 统一错误模型与 Outbox 事件 DTOs
+// 9. RFC 7807 统一错误模型与 Outbox 事件 DTOs
 // ============================================================================
 export type InvalidParamDetail = z.infer<typeof schemas.InvalidParamDetailSchema>;
 export type ProblemDetails = z.infer<typeof schemas.ProblemDetailsSchema>;
@@ -100,4 +143,3 @@ export type OutboxEvent = z.infer<typeof schemas.OutboxEventSchema>;
 // 前端页面别名兼容
 export type MrbReviewRecord = MRBReview;
 export type BatchTraceNode = TraceNode;
-

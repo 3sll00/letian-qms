@@ -12,7 +12,7 @@ import { evaluateInspectionItem } from '../services/tolerance-evaluator';
 
 /**
  * 检验单聚合根 (InspectionOrder)
- * 纯内存领域聚合，负责管理生命周期流转、方案版本快照深拷贝绑定、实测值录入与整单综合判定
+ * 纯内存领域聚合，负责管理生命周期流转、方案版本快照深拷贝绑定、实测值录入、不解检标记与整单综合判定
  */
 export class InspectionOrder {
   private id: string;
@@ -22,14 +22,36 @@ export class InspectionOrder {
   private materialCode: string;
   private materialName: string;
   private batchNo: string;
+  private heatBatchNo?: string | undefined;
   private batchQty: number;
   private sampleQty: number;
   private passQty: number = 0;
   private failQty: number = 0;
+  private exemptQty: number = 0;
   private _isMandatoryGate: boolean = false;
   private planVersionId?: string | undefined;
   private supplierCode?: string | undefined;
   private supplierName?: string | undefined;
+  private customerCode?: string | undefined;
+  private customerName?: string | undefined;
+  // 检验人快照（姓名冗余自员工主数据，台账/证书直接展示；写入方为实际承担检验的操作人）
+  private inspectorId?: string | undefined;
+  private inspectorName?: string | undefined;
+  // 006 来料检验 (IQC) 采购入库与规格对账字段
+  private receiptNo?: string | undefined;
+  private receiptDate?: string | undefined;
+  private specification?: string | undefined;
+  private unit?: string | undefined;
+  // 008 出货检验 (OQC_SH) 销售出库台账字段
+  private salesOrderNo?: string | undefined;
+  private dispatchDate?: string | undefined;
+  private salesOrderPoNo?: string | undefined;
+  private erpStatus?: string | undefined;
+  // 009 委外检验 (OQC 七分类) 台账字段
+  private outsourceNo?: string | undefined;
+  private processType?: string | undefined;
+  private returnDate?: string | undefined;
+  private vendorName?: string | undefined;
   private overallDecision?: OverallDecision | undefined;
   private planSnapshot?: PlanSnapshotDTO | undefined;
   private items: InspectionItemDTO[];
@@ -44,14 +66,32 @@ export class InspectionOrder {
     materialCode: string;
     materialName: string;
     batchNo: string;
+    heatBatchNo?: string | undefined;
     batchQty: number;
     sampleQty?: number | undefined;
     passQty?: number | undefined;
     failQty?: number | undefined;
+    exemptQty?: number | undefined;
     isMandatoryGate?: boolean | undefined;
     planVersionId?: string | undefined;
     supplierCode?: string | undefined;
     supplierName?: string | undefined;
+    customerCode?: string | undefined;
+    customerName?: string | undefined;
+    inspectorId?: string | undefined;
+    inspectorName?: string | undefined;
+    receiptNo?: string | undefined;
+    receiptDate?: string | undefined;
+    specification?: string | undefined;
+    unit?: string | undefined;
+    salesOrderNo?: string | undefined;
+    dispatchDate?: string | undefined;
+    salesOrderPoNo?: string | undefined;
+    erpStatus?: string | undefined;
+    outsourceNo?: string | undefined;
+    processType?: string | undefined;
+    returnDate?: string | undefined;
+    vendorName?: string | undefined;
     overallDecision?: OverallDecision | undefined;
     planSnapshot?: PlanSnapshotDTO | undefined;
     items?: InspectionItemDTO[] | undefined;
@@ -65,14 +105,32 @@ export class InspectionOrder {
     this.materialCode = params.materialCode;
     this.materialName = params.materialName;
     this.batchNo = params.batchNo;
+    this.heatBatchNo = params.heatBatchNo;
     this.batchQty = params.batchQty;
     this.sampleQty = params.sampleQty ?? Math.min(params.batchQty, 13);
     this.passQty = params.passQty ?? 0;
     this.failQty = params.failQty ?? 0;
+    this.exemptQty = params.exemptQty ?? 0;
     this._isMandatoryGate = params.isMandatoryGate ?? false;
     this.planVersionId = params.planVersionId;
     this.supplierCode = params.supplierCode;
     this.supplierName = params.supplierName;
+    this.customerCode = params.customerCode;
+    this.customerName = params.customerName;
+    this.inspectorId = params.inspectorId;
+    this.inspectorName = params.inspectorName;
+    this.receiptNo = params.receiptNo;
+    this.receiptDate = params.receiptDate;
+    this.specification = params.specification;
+    this.unit = params.unit;
+    this.salesOrderNo = params.salesOrderNo;
+    this.dispatchDate = params.dispatchDate;
+    this.salesOrderPoNo = params.salesOrderPoNo;
+    this.erpStatus = params.erpStatus;
+    this.outsourceNo = params.outsourceNo;
+    this.processType = params.processType;
+    this.returnDate = params.returnDate;
+    this.vendorName = params.vendorName;
     this.overallDecision = params.overallDecision;
     this.planSnapshot = params.planSnapshot ? JSON.parse(JSON.stringify(params.planSnapshot)) : undefined;
     this.items = params.items ? JSON.parse(JSON.stringify(params.items)) : [];
@@ -100,8 +158,20 @@ export class InspectionOrder {
     return this.materialCode;
   }
 
+  public getMaterialName(): string {
+    return this.materialName;
+  }
+
   public getBatchNo(): string {
     return this.batchNo;
+  }
+
+  public getHeatBatchNo(): string | undefined {
+    return this.heatBatchNo;
+  }
+
+  public setHeatBatchNo(heatBatchNo: string | undefined): void {
+    this.heatBatchNo = heatBatchNo;
   }
 
   public getBatchQty(): number {
@@ -120,6 +190,10 @@ export class InspectionOrder {
     return this.failQty;
   }
 
+  public getExemptQty(): number {
+    return this.exemptQty;
+  }
+
   public isMandatoryGate(): boolean {
     return this._isMandatoryGate;
   }
@@ -136,6 +210,70 @@ export class InspectionOrder {
     return this.supplierName;
   }
 
+  public getCustomerCode(): string | undefined {
+    return this.customerCode;
+  }
+
+  public getCustomerName(): string | undefined {
+    return this.customerName;
+  }
+
+  public getInspectorId(): string | undefined {
+    return this.inspectorId;
+  }
+
+  public getInspectorName(): string | undefined {
+    return this.inspectorName;
+  }
+
+  public getReceiptNo(): string | undefined {
+    return this.receiptNo;
+  }
+
+  public getReceiptDate(): string | undefined {
+    return this.receiptDate;
+  }
+
+  public getSpecification(): string | undefined {
+    return this.specification;
+  }
+
+  public getUnit(): string | undefined {
+    return this.unit;
+  }
+
+  public getSalesOrderNo(): string | undefined {
+    return this.salesOrderNo;
+  }
+
+  public getDispatchDate(): string | undefined {
+    return this.dispatchDate;
+  }
+
+  public getSalesOrderPoNo(): string | undefined {
+    return this.salesOrderPoNo;
+  }
+
+  public getErpStatus(): string | undefined {
+    return this.erpStatus;
+  }
+
+  public getOutsourceNo(): string | undefined {
+    return this.outsourceNo;
+  }
+
+  public getProcessType(): string | undefined {
+    return this.processType;
+  }
+
+  public getReturnDate(): string | undefined {
+    return this.returnDate;
+  }
+
+  public getVendorName(): string | undefined {
+    return this.vendorName;
+  }
+
   public getOverallDecision(): OverallDecision | undefined {
     return this.overallDecision;
   }
@@ -149,8 +287,7 @@ export class InspectionOrder {
   }
 
   /**
-   * 核心业务方法：绑定质检方案版本快照 (深拷贝隔离)
-   * 必须在工单初始化或未完成检验前调用，确保后续方案版本的变更不影响本批历史工单的标准基准
+   * 绑定质检方案版本快照 (深拷贝隔离)
    */
   public bindPlanSnapshot(
     planVersion: InspectionPlanVersionDTO,
@@ -170,7 +307,6 @@ export class InspectionOrder {
 
     this.planVersionId = planVersion.id ?? planVersion.planId;
 
-    // 执行深拷贝绑定，对齐契约 PlanSnapshot 扁平结构
     this.planSnapshot = {
       planId,
       planCode,
@@ -184,10 +320,6 @@ export class InspectionOrder {
       snapshotAt: new Date().toISOString(),
     };
 
-    // 基于方案指标项初始化工单检验项实测模型
-    // 检验项 id 必须满足契约 InspectionItemSchema.id (z.string().uuid())：
-    // 早期实现使用 `${orderId}-${itemCode}` 复合串，会让所有经 API 创建的工单响应违反自身契约。
-    // 该 id 对下游只是不透明标识（更新工单时由库中已存 DTO 原样带回，不重新生成），改为 UUID 不改变业务语义。
     this.items = planVersion.items.map((pItem, index) => ({
       id: crypto.randomUUID(),
       seq: index + 1,
@@ -202,23 +334,43 @@ export class InspectionOrder {
       unit: pItem.unit,
       sampleSize: this.sampleQty,
       result: 'PENDING',
+      isExempt: false,
+      isManuallyModified: false,
     }));
   }
 
-  /**
-   * 状态流转：开始检验
-   */
   public startInspection(): void {
     InspectionStateMachine.assertTransition(this.status, 'INSPECTING');
     this.status = 'INSPECTING';
   }
 
-  /**
-   * 状态流转：暂存为草稿
-   */
   public saveDraft(): void {
     InspectionStateMachine.assertTransition(this.status, 'DRAFT');
     this.status = 'DRAFT';
+  }
+
+  /**
+   * 标记某个检验项为免检 / 不解检 (过程检验抽检支持)
+   */
+  public markItemExempt(params: {
+    itemCode: string;
+    isExempt: boolean;
+    exemptReason?: string;
+  }): InspectionItemDTO {
+    if (this.status !== 'INSPECTING' && this.status !== 'DRAFT') {
+      throw new Error(`ORDER_NOT_EDITABLE: 工单当前处于 [${this.status}] 状态，禁止标记免检`);
+    }
+
+    const item = this.items.find(i => i.itemCode === params.itemCode);
+    if (!item) {
+      throw new Error(`ORDER_ITEM_NOT_FOUND: 未找到指标编码为 [${params.itemCode}] 的检验项`);
+    }
+
+    item.isExempt = params.isExempt;
+    item.exemptReason = params.exemptReason;
+    item.result = evaluateInspectionItem(item);
+
+    return { ...item };
   }
 
   /**
@@ -228,6 +380,9 @@ export class InspectionOrder {
     itemCode: string;
     measuredVal?: number;
     measuredText?: string;
+    inheritedHeatValue?: number | string;
+    isManuallyModified?: boolean;
+    modificationReason?: string;
   }): InspectionItemDTO {
     if (this.status !== 'INSPECTING' && this.status !== 'DRAFT') {
       throw new Error(`ORDER_NOT_EDITABLE: 工单当前处于 [${this.status}] 状态，禁止录入或修改检验指标`);
@@ -240,18 +395,27 @@ export class InspectionOrder {
 
     item.measuredVal = params.measuredVal;
     item.measuredText = params.measuredText;
-    // 调用领域服务进行实测判定
-    item.result = evaluateInspectionItem(item);
+    if (params.inheritedHeatValue !== undefined) {
+      item.originalInheritedValue = params.inheritedHeatValue;
+    }
+    if (params.isManuallyModified !== undefined) {
+      item.isManuallyModified = params.isManuallyModified;
+    }
+    if (params.modificationReason !== undefined) {
+      item.modifiedReason = params.modificationReason;
+    }
 
+    item.result = evaluateInspectionItem(item);
     return { ...item };
   }
 
   /**
    * 提交检验单并执行终检判定
    * 工业安全核心逻辑：
-   * 1. 任何一个检验项为 FAILED -> 整单必须判定为 REJECTED，状态转为 FAILED；
-   * 2. 若存在任何检验项为 PENDING（未录入或无标准） -> 严禁通过，状态转为 FAILED 阻断；
-   * 3. 只有全量检验项均为 PASSED -> 整单判定为 ACCEPTED，状态转为 PASSED；
+   * 1. 任何一个检验项为 FAILED -> 整单判定为 FAILED；
+   * 2. 若存在任何检验项为 PENDING（非免检未录入） -> 整单判为 FAILED 阻断；
+   * 3. 处于 EXEMPT 的项目不阻塞判定，跳过合格率分母；
+   * 4. 只有所有非免检项均为 PASSED -> 整单判定为 PASSED。
    */
   public submitAndEvaluate(): OverallDecision {
     if (this.status !== 'INSPECTING') {
@@ -264,6 +428,7 @@ export class InspectionOrder {
 
     let hasFailure = false;
     let hasPending = false;
+    let exemptCount = 0;
 
     for (const item of this.items) {
       const decision = evaluateInspectionItem(item);
@@ -272,57 +437,50 @@ export class InspectionOrder {
         hasFailure = true;
       } else if (decision === 'PENDING') {
         hasPending = true;
+      } else if (decision === 'EXEMPT') {
+        exemptCount++;
       }
     }
+
+    this.exemptQty = exemptCount;
 
     if (hasFailure || hasPending) {
       InspectionStateMachine.assertTransition(this.status, 'FAILED');
       this.status = 'FAILED';
       this.overallDecision = 'FAILED';
+      this.failQty = this.sampleQty - this.passQty - this.exemptQty;
+      if (this.failQty < 0) this.failQty = this.sampleQty;
     } else {
       InspectionStateMachine.assertTransition(this.status, 'PASSED');
       this.status = 'PASSED';
       this.overallDecision = 'PASSED';
+      this.passQty = this.sampleQty - this.exemptQty;
+      this.failQty = 0;
     }
 
     return this.overallDecision;
   }
 
-  /**
-   * 触发 MRB 会签评审流转
-   */
   public routeToMRB(): void {
     InspectionStateMachine.assertTransition(this.status, 'IN_MRB_REVIEW');
     this.status = 'IN_MRB_REVIEW';
   }
 
-  /**
-   * 兼容别名：标记进入 MRB
-   */
   public markInMrb(): void {
     this.routeToMRB();
   }
 
-  /**
-   * 触发返工/复检回边
-   */
   public markReInspecting(): void {
     InspectionStateMachine.assertTransition(this.status, 'RE_INSPECTING');
     this.status = 'RE_INSPECTING';
   }
 
-  /**
-   * 归档完成结单
-   */
   public complete(): void {
     InspectionStateMachine.assertTransition(this.status, 'COMPLETED');
     this.status = 'COMPLETED';
     this.completedAt = new Date().toISOString();
   }
 
-  /**
-   * 导出契约 DTO 视图
-   */
   public toDTO(): InspectionOrderDTO {
     const snapshot = this.getPlanSnapshot();
     if (!this.planVersionId || !snapshot) {
@@ -345,8 +503,30 @@ export class InspectionOrder {
       planSnapshot: snapshot,
       items: JSON.parse(JSON.stringify(this.items)),
       createdAt: this.createdAt,
+      ...(this.heatBatchNo !== undefined ? { heatBatchNo: this.heatBatchNo } : {}),
+      ...(this.exemptQty !== undefined ? { exemptQty: this.exemptQty } : {}),
       ...(this.supplierCode !== undefined ? { supplierCode: this.supplierCode } : {}),
       ...(this.supplierName !== undefined ? { supplierName: this.supplierName } : {}),
+      ...(this.customerCode !== undefined ? { customerCode: this.customerCode } : {}),
+      ...(this.customerName !== undefined ? { customerName: this.customerName } : {}),
+      ...(this.inspectorId !== undefined ? { inspectorId: this.inspectorId } : {}),
+      ...(this.inspectorName !== undefined ? { inspectorName: this.inspectorName } : {}),
+      // 006 采购入库单号 / 入库日期 / 规格型号 / 计量单位：
+      // specification 同时回填契约里的别名字段 spec，保证两个口径一致
+      ...(this.receiptNo !== undefined ? { receiptNo: this.receiptNo } : {}),
+      ...(this.receiptDate !== undefined ? { receiptDate: this.receiptDate } : {}),
+      ...(this.specification !== undefined
+        ? { specification: this.specification, spec: this.specification }
+        : {}),
+      ...(this.unit !== undefined ? { unit: this.unit } : {}),
+      ...(this.salesOrderNo !== undefined ? { salesOrderNo: this.salesOrderNo } : {}),
+      ...(this.dispatchDate !== undefined ? { dispatchDate: this.dispatchDate } : {}),
+      ...(this.salesOrderPoNo !== undefined ? { salesOrderPoNo: this.salesOrderPoNo } : {}),
+      ...(this.erpStatus !== undefined ? { erpStatus: this.erpStatus } : {}),
+      ...(this.outsourceNo !== undefined ? { outsourceNo: this.outsourceNo } : {}),
+      ...(this.processType !== undefined ? { processType: this.processType } : {}),
+      ...(this.returnDate !== undefined ? { returnDate: this.returnDate } : {}),
+      ...(this.vendorName !== undefined ? { vendorName: this.vendorName } : {}),
       ...(this.overallDecision !== undefined ? { overallDecision: this.overallDecision } : {}),
       ...(this.completedAt !== undefined ? { updatedAt: this.completedAt } : {}),
     };

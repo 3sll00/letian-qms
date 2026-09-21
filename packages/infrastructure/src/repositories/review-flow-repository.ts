@@ -67,6 +67,25 @@ export class KyselyReviewFlowRepository implements IReviewFlowRepository {
       .execute();
   }
 
+  
+  public async listAll(): Promise<ReviewFlow[]> {
+    const rows = await this.db
+      .selectFrom('reviewFlows')
+      .selectAll()
+      .orderBy('createdAt', 'desc')
+      .execute();
+    return rows.map((r) => this.mapRow(r));
+  }
+
+  public async findById(id: string): Promise<ReviewFlow | null> {
+    const row = await this.db
+      .selectFrom('reviewFlows')
+      .selectAll()
+      .where('id', '=', id)
+      .executeTakeFirst();
+    return row ? this.mapRow(row) : null;
+  }
+
   private mapRow(row: ReviewFlowRow): ReviewFlow {
     return {
       id: row.id,

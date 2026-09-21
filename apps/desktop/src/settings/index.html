@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'" />
+  <title>服务器设置</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 20px 24px;
+      background: #020617; color: #e2e8f0;
+      font-family: system-ui, 'Microsoft YaHei', sans-serif; font-size: 13px;
+      user-select: none;
+    }
+    h1 { font-size: 14px; font-weight: 600; color: #f8fafc; margin: 0 0 4px; }
+    .desc { color: #64748b; line-height: 1.6; margin: 0 0 14px; }
+    label { display: block; color: #94a3b8; margin: 0 0 6px; }
+    input {
+      width: 100%; padding: 8px 10px;
+      background: #0f172a; color: #e2e8f0;
+      border: 1px solid #334155; border-radius: 6px;
+      font: inherit; outline: none;
+    }
+    input:focus { border-color: #0ea5e9; }
+    input.invalid { border-color: #dc2626; }
+    .hint { color: #475569; margin: 6px 0 0; line-height: 1.6; }
+    .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
+    button {
+      padding: 7px 16px; border-radius: 6px; border: 1px solid #334155;
+      background: #1e293b; color: #e2e8f0; font: inherit; cursor: pointer;
+    }
+    button:hover { background: #334155; }
+    button.primary { background: #0284c7; border-color: #0284c7; color: #f0f9ff; }
+    button.primary:hover { background: #0369a1; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    #result { margin-top: 10px; line-height: 1.6; min-height: 20px; }
+    #result.ok { color: #4ade80; }
+    #result.err { color: #f87171; }
+  </style>
+</head>
+<body>
+  <h1>服务器设置</h1>
+  <p class="desc">配置后端 API 服务地址，保存后主界面将自动重新加载。</p>
+  <label for="server-url">API 服务器地址</label>
+  <input id="server-url" type="text" spellcheck="false"
+         placeholder="例如 http://192.168.1.10:3000 或 http://192.168.1.10:3000/api/v1" />
+  <p class="hint">只填主机与端口时会自动补全 <b>/api/v1</b> 路径；留空则恢复为安装包内置的默认地址。</p>
+  <div id="result"></div>
+  <div class="actions">
+    <button id="btn-test">测试连接</button>
+    <button id="btn-save" class="primary">保存并重载主界面</button>
+  </div>
+  <script src="index.js"></script>
+</body>
+</html>

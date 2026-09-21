@@ -17,7 +17,12 @@
     "dev:web": "pnpm --filter @letian/web dev",
     "dev:api": "pnpm --filter @letian/api dev",
     "dev:all": "pnpm --parallel --filter @letian/api --filter @letian/web dev",
-    "dev:mock": "pnpm --filter @letian/web dev:mock"
+    "dev:mock": "pnpm --filter @letian/web dev:mock",
+    "desktop:dev": "pnpm --filter @letian/desktop run dev",
+    "desktop:start": "pnpm --filter @letian/web run build && pnpm --filter @letian/desktop run build && pnpm --filter @letian/desktop run copy:web && pnpm --filter @letian/desktop run start",
+    "desktop:smoke": "pnpm --filter @letian/web run build:mock && pnpm --filter @letian/desktop run build && pnpm --filter @letian/desktop run copy:web && pnpm --filter @letian/desktop run smoke",
+    "desktop:build": "pnpm --filter @letian/web run build && pnpm --filter @letian/desktop run build && pnpm --filter @letian/desktop run copy:web && pnpm --filter @letian/desktop run package",
+    "desktop:demo": "pnpm --filter @letian/web run build:mock && pnpm --filter @letian/desktop run build && pnpm --filter @letian/desktop run copy:web && pnpm --filter @letian/desktop run package:demo"
   },
   "devDependencies": {
     "typescript": "^5.4.5",
