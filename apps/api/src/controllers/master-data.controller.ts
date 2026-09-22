@@ -1,7 +1,9 @@
 import { SupplierSchema, CustomerSchema, MaterialSchema, WorkshopSchema, EmployeeSchema, InventoryCategorySchema } from "@letian/contracts";
+import { UpsertCompanyProfileRequestSchema } from "@letian/contracts";
 import { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { ApiContainer } from '../container';
+import { operatorOf } from '../lib/operator';
 
 /**
  * ERP 主数据查询控制器
@@ -239,6 +241,7 @@ export const masterDataController: FastifyPluginAsync<{ container: ApiContainer 
       department: data.department,
       phone: data.phone,
       email: data.email,
+      roleCode: data.roleCode,
     });
     return reply.status(201).send(created);
   });
@@ -255,4 +258,39 @@ export const masterDataController: FastifyPluginAsync<{ container: ApiContainer 
     return reply.status(201).send(created);
   });
 
+  // --------------------------------------------------------------------------
+  // 企业档案（迁移 029，docs/35 §6）：证书抬头「签发主体 / 供货单位 / 产地」的主数据。
+  // 与其它主数据不同：ERP 侧没有对应档案，只能在本系统人工维护，且**只有一行**。
+  // --------------------------------------------------------------------------
+
+  fastify.get('/company-profile', async (_request, reply) => {
+    const profile = await masterData.getCompanyProfile();
+    // 未维护时返回 null（不是空对象、更不是编造默认值）：调用方据此在界面提示「企业档案未维护」，
+    // 证书对应单元格留白（docs/35 §6）
+    return reply.status(200).send(profile);
+  });
+
+  fastify.put(
+    '/company-profile',
+    { schema: { body: UpsertCompanyProfileRequestSchema } },
+    async (request, reply) => {
+      const body = request.body as z.infer<typeof UpsertCompanyProfileRequestSchema>;
+      // 维护人 = 当前登录用户（服务端注入，不接受请求体自称）
+      const operator = operatorOf(request);
+      const saved = await masterData.saveCompanyProfile(
+        {
+          ...(body.legalName !== undefined ? { legalName: body.legalName } : {}),
+          ...(body.legalNameEn !== undefined ? { legalNameEn: body.legalNameEn } : {}),
+          ...(body.shortName !== undefined ? { shortName: body.shortName } : {}),
+          ...(body.address !== undefined ? { address: body.address } : {}),
+          ...(body.originPlace !== undefined ? { originPlace: body.originPlace } : {}),
+          ...(body.phone !== undefined ? { phone: body.phone } : {}),
+          ...(body.email !== undefined ? { email: body.email } : {}),
+          ...(body.qualityStamp !== undefined ? { qualityStamp: body.qualityStamp } : {}),
+        },
+        operator.userName
+      );
+      return reply.status(200).send(saved);
+    }
+  );
 };

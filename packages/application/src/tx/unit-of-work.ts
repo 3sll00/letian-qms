@@ -2,12 +2,13 @@ import type {
   InspectionPlanRepository,
   InspectionOrderRepository,
   MRBReviewRepository,
+  PendingDefectPoolRepository,
   BatchTraceRepository,
   ReviewFlowRepository,
 } from '@letian/domain';
 import type { IOutboxRepository } from './outbox.js';
 import type { ILockPort } from './lock-port.js';
-import type { AuditLog, Material, MaterialPermission } from '@letian/contracts';
+import type { AuditLog, Material, MaterialPermission, Supplier } from '@letian/contracts';
 
 /**
  * 物料主数据只读查询端口：PBAC 三维校验需要把物料编码解析为真实分类编码
@@ -15,6 +16,14 @@ import type { AuditLog, Material, MaterialPermission } from '@letian/contracts';
 export interface IMaterialLookupPort {
   getMaterialByCode(materialCode: string): Promise<Material | null>;
   getMaterialByName(materialName: string): Promise<Material | null>;
+}
+
+/**
+ * 供应商主数据只读查询端口：建单时把 supplier_code 解析为供应商全称，
+ * 落库为「供应商」名称快照，避免台账只能回落到内部编码。
+ */
+export interface ISupplierLookupPort {
+  getSupplierByCode(supplierCode: string): Promise<Supplier | null>;
 }
 
 /**
@@ -52,6 +61,8 @@ export interface IUnitOfWorkContext {
   readonly inspectionPlans: InspectionPlanRepository;
   readonly inspectionOrders: InspectionOrderRepository;
   readonly mrbReviews: MRBReviewRepository;
+  /** 不合格待审核池（015 起为真实物理表，运行时入池在判定不合格时完成） */
+  readonly pendingDefects: PendingDefectPoolRepository;
   readonly reviewFlows: ReviewFlowRepository;
   readonly traceDags: BatchTraceRepository;
   readonly outbox: IOutboxRepository;
@@ -60,6 +71,8 @@ export interface IUnitOfWorkContext {
   readonly permissions: IMaterialPermissionRepository;
   /** 物料主数据只读查询（PBAC 校验解析物料分类） */
   readonly materials: IMaterialLookupPort;
+  /** 供应商主数据只读查询（建单时解析供应商名称快照） */
+  readonly suppliers: ISupplierLookupPort;
 }
 
 /**

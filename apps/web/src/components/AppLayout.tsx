@@ -35,7 +35,6 @@ export type NavItemKey =
   | 'outsource'
   | 'oqc'
   | 'plans'
-  | 'mrb-pending'
   | 'mrb'
   | 'review-workflow'
   | 'permissions'
@@ -84,8 +83,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     groupName: '不合格品处置',
     items: [
-      { key: 'mrb-pending', label: '不合格待审核池', icon: mrbIcon },
-      { key: 'mrb', label: 'MRB评审工单', icon: mrbIcon },
+      { key: 'mrb', label: 'MRB不合格品处置', icon: mrbIcon },
       { key: 'review-workflow', label: '评审流程设置', icon: reviewWorkflowIcon },
     ],
   },
@@ -134,7 +132,6 @@ export function AppLayout({ currentKey, onSelectKey, user, onLogout, children }:
         ipqc: 0,
         outsource: 0,
         oqc: 0,
-        'mrb-pending': 0,
         mrb: 0,
       };
 
@@ -162,21 +159,15 @@ export function AppLayout({ currentKey, onSelectKey, user, onLogout, children }:
         }
       }
 
-      // 2. 实时获取 MRB 评审中工单数量
+      // 2. 实时获取待评审 MRB 工单数量
+      //    角标口径 = 待评审数（pendingCount），与 docs/19-MRB不合格品处置页整合设计.md §2 一致；
+      //    不再使用 dashboard 的「评审中 + 待评审」合并口径，避免角标与页面 KPI 首卡对不上。
       try {
-        const overview = await api.get<{ inMRBCount?: number; mrbInReviewCount?: number }>('/dashboard/overview');
-        counts.mrb = overview.inMRBCount ?? overview.mrbInReviewCount ?? 0;
-      } catch {
-        // ignore
-      }
-
-      // 3. 实时获取不合格待处置/待审核池单据
-      try {
-        const failedRes = await api.get<{ total?: number }>('/inspections', {
-          status: 'FAILED',
-          limit: 1,
+        const mrbRes = await api.get<{ pendingCount?: number }>('/mrb/records', {
+          page: 1,
+          pageSize: 1,
         });
-        counts['mrb-pending'] = failedRes.total ?? 0;
+        counts.mrb = mrbRes.pendingCount ?? 0;
       } catch {
         // ignore
       }

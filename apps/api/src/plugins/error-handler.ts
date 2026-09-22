@@ -93,6 +93,26 @@ const errorHandlerPluginAsync: FastifyPluginAsync = async (fastify) => {
 
     // 3. 常见 HTTP 错误或 Fastify 框架抛出的状态码
     const statusCode = normalized.statusCode ?? 500;
+    if (statusCode === 400) {
+      // Fastify 自身抛出的 4xx（如 FST_ERR_CTP_EMPTY_JSON_BODY：声明了
+      // content-type: application/json 却提交空体）本质是调用方请求有误，
+      // 必须按 400 回吐，不能落到下面「未知异常」的 500 兜底分支——
+      // 否则客户端会把「请求写错了」误判成「服务端崩了」。
+      return reply
+        .status(400)
+        .header('Content-Type', 'application/problem+json')
+        .send({
+          type: 'https://letian-qms.com/errors/validation-failed',
+          title: '参数验证失败',
+          status: 400,
+          detail: normalized.message || '请求参数不合法',
+          instance: request.url,
+          code: ErrorCode.VALIDATION_FAILED,
+          traceId,
+          invalidParams: [],
+        });
+    }
+
     if (statusCode === 401) {
       return reply
         .status(401)

@@ -9,9 +9,11 @@ import {
   DecideMrbDispositionUseCase,
   ExportInspectionReportUseCase,
   ExportTraceReportUseCase,
+  GetOrderTraceChainUseCase,
   PenetrateBatchDagUseCase,
   RecordMeasurementsAndJudgeUseCase,
   SaveInspectionDraftUseCase,
+  SearchTraceBatchesUseCase,
   TogglePlanVersionUseCase,
   TriggerMrbReviewUseCase,
   UpgradePlanVersionUseCase,
@@ -26,6 +28,7 @@ import {
   KyselyInspectionPlanRepository,
   KyselyIntegrationRepository,
   KyselyMRBReviewRepository,
+  KyselyPendingDefectPoolRepository,
   KyselyMasterDataRepository,
   KyselyMaterialPermissionRepository,
   KyselyRoleRepository,
@@ -62,6 +65,7 @@ export interface ApiContainer {
     plans: KyselyInspectionPlanRepository;
     orders: KyselyInspectionOrderRepository;
     mrbReviews: KyselyMRBReviewRepository;
+    pendingDefects: KyselyPendingDefectPoolRepository;
     auditLogs: KyselyAuditLogRepository;
     traces: KyselyBatchTraceRepository;
     masterData: KyselyMasterDataRepository;
@@ -89,6 +93,10 @@ export interface ApiContainer {
     togglePlanVersion: TogglePlanVersionUseCase;
     checkReleaseGate: CheckReleaseGateUseCase;
     penetrateBatchDag: PenetrateBatchDagUseCase;
+    /** 批次检索：按批次号/炉批号/订单号/物料/成品名命中批次列表（追溯主键是批次号） */
+    searchTraceBatches: SearchTraceBatchesUseCase;
+    /** 订单维度检验环节台账（「本订单检验环节」，不是血缘链路） */
+    getOrderTraceChain: GetOrderTraceChainUseCase;
     exportInspectionReport: ExportInspectionReportUseCase;
     exportTraceReport: ExportTraceReportUseCase;
     pendingMRBPool: PendingMRBPoolUseCase;
@@ -113,6 +121,7 @@ export function createApiContainer(options: CreateApiContainerOptions = {}): Api
     plans: new KyselyInspectionPlanRepository(db),
     orders: new KyselyInspectionOrderRepository(db),
     mrbReviews: new KyselyMRBReviewRepository(db),
+    pendingDefects: new KyselyPendingDefectPoolRepository(db),
     auditLogs: new KyselyAuditLogRepository(db),
     traces: new KyselyBatchTraceRepository(db),
     masterData: new KyselyMasterDataRepository(db),
@@ -142,6 +151,8 @@ export function createApiContainer(options: CreateApiContainerOptions = {}): Api
     togglePlanVersion: new TogglePlanVersionUseCase(uow),
     checkReleaseGate: new CheckReleaseGateUseCase(uow),
     penetrateBatchDag,
+    searchTraceBatches: new SearchTraceBatchesUseCase(uow),
+    getOrderTraceChain: new GetOrderTraceChainUseCase(uow),
     exportInspectionReport: new ExportInspectionReportUseCase(uow),
     exportTraceReport: new ExportTraceReportUseCase(uow, penetrateBatchDag),
     pendingMRBPool: new PendingMRBPoolUseCase(uow),

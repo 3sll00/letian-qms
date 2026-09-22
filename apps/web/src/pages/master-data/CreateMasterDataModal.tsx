@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { X } from "lucide-react";
 import { api, errorMessage } from "../../lib/api";
 
-export type MasterDataTab = "supplier" | "customer" | "inventory" | "workshop" | "employee";
+export type MasterDataTab = "supplier" | "customer" | "inventory" | "workshop" | "employee" | "companyProfile";
 
 export function CreateMasterDataModal({
   tab,
@@ -22,6 +22,9 @@ export function CreateMasterDataModal({
     inventory: "新增存货料品档案",
     workshop: "新增生产车间档案",
     employee: "新增职员与检验员",
+    // 企业档案是单行主数据（PUT 覆盖），不走「新增」弹窗；这里补齐联合类型分支，
+    // 保证 tab 取值穷尽（实际入口由 master-data 页隐藏新增按钮控制）
+    companyProfile: "企业档案",
   }[tab];
 
   const handleSubmit = async (e: React.FormEvent) => {

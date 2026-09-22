@@ -14,9 +14,11 @@ import { CertificatePrintModal } from '../../../components/certificate/Certifica
 import { convertOutsourceToManufacturingCert } from '../../../lib/certificateDataService';
 import { ManufacturingCertData } from '../../../lib/inspectionTypes';
 import { api } from '../../../lib/api';
+import { loadCompanyProfile } from '../../../lib/companyProfile';
 
 interface OutsourceListProps {
-  onInspect: (item: any) => void;
+  /** readOnly = true 表示只读回看（TBD-07）：走本单方案快照，而不是按物料匹配当前生效方案 */
+  onInspect: (item: any, readOnly?: boolean) => void;
   initialTab?: 'surface' | 'machining' | 'heat';
 }
 
@@ -27,12 +29,22 @@ export interface OutsourceListItem {
   processType?: string;
   materialCode: string;
   materialName: string;
+  /** 规格型号快照（inspection_orders.specification）；无来源即空串，界面与证书都不编造 */
+  specification?: string;
+  /** 计量单位快照（inspection_orders.unit），与 qty 组成「交付数量」 */
+  unit?: string;
+  /** 委外批次号（inspection_orders.batch_no）：委外检验录入表单「委外批次号」的唯一真实来源 */
+  batchNo?: string;
   qty: number;
   vendor: string;
   returnDate: string;
   status: '待检验' | '检验中' | '已合格' | '不合格';
   inspector: string;
   tabType: 'surface' | 'machining' | 'heat';
+  /** 质量负责人签核人姓名（inspection_orders.approver_name，docs/35 §5）：未签核即空 */
+  approverName?: string;
+  /** 签核时间（inspection_orders.approved_at） */
+  approvedAt?: string;
 }
 
 
@@ -60,6 +72,10 @@ interface OrderRow {
   materialCode: string;
   materialName: string;
   batchNo: string;
+  /** 规格型号快照：仓储 mapRow 同时输出 specification 与只读别名 spec */
+  specification?: string;
+  spec?: string;
+  unit?: string;
   supplierCode?: string;
   sampleQty: number;
   status: string;
@@ -72,6 +88,10 @@ interface OrderRow {
   vendorName?: string;
   supplierName?: string;
   returnDate?: string;
+  /** 质量负责人签核人姓名（inspection_orders.approver_name，docs/35 §5）：未签核即空 */
+  approverName?: string | null;
+  /** 签核时间（inspection_orders.approved_at） */
+  approvedAt?: string | null;
 }
 
 export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initialTab }) => {
@@ -142,16 +162,23 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
           // 委外加工单号 / 加工类型 / 回厂日期 / 加工商 全部取自数据库列，
           // 不再用 batchNo 或写死厂名兜底，避免与真实台账口径不一致
           // 缺失即显示 '-'：不再回落到 batchNo（批次号 ≠ 委外加工单号，混用会让台账口径失真）
-          outsourceNo: o.outsourceNo ?? '-',
+          outsourceNo: o.outsourceNo ?? '',
           processType: o.processType,
           materialCode: o.materialCode,
           materialName: o.materialName,
+          // 规格型号 / 单位 / 委外批次号同样只取物理列：缺失即空串，
+          // 录入表单按「无来源就留空」渲染，绝不用演示值顶替
+          specification: o.specification ?? o.spec,
+          unit: o.unit,
+          batchNo: o.batchNo,
           qty: o.sampleQty,
           vendor: o.vendorName ?? o.supplierName ?? o.supplierCode ?? '',
           // 缺失即显示 '-'：不再用 createdAt 近似「回厂日期」（制单时间不是回厂时间）
           returnDate: o.returnDate ?? '-',
           status: STATUS_TO_CN[o.status] ?? '待检验',
           inspector: o.inspectorName || o.inspector || '-',
+          approverName: o.approverName || '',
+          approvedAt: o.approvedAt || '',
           tabType: tab,
         }));
         setRows(mapped);
@@ -176,30 +203,58 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
   // 前端不再二次过滤：列表直接渲染服务端返回的当前页数据，页脚条数取服务端命中总数。
   const filteredList = rows;
 
+  /**
+   * 行级证书（docs/35 §10 M9，委外台账为基准）：按本行真实数据组装，未录入的项留白。
+   * 企业档案（抬头）取主数据、质量负责人取真实签核人；两者都没有来源即留白。
+   */
   const handleOpenCert = (item: OutsourceListItem) => {
-    const cert = convertOutsourceToManufacturingCert({
-      docNo: item.docNo,
-      orderNo: item.outsourceNo,
-      materialCode: item.materialCode,
-      materialName: item.materialName,
-      processType: item.processType ?? (tab === 'machining' ? '精密机加工' : tab === 'heat' ? '热处理' : '表面处理'),
-      quantity: item.qty,
-      supplier: item.vendor,
-      receiveDate: item.returnDate,
-      inspector: item.inspector === '-' ? '' : item.inspector,
-      status: item.status,
-    });
-    setCurrentCertData(cert);
-    setPrintModalOpen(true);
+    void (async () => {
+      const companyProfile = await loadCompanyProfile();
+      const cert = convertOutsourceToManufacturingCert({
+        docNo: item.docNo,
+        outsourceNo: item.outsourceNo,
+        materialCode: item.materialCode,
+        materialName: item.materialName,
+        specification: item.specification,
+        process: item.processType,
+        quantityPcs: item.qty > 0 ? String(item.qty) : '',
+        vendor: item.vendor,
+        batchNo: item.batchNo,
+        inspector: item.inspector === '-' ? '' : item.inspector,
+        // 印章结论取台账状态（真实落库值）；待检验 / 检验中不下结论
+        overallDecision:
+          item.status === '已合格' ? 'PASSED' : item.status === '不合格' ? 'FAILED' : '',
+        // 质量负责人只有真实签核过才有值；未签核即空（不打印编造人名）
+        ...(item.approverName !== undefined && item.approverName !== '' ? { approverName: item.approverName } : {}),
+        ...(companyProfile !== null ? { companyProfile } : {}),
+      });
+      setCurrentCertData(cert);
+      setPrintModalOpen(true);
+    })();
   };
 
   return (
     <div className="space-y-4">
-      <div>
-        <h2 className="text-base font-bold text-slate-800">委外检验</h2>
-        <p className="text-xs text-slate-400 mt-0.5">
-          数据来源: ERP委外加工单 + MES表面处理工序 · 委外件回厂后生成检验任务
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+        <div>
+          <h2 className="text-base font-bold text-slate-800">委外检验</h2>
+          <p className="text-xs text-slate-400 mt-0.5">
+            数据来源: ERP委外加工单 + MES表面处理工序 · 委外件回厂后生成检验任务
+          </p>
+        </div>
+        {/*
+          新建委外检验单（docs/35 §8 M7）：此前「新建」路径 UI 不可达（入口总带 id），
+          表单的 POST /inspections 建单能力因此从未被用户走到。这里补上入口，传空对象而不是 null
+          （父页以 `if (activeOutsourceRecord)` 判断是否进入录入页，null 会留在列表页）；
+          物料编码由表单内的选择器从存货主数据选择（不再由 materialCode 为空静默拦下）。
+        */}
+        <button
+          type="button"
+          onClick={() => onInspect({}, false)}
+          className="px-4 py-1.5 rounded bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 shadow-sm flex items-center gap-1.5 shrink-0"
+        >
+          <span aria-hidden="true">+</span> 新建委外检验单
+        </button>
       </div>
 
       {/* Tabs */}
@@ -243,7 +298,7 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
             <span className="text-slate-600 font-medium">委外加工单号</span>
             <input
               type="text"
-              placeholder="WW-20260706-001"
+              placeholder="WWJG-20260706-001"
               value={doc}
               onChange={(e) => setDoc(e.target.value)}
               className="border border-slate-200 rounded px-2.5 py-1.5 w-40 text-slate-700 placeholder-slate-400 focus:outline-none focus:border-blue-500"
@@ -353,13 +408,22 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
                 <tr key={item.id} className="hover:bg-slate-50/60 transition-colors">
                   <td className="py-3 px-4">
                     <span
-                      onClick={() => onInspect({ ...item })}
+                      onClick={() => onInspect({ ...item }, item.status !== '待检验' && item.status !== '检验中')}
                       className="font-medium text-blue-600 hover:underline cursor-pointer"
                     >
                       {item.docNo}
                     </span>
                   </td>
-                  <td className="py-3 px-4 text-slate-600">{item.outsourceNo}</td>
+                  <td className="py-3 px-4 text-slate-600">
+                    {item.outsourceNo !== '' ? (
+                      item.outsourceNo
+                    ) : (
+                      // 历史导入行 ERP 侧无委外加工单：如实留空并说明，绝不编造单号（docs/34 §3）
+                      <span className="text-slate-400" title="ERP 无委外加工单（历史导入行）">
+                        —
+                      </span>
+                    )}
+                  </td>
                   {tab === 'surface' && (
                     <td className="py-3 px-4">
                       {/* process_type 为空的委外工单（如历史数据）不渲染徽标，禁用空胶囊占位 */}
@@ -394,12 +458,29 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
                   </td>
                   <td className="py-3 px-4 text-slate-600">{item.inspector}</td>
                   <td className="py-3 px-4">
-                    <button
-                      onClick={() => onInspect({ ...item })}
-                      className="text-blue-600 hover:underline cursor-pointer"
-                    >
-                      {item.status === '待检验' ? '检验' : '详情'}
-                    </button>
+                    <div className="flex items-center gap-3">
+                      {(item.status === '待检验' || item.status === '检验中') && (
+                        <button
+                          onClick={() => onInspect({ ...item }, false)}
+                          className="text-blue-600 hover:underline cursor-pointer"
+                        >
+                          {item.status === '待检验' ? '检验' : '继续'}
+                        </button>
+                      )}
+                      <button
+                        onClick={() => onInspect({ ...item }, true)}
+                        className="text-blue-600 hover:underline cursor-pointer"
+                      >
+                        详情
+                      </button>
+                      <button
+                        onClick={() => handleOpenCert(item)}
+                        className="text-indigo-600 hover:underline cursor-pointer"
+                        title="按本行数据导出制造证书（未录入的项留白）"
+                      >
+                        证书
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}

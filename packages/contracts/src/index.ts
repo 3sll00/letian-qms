@@ -25,7 +25,6 @@ export {
 export * from './schemas/pbac';
 export {
   MaterialPermissionSchema,
-  UpdateMaterialPermissionRequestSchema,
 } from './schemas/pbac';
 
 // 权限管理体系契约
@@ -39,6 +38,7 @@ export {
   PermissionListQuerySchema,
   MaterialPermissionListResponseSchema,
   CreatePermissionRequestSchema,
+  UpdateMaterialPermissionRequestSchema,
   ApplyRolePermissionRequestSchema,
   PermissionCheckRequestSchema,
   PermissionCheckResponseSchema,
@@ -56,20 +56,30 @@ export {
   TraceNodeStatusEnum,
   TraceNodeSchema,
   TraceEdgeSchema,
+  TraceImpactSummarySchema,
   TraceabilityGraphResponseSchema,
+  TraceBatchSummarySchema,
+  TraceBatchSearchResponseSchema,
+  TraceOrderChainStageSchema,
+  TraceOrderChainResponseSchema,
 } from './schemas/trace';
 
 // MRB 评审契约
 export * from './schemas/mrb';
 export {
+  PendingDefectStatusEnum,
+  PendingDefectItemSchema,
+  InitiateReviewRequestSchema,
   MRBStatusEnum,
   MRBCategoryTabEnum,
   MRBDispositionEnum,
   MRBFailCategoryEnum,
+  MRBUrgencyLevelEnum,
   ReviewFlowNodeSchema,
   ReviewFlowSchema,
   MRBApproverActionSchema,
   MRBReviewSchema,
+  DisposeMRBResponseSchema,
   PaginatedMRBRecordsSchema,
   ReviewNodeStatusEnum,
   ConcessionSignOffSchema,
@@ -93,8 +103,14 @@ export {
   InspectionItemDecisionEnum,
   InspectionPlanItemSchema,
   PlanVersionStatusEnum,
+  PlanStatusEnum,
+  PlanStatsSchema,
   InspectionPlanVersionSchema,
   InspectionPlanSchema,
+  CreateInspectionPlanRequestSchema,
+  PlanVersionStatusActionEnum,
+  TogglePlanVersionStatusRequestSchema,
+  UpgradePlanVersionRequestSchema,
   InspectionItemSchema,
   InspectionPlanSnapshotSchema,
   PlanSnapshotSchema,
@@ -125,6 +141,8 @@ export {
   CustomerSchema,
   WorkshopSchema,
   EmployeeSchema,
+  CompanyProfileSchema,
+  UpsertCompanyProfileRequestSchema,
   SystemTypeEnum,
   IntegrationConfigSchema,
   SyncDirectionEnum,

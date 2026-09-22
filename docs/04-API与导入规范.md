@@ -75,22 +75,161 @@
     - 放行：`{ "released": true, "status": "RELEASED", "inspection_no": "IPQC-..." }` (HTTP 200)
     - 阻断：抛出 RFC 7807 `ERR_RELEASE_GATE_BLOCKED` (HTTP 409 Conflict)。
 
-### 3.5 不合格待审核池与 MRB 评审 (`/api/v1/mrb`)
-- `GET /api/v1/mrb/pending-pool`: 查询待审核池列表（过滤未分配、已分配状态）。
-- `POST /api/v1/mrb/pending-pool/batch-assign`: 批量指派责任审核人。
-- `POST /api/v1/mrb/pending-pool/merge`: 合并同类缺陷条目。
-- `POST /api/v1/mrb/orders`: 基于待审核条目正式发起 MRB 评审单。
-- `POST /api/v1/mrb/orders/:id/signoff`: 各部门负责人录入会签决策（批准/驳回/意见）。
+### 3.5 不合格品处置与 MRB 评审 (`/api/v1/mrb`)
+- `GET /api/v1/mrb/pending-pool`: 查询待审核池列表（`sourceStage`/`stage`/`inspectionType`/`materialCode`/`batchNo`/`status` + 分页）。
+  - `status` **只接受契约三态** `PENDING_INITIATE` / `INITIATED` / `DISMISSED`；004 建表时的历史词表
+    （`PENDING_REVIEW` / `REVIEWING` / `RESOLVED`）已由迁移 015 归一，传入旧值直接 `400`，**不做静默映射**；
+  - **行级权限随查询下推 SQL**：三维 PBAC 条件（物料分类 / 物料编码 / 供应商）与过滤条件、分页一并进入 SQL，
+    因此 `total` 与当页数据同口径。物料分类维度经 `materials.category_code` 子查询换算（池表不需要冗余分类列）；
+    池表无供应商编码列，**限定供应商的规则按 fail-closed 处理**（不匹配任何行，不会放宽为"分类命中即可见"）；
+  - 无生效规则的用户同理 fail-closed（返回 0 条），与 `GET /mrb/records` 口径一致。
+- `POST /api/v1/mrb/pending-pool/initiate`: 基于待审条目逐条发起独立 MRB 评审单（`pendingDefectId`/`flowId`/`urgencyLevel`/`reviewNotes`）。
+- `GET /api/v1/mrb/records`: 查询 MRB 处置列表 + 5 项 KPI 统计（服务端按 PBAC 过滤后计算）。
+  - 查询参数：`categoryTab`、`status`、`mrbNo`（模糊）、`sourceOrderNo`（模糊）、`disposition`、`dateFrom`/`dateTo`、`page`、`pageSize`；
+  - 响应：`items`/`list`/`total` + `pendingCount`/`underReviewCount`/`totalReviewedCount`/`disposedCount`/`monthlyReviewRate`；
+  - 单据字段含联表派生 `inspectorName`（源检验单检验人）。
+- `POST /api/v1/mrb/records/:id/reviews`: 节点会签提交（契约对齐路径，`action`/`comment`/`signatureUrl`）。
+- `POST /api/v1/mrb/records/:id/sign`: 节点会签提交（旧标准路径，等价于上一条）。
+- `POST /api/v1/mrb/records/:id/disposition`: 提交最终处置结论（`RETURN_TO_VENDOR`/`REWORK`/`CONCESSION`/`SCRAP`，兼容别名 `RETURN`）。
+  - 请求体：`disposition` 必填 + `dispositionReason` / `dispositionNotes` / `reason` **至少一项**（前端页面字段名为 `dispositionReason`，服务端 `z.refine` 强校验，缺失返回 400）；
+    可选 `approvers[]`（本次共同签署人，省略时沿用会签历史，最终裁决人记入 `disposed_by`）；
+  - **特采硬规则**：`disposition = CONCESSION` 必须携带 `concessionAttachmentUrl`（客户书面签核件），缺失返回 `400 CONCESSION_NOT_SIGNED_OFF`，服务端**不做任何默认兜底**；
+  - 响应为**裸 `MRBRecord`**（非 `{ mrbReview }` 包装对象，契约名 `DisposeMRBResponse`），并写入 `disposed_at` / `disposed_by`；
+    `disposition = REWORK` 时**额外追加** `reinspectionOrderId` / `reinspectionOrderNo`（口径恒为 `{来源检验单号}-R{轮次}`），
+    两个字段均为可选追加，既有按 `MRBRecord` 解析的调用方完全向后兼容（见 `docs/21` §11）。
+- `GET /api/v1/review-flows`: 评审流程定义清单（发起评审抽屉内选用，同时是「评审流程设置」子页的数据源），另有 `POST /api/v1/review-flows` 新建/整体保存、`POST /api/v1/review-flows/:id/toggle-active` 启停。
+  - 响应 `{ total, items[] }`，每条含 `id` / `flowCode` / `flowName` / `description` / `applicableType` / `version` / `isActive` / `nodes[]`；
+  - `nodes[]` 字段口径：`nodeLevel`（审批层级序号，**唯一排序键**）、`nodeName`、`roleCode`、`roleName`（显示名，缺省读侧回退 `roleCode`）、`isRequired`（默认 `true`）、`allowConcession`（默认 `false`，仅终审层级为 `true`）、`requireCustomerSign`；
+  - `POST /api/v1/review-flows` 请求体即 `ReviewFlow`（整体替换语义，按 `(flow_code, version)` upsert 整份 `nodes`）；`description` 落 `review_flows.description`，缺省默认值为空，不产生破坏性变更；
+  - **启停路径只有 `POST /api/v1/review-flows/:id/toggle-active`**（无 `/toggle` 别名），返回 `{ success, id, isActive }` 并真实写回 `review_flows.is_active`；请求须带 JSON 体（`{}` 即可），Fastify 对 `content-type: application/json` 的空体直接拒绝。
+  - 「评审流程设置」子页此前三处断链（流程说明恒空 / 节点四列恒空 / 启停假成功）的根因与闭环见 `docs/21-MRB不合格品处置数据字段与接口打通设计.md` §10。
+- **待审核池条目字段**（`PendingDefectItem`）：`id`、`inspectionOrderId`、`orderNo`、`inspectionType`、`batchNo`、`materialCode`、`materialName`、`defectQty`、
+  `totalQty`（**受检数量，不良率分母口径 = 检验单抽样数量**）、`defectRate`、`defectDescription`、`defectItemCode`、`supplierName`、`customerName`、
+  `inspectorId`、`inspectorName`、`status`（三态）、`mrbId`、`createdAt`。
+  物理列与读写链路见 `docs/03-数据模型.md` §2.3。
+- **发起评审落库口径**（`POST /mrb/pending-pool/initiate`）：`flowId` → `mrb_reviews.review_flow_id`（省略时按 `source_type` 匹配启用流程）、
+  `urgencyLevel` → `mrb_reviews.urgency_level`（默认 `NORMAL`）、`reviewNotes` → `mrb_reviews.review_notes`（不再拼进不合格描述）、
+  池条目回写 `status = INITIATED` + `mrb_review_id` + `review_started_at/by`，并由 MRB 侧写 `pending_defect_id` 形成双向链接。
+- **MRB 单据新增字段**（`GET /mrb/records` 回吐）：`reviewFlowId`、`urgencyLevel`、`reviewNotes`、`disposedAt`、`disposedBy`、`pendingDefectId`。
+- 页面口径与字段映射见 `docs/19-MRB不合格品处置页整合设计.md`；字段链路核查、断链清单与验收口径见 `docs/21-MRB不合格品处置数据字段与接口打通设计.md`。
 
-### 3.6 炉批号双向追溯 (`/api/v1/trace`)
-- `GET /api/v1/trace/genealogy`:
-  - **请求参数**：`direction` (`FORWARD` 或 `BACKWARD`), `heat_no`, `lot_no`, `max_depth` (默认 8)。
-  - **响应结果**：返回 DAG 拓扑图节点与连线数组，前端一键渲染谱系树。
+### 3.6 批次/炉批号双向追溯 (`/api/v1/traceability`)
+
+> **口径**：追溯主键是**批次号 / 炉批号**（`batch_trace_nodes.batch_no` 唯一）；订单号、物料编码、成品名称只是**检索条件**。
+> 因此接口分成「先检索、再开图」两步，页面点选某一行后才以该批次为根穿透。
+> 页面分区口径、字段链路对照与验收标准见 `docs/24-质量追溯看板界面评审与改造建议.md`。
+
+- `GET /api/v1/traceability/batches` —— **批次检索**：按批次号/炉批号、订单号、物料编码、成品名命中**批次清单**。
+  - **请求参数**：`batchNo`（批次号**或**炉批号，模糊）、`orderNo`（同时匹配 `sales_order_po_no` / `sales_order_no` / `work_order_no` / `order_no`）、
+    `materialCode`（模糊）、`productName`（成品/物料名称，模糊）、`page`（默认 1）、`pageSize`（默认 20，上限 100）。
+  - **响应结果**：`TraceBatchSearchResponse` = `{ total, page, pageSize, items }`，每行 `TraceBatchSummary`。
+  - **数据来源是两路并集**：`batch_trace_nodes`（已建血缘的批次）与 `inspection_orders`（有检验台账的批次）；
+    每行用 `sources: ['TRACE_NODE' | 'INSPECTION_ORDER']` 标明命中来源，界面据此区分「已建血缘」与「仅检验台账」。
+  - **过滤一律下沉 SQL**（`ILIKE` + 服务端分页），前端不得做二次过滤。
+  - PBAC 按**清单语义**处理：越权批次被**剔除**而不是整个请求 403。
+- `GET /api/v1/traceability/orders/:orderNo` —— **本订单检验环节**（订单维度台账视图，**不是**血缘链路）。
+  - **响应结果**：`TraceOrderChainResponse` = 客户/客户订单号/销售出库单号/ERP 状态/成品编码与名称/出货数量/涉及批次 + `stages[]`。
+  - `stages[]` 每行 = `seq`（**按工艺序位**，非时间序）+ 环节名 + 检验单号 + 受检批次 + 来源单据 + 状态 + 检验人 + 时间 + 耗时（无终检时间则缺省，界面显示 `—`）。
+  - `matchedBy` 回显本次命中字段：`SALES_ORDER_PO_NO` / `SALES_ORDER_NO` / `ORDER_NO` / `WORK_ORDER_NO`。
+  - 未找到检验单返回 404 `TRACE_ORDER_NOT_FOUND`；订单维度是**详情视图**，PBAC 未授权直接 403（fail-closed）。
+  - **术语约束**：该分区标题只能是「本订单检验环节」，同一订单下的多条环节彼此**并列**，不得表述为「完整质量追溯链路」。
+- `GET /api/v1/traceability/graph/:batchNo` —— **批次血缘图谱**。
+  - **请求参数**：`direction`（`FORWARD` 正向 / `BACKWARD` 反向 / `BOTH` 双向，默认 `BOTH`）、`maxDepth`（1~10，默认 5）。
+  - **响应结果**：`TraceabilityGraphResponse` = `{ batchNo, hasCycle, nodes, edges, impact }`。
+  - 节点 `TraceNode` 携带 `batchNo` / `furnaceHeatBatchNo` / `materialCode` / `inspectionOrderNo` / `orderNo` / `supplierOrCustomer` / `operatorName` / `timestamp` / `nodeStatus`；
+    缺值一律**缺省或 `null`**，界面显示 `—`，不得用空串或占位符填充。
+  - `nodeStatus` 取 6 个枚举值之一：`PASSED` / `STORED` / `CONCESSION` / `FAILED` / `INSPECTING` / `PENDING`。
+    `CONCESSION`（特采 / 让步接收）节点额外携带 `mrbNo` 与 `concessionAttachmentUrl`（由 `mrb_reviews` 按 `batch_no` + `disposition='CONCESSION'` 反查补齐）；
+    授权件缺失即表示未取得客户授权，界面必须显式提示。
+  - `impact`（`TraceImpactSummary`）—— 沿 `batch_trace_relations` 的 `parent_batch → child_batch` 方向做递归闭包（深度上限 10、按路径数组去重防环），
+    统计 `downstreamBatchCount` / `upstreamBatchCount` / `downstreamOrderCount` / `downstreamPartyCount` 及对应清单。
+    **恒按生产流向计算，与查询方向无关**；节点表只有单一 `supplier_or_customer` 列、不区分客户与供应商，因此界面文案只能是「**下游单位**」，不得写「客户数」。
+  - PBAC 命中拦截返回 403，界面提示「权限拦截」而不是「无数据」。
+- `GET /api/v1/trace/:batchNo` —— 历史别名，与上一条同义（保持向后兼容），参数与响应完全一致。
+
+> 历史漂移更正：本节曾长期写作 `GET /api/v1/trace/genealogy?heat_no&lot_no&max_depth`，该路由在实现中**并不存在**，
+> 现按真实路由与真实参数重写（见 `docs/24` §9.2）。
 
 ### 3.7 质检方案管理 (`/api/v1/plans`)
-- `GET /api/v1/plans`: 查询质检方案库。
-- `POST /api/v1/plans`: 新建/更新质检方案及检验特征指标。
-- `GET /api/v1/plans/match`: 根据输入的物料编码与存货分类，返回智能继承计算后的生效方案。
+- `GET /api/v1/plans`: 查询质检方案库（一行 = 一个 `plan_code` 聚合，按最新版本更新时间倒序）。
+  - **请求参数**：`inspectionType`（契约检验类型枚举，单值精确匹配）、`materialCode`（专属物料编码，模糊匹配）、
+    `categoryCode`（存货分类编码，命中方案自身的 `category_code` **或** 经 `materials` 反查的物料分类）、`keyword`（方案编码 / 方案名称模糊匹配）、
+    `isActive`（`true` 时只返回存在 `ACTIVE` 版本的方案）、`page`（默认 1）、`pageSize`（默认 20，上限 100）。
+  - **响应结果**：`{ total, page, pageSize, items, list }`，`total` 为去重后的方案编码命中总数（不是版本行数），
+    `items` 与兼容别名 `list` 指向同一份当页数据，元素为 `InspectionPlan`（含 `versions[]` 版本与 `items[]` 指标项）。
+  - **派生字段（读时 JOIN，不落冗余列，见 docs/20 §2.3）**：`materialName`（`materials.material_name`）、
+    `categoryName` / `categoryId`（`inventory_categories`，按 `category_code`）、`status`（由该方案全部版本行的
+    `version_status` 派生：有 `ACTIVE`=已启用，仅 `DRAFT`=待审批，否则已停用）、
+    版本级 `createdByName`（`employees.name`，按 `created_by`）。前端不得再自行映射主数据名称或推导方案状态。
+  - **筛选口径**：页面上的「方案名称 / 产品编码 / 产品分类 / 质检类型」四个条件与上述参数一一对应，
+    一律下沉到后端 SQL 过滤，前端不对返回结果做二次过滤。
+- `GET /api/v1/plans/stats`: 「质检方案设计」页 4 张 KPI 卡的服务端聚合，返回
+  `{ total, enabled, pending, productCount }`（`PlanStats` 契约）。
+  - `total` = 去重方案数；`enabled` = 存在 `ACTIVE` 版本的方案数；`pending` = 无 `ACTIVE` 版本但有 `DRAFT` 版本的方案数；
+    `productCount` = `material_code <> ''` 的去重物料数（分类通用方案不计入覆盖产品）。
+  - 只施加 PBAC 物料权限过滤，**不受列表筛选条件与分页影响**：严禁用当页列表数据推算全局 KPI
+    （方案数超过一页时数字必然失真）。
+- `POST /api/v1/plans`: 新建质检方案及首个版本与检验特征指标。
+  - **请求体契约是 `CreateInspectionPlanRequestSchema`（不是读模型 `InspectionPlanSchema`）**：两者字段逐字一致，
+    唯一差别是 `versions[].id / planId / createdBy` 由服务端派生（版本行 UUID 落库时才生成、创建人取 JWT 操作人），
+    调用方不得传也无法传。用读模型校验请求体会让「方案设计页新建」恒定 400
+    （`versions.0.planId: Required; versions.0.createdBy: Required`），故两者必须分开，不得合并。
+  - 首个版本一律以 `DRAFT` 落库（待质量主管审批后启用），请求体携带的 `versions[].status` 被服务端忽略。
+  - **`planCode` 可省略（TBD-11）**：留空（**不传该字段**）时由服务端按 `QP-{YYYYMMDD}-{NNN}` 取号 ——
+    `QP` 固定前缀 + 本地时区当日日期 + 3 位左补零的当日流水（每日归零），规则由 `@letian/domain` 的
+    `inspection-plan-number` 定义，落库经迁移 `017` 的 `inspection_plan_code_sequences` 池按 (前缀, 日期)
+    原子 upsert 取号（与检验单号的迁移 `012` 同构）。**显式传入则按原值使用** —— 库中 `QP-IQC-304SS`
+    这类人工语义编码仍然合法、不会被自动取号改写；但**传空串会被 400 `validation-failed` 拒绝**：
+    留空只能"不传字段"，不允许用空串表达"请帮我取号"（否则会落出编码为空串的脏方案）。口径见 docs/17 §7.5.7。
+  - 版本级 `effectiveStartDate / effectiveEndDate`（`YYYY-MM-DD`）随请求体的 `versions[0]` 提交，
+    落 `inspection_plans.sampling_config`（JSONB，**无新增列**）：起始日到达后该版本才参与自动匹配，
+    截止日过后自动退出并继续往存货分类级兜底；两项都留空 = 即刻生效、长期有效（口径见 docs/17 §7.3）。
+  - `categoryCode` 缺省时回落到绑定物料的真实存货分类；`versions[].items[]` 支持
+    `acceptableValues?: string[]`（定性 / 文本型的可接受值清单，见 docs/17 §7.5.4）。
+  - **指标项为空必须被拒**：契约允许省略 `versions`，但领域规则 `PLAN_EMPTY_ITEMS` 要求版本至少 1 个指标项，
+    `CreatePlanUseCase` 把该领域异常收敛为 **400 `validation-failed`**（含 `invalidParams`），
+    **不得放行空草稿**（否则建单时方案快照给不出待检指标清单），也不得冒成 500。
+- `GET /api/v1/plans/match`: 按「物料编码 + 检验类型」匹配生效方案，返回 `planVersionId` + 待检指标清单 + `matchSource`。
+  - 两级兜底：物料专属方案（`material_code` 精确相等）→ 存货分类通用方案（`material_code = ''` 且
+    `category_code` = 该物料分类）；多命中取最新创建的一行；未命中返回 404 `inspection-plan-not-found`。
+  - 只认 `version_status = ACTIVE` **且**生效周期覆盖当天的版本（`effectiveStartDate <= CURRENT_DATE <= effectiveEndDate`，
+    两侧都可为空）：周期外的版本直接失效，继续往下一级兜底。
+- `POST /api/v1/plans/versions/{versionId}/status`: **方案版本启停（审批）**。
+  - **请求体契约 `TogglePlanVersionStatusRequestSchema`**：只传 `{ action: 'ACTIVATE' | 'DEACTIVATE' }`
+    （`PlanVersionStatusActionEnum`）。目标版本由 URL 的 **`versionId` = 版本行 UUID** 唯一确定，
+    服务端**不做任何「按方案编码回退」**（避免审批动作落到非预期版本上）；非契约动作 → 400。
+  - **角色门禁**：仅 `QA_MANAGER` / `ADMIN` / `SYSTEM` 可执行，其余角色 **403 `forbidden`**
+    （`assertPlanApprover`）。此处按**角色**判定而非权限位：登录签发的 JWT 只带 `role`、不带 `permissions`，
+    用权限位会让真实登录一律 403。
+  - **状态机口径**（`@letian/domain` 的 `InspectionPlan`）：
+    ① `ACTIVATE` 后该版本为 `ACTIVE`，同方案其它 `ACTIVE` 版本自动转 `INACTIVE`（**单激活态**），
+    已 `ACTIVE` 的版本重复启用为幂等放行；
+    ② 目标版本**指标项为空时拒绝启用**（`PLAN_ACTIVE_EMPTY_ITEMS` → 400）；
+    ③ `DEACTIVATE` 只接受当前为 `ACTIVE` 的版本（其余状态 → 400），已 `INACTIVE` 为幂等；
+    ④ 目标版本不存在时 404（`PLAN_NOT_FOUND`）。
+  - **响应结果**：`200` + `InspectionPlan`（读模型），其中 `status` 为方案级派生状态
+    （全部版本停用后回到 `DISABLED`）。
+  - **用途**：`POST /api/v1/plans` 一律落 `DRAFT`，而 `GET /plans/match` 只认 `ACTIVE` ——
+    该路由是草稿版本进入自动匹配的**唯一入口**（页面「审批」/「停用」按钮的数据源，见 docs/09 §2.6）。
+- `POST /api/v1/plans/versions/{versionId}/upgrade`: **方案版本升版**（以 URL 版本行为模板产出新草稿）。
+  - **请求体契约 `UpgradePlanVersionRequestSchema`**：
+    `{ versionNo?, items?, samplingScheme?, aqlLevel?, strictness?, effectiveStartDate?, effectiveEndDate? }`。
+    **空对象 `{}` 合法** —— 每个字段都是「省略即派生」；显式传入 `items` 时至少 1 项（`min(1)`），
+    传 `versionNo: ''` 或 `items: []` 一律 400（留空只能用**字段缺席**表达，不接受空串 / 空数组）。
+  - **省略字段的派生口径**：模板版本行由 URL 的 `versionId`（版本行 UUID）唯一确定，服务端不做「按方案编码回退」；
+    ① `versionNo` 省略 → 领域规则 `nextInspectionPlanVersionNo` 在**现有最大版本号**上自动升位
+        （`v2.4/v2.5 → v2.6`，保留原前缀写法与段数，撞号继续递增），显式传入则按原值使用，与 `plan_code`
+        的服务端取号（TBD-11）**完全对称**；
+    ② `items` / `samplingScheme` / `aqlLevel` / `strictness` 省略 → **沿用模板版本行**；
+    ③ `effectiveStartDate` / `effectiveEndDate` **不继承**：省略即长期有效（照抄旧周期会让新草稿「出生即过期」）。
+  - **门禁口径**：只做 **PBAC 物料权限**校验，**不做角色门禁** —— 升版只产出一个 `DRAFT`、不改变生效状态，
+    与「新建方案」`POST /plans` 同级；改变生效状态的 `…/status` 才需质量主管（见上一条）。
+  - **状态机口径**（`@letian/domain` 的 `InspectionPlan.createDraftVersion`）：
+    ① 新版本一律落 `DRAFT`，**既有版本行的状态与指标项原样不动**（历史检验单的 `plan_snapshot` 不会被追溯改写）；
+    ② 同一方案**已有 `DRAFT` 版本时拒绝**（`PLAN_DRAFT_ALREADY_EXISTS` → 400），保证「升版」连点不会造出多份待审批版本；
+    ③ 模板版本行不属于该方案 / 不存在 → 404 `plan-not-found`。
+  - **响应结果**：`201` + `InspectionPlan`（读模型，`versions[]` 含新草稿）。成功后新版本仍需经
+    `…/status` 的 `ACTIVATE` 审批才参与自动匹配。页面入口见 docs/09 §2.6，口径见 docs/17 §7.5.8。
 
 ### 3.8 报表打印与矢量导出 (`/api/v1/reports`)
 - `GET /api/v1/reports/templates`: 获取可用的打印报表模板清单。
@@ -168,14 +307,19 @@ GET /api/v1/inspections?page=1&pageSize=20&filter[type]=IQC&filter[status]=PASS&
 | UI 列表展示列 | 字段说明 | ERP 物理字段源 | QMS 领域模型字段 | 数据样例 |
 | :--- | :--- | :--- | :--- | :--- |
 | **检验单号** | QMS 来料检验单编号 | DlyNdxCheck.Number / 系统自增规则 | orderNo / docNo | `IQC-20260706-0001` |
-| **采购入库单号** | ERP 采购入库/送检单号 | Dlyndx.Number (VchType=161) | purchaseReceiptNo / receiptNo | `RK-20260706-001` / `GR-2022-03-10-00001` |
-| **入库日期** | 到货/采购入库登记日期 | Dlyndx.Date (CONVERT varchar 120) | receiptDate / inDate | `2026-07-06` |
-| **物料编号** | 物料存货编码 | Ptype.UserCode | materialCode / partNumber | `CL-001` |
-| **物料名称** | 物料存货全称 | Ptype.FullName | materialName / partName | `不锈钢棒料` |
-| **规格型号** | 物料规格尺寸与型号 | Ptype.Standard | spec / specification | `Φ20mm` |
-| **数量** | 到货/入库总数量 (含单位) | DlyBuy.Qty + Ptype.Unit | totalQty / qtyDisplay | `500 件` |
-| **供应商** | 往来单位/供货厂商全称 | Btype.FullName | supplierName / supplier | `宝钢` |
+| **入库单号** | ERP 采购入库/送检单号（即原「采购入库单号」，同一业务对象） | Dlyndx.Number (VchType=161) | inboundNo（库列 `inbound_no`，迁移 021） | `RK-20260706-001` / `GR-2022-03-10-00001` |
+| **入库日期** | 到货/采购入库登记日期 | Dlyndx.Date (CONVERT varchar 120) | inboundDate（库列 `inbound_date`） | `2026-07-06` |
+| **物料编号** | 物料存货编码 | Ptype.UserCode | materialCode / partNumber | `MAT-304SS-05` |
+| **物料名称** | 物料存货全称（**只承载品名，不承载规格型号**） | Ptype.FullName | materialName（库列 `material_name`，快照自 `materials.material_name`） | `不锈钢线材 Φ5.0mm` |
+| **规格型号** | 物料规格尺寸与型号（**独立列，与品名各归其位**） | Ptype.Standard | specification（库列 `specification`，快照自 `materials.spec_model`；别名 `spec` 只读派生不落库） | `Φ5.0mm / 盘圆 / 304HC` |
+| **数量** | 到货/入库总数量 (含单位) | DlyBuy.Qty + Ptype.Unit | totalQty / qtyDisplay（单位取库列 `unit`，快照自 `materials.unit`） | `50 KG` |
+| **供应商** | 往来单位/供货厂商全称（展示口径取供应商主数据 `suppliers.supplier_name`，编码仅作兜底） | Btype.FullName | supplierName（兜底 supplierCode）/ supplier | `江苏大明不锈钢特钢有限公司` |
 | **批次号** | 原材料进厂炉批号/流水批次 | DlyBuy.BatchNo / DlyCheck.Blockno | batchNo / lotNo | `LOT-20260706-001` |
 | **检验状态** | 来料质检流转状态 | DlyCheck.Verdict / 内部状态枚举 | status (`待检验`/`检验中`/`已合格`/`不合格`/`已关闭`) | `待检验` |
 | **检验人** | 经办质检员姓名 | Etype.FullName (来自 DlyndxCheck.EtypeId) | inspectorName | `张检验` / `-` |
 | **操作** | 业务动作流 | 状态驱动 (`检验` / `详情` / `追溯`) | actions | 待检验显示检验/详情；完结显示详情/追溯 |
+
+> **建单写入口径（`POST /api/v1/inspections`）**：上表「物料名称 / 规格型号 / 数量单位」三列一律以**存货档案为权威来源** ——
+> 请求体显式给出时以请求体为准，省略（或传空白）时由服务端按 `materialCode` 回查
+> `materials.material_name` / `spec_model` / `unit` 补齐；名称两侧都取不到返回 `400 validation-failed`，
+> 规格型号取不到则落 NULL（**绝不从物料名称猜规格**）。详见 `docs/26-来料检验物料名称与规格型号数据字段与接口打通设计.md` §5.1。

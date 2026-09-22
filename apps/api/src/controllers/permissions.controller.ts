@@ -147,8 +147,34 @@ export const permissionsController: FastifyPluginAsync<{ container: ApiContainer
         throw new NotFoundError(`物料权限规则不存在: ${id}`);
       }
 
+      const nextUserId = body.userId ?? existing.userId;
+      const nextRoleCode = body.roleCode ?? existing.roleCode;
+
+      // userName 是 employees.name 的冗余展示快照（material_permissions.user_name）：
+      // 请求体未回传时按「规则原值 → 职员档案」顺序兜底，保证列表页「用户姓名」列永不为空。
+      const userName =
+        body.userName ??
+        (nextUserId === existing.userId && existing.userName !== ''
+          ? existing.userName
+          : await resolveUserName(nextUserId));
+
+      // 若本次更新把规则迁移到另一个 (用户, 角色) 组合，需先做唯一性检测，
+      // 避免直接撞上 uq_permission_user_role 约束抛出 500。
+      if (nextUserId !== existing.userId || nextRoleCode !== existing.roleCode) {
+        const candidates = await permissionsRepo.findAllForUser(nextUserId);
+        const conflict = candidates.find((rule) => rule.roleCode === nextRoleCode && rule.id !== id);
+        if (conflict) {
+          throw new ConflictError(
+            `用户 [${conflict.userName}] 在角色 [${nextRoleCode}] 下已存在权限规则，请直接编辑而非迁移覆盖`
+          );
+        }
+      }
+
       const updated: MaterialPermission = {
         ...existing,
+        userId: nextUserId,
+        userName,
+        roleCode: nextRoleCode,
         ...(body.materialCategories !== undefined ? { materialCategories: body.materialCategories } : {}),
         ...(body.materialCodes !== undefined ? { materialCodes: body.materialCodes } : {}),
         ...(body.supplierCodes !== undefined ? { supplierCodes: body.supplierCodes } : {}),

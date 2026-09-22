@@ -6,7 +6,7 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b --force",
-    "test": "tsx src/__tests__/state-machine.test.ts && tsx src/__tests__/evaluate-inspection-item.test.ts && tsx src/__tests__/aql-sampling.test.ts && tsx src/__tests__/pbac-evaluator.test.ts && tsx src/domain.test.ts"
+    "test": "tsx src/__tests__/state-machine.test.ts && tsx src/__tests__/evaluate-inspection-item.test.ts && tsx src/__tests__/aql-sampling.test.ts && tsx src/__tests__/pbac-evaluator.test.ts && tsx src/__tests__/plan-code-number.test.ts && tsx src/__tests__/outsource-reference.test.ts && tsx src/__tests__/plan-version-number.test.ts && tsx src/domain.test.ts"
   },
   "dependencies": {
     "@letian/contracts": "workspace:*"

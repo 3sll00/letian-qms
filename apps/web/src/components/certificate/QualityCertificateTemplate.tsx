@@ -19,9 +19,9 @@ export const QualityCertificateTemplate: React.FC<QualityCertificateTemplateProp
     <div className="bg-white text-black p-8 font-sans w-full max-w-[800px] mx-auto text-xs leading-tight print:p-0 print:max-w-none print:w-full print:text-[11px] select-text">
       {/* 头部公司信息与标题 */}
       <div className="border-b-2 border-black pb-3 mb-3 text-center relative">
-        <h1 className="text-xl font-bold tracking-wider mb-1">宁波乐天紧固件制造有限公司</h1>
+        <h1 className="text-xl font-bold tracking-wider mb-1">{data.companyProfile?.legalName ?? ''}</h1>
         <h2 className="text-sm font-semibold tracking-wide text-gray-700 uppercase mb-2">
-          NINGBO LETIAN FASTENERS MANUFACTURING CO., LTD.
+          {data.companyProfile?.legalNameEn ?? ''}
         </h2>
         <div className="inline-block bg-slate-900 text-white px-4 py-1 rounded text-sm font-bold tracking-widest uppercase">
           {data.inspectionTypeLabel || '质量保证证书 QUALITY CERTIFICATE'}
@@ -37,15 +37,15 @@ export const QualityCertificateTemplate: React.FC<QualityCertificateTemplateProp
         <tbody>
           <tr>
             <td className="border border-black bg-gray-100 p-1.5 font-bold w-24">订货单位/客户</td>
-            <td className="border border-black p-1.5">{data.customer || '—'}</td>
+            <td className="border border-black p-1.5">{data.customer}</td>
             <td className="border border-black bg-gray-100 p-1.5 font-bold w-24">供货单位/产地</td>
-            <td className="border border-black p-1.5">{data.supplier || '宁波乐天'}</td>
+            <td className="border border-black p-1.5">{data.supplier}</td>
           </tr>
           <tr>
             <td className="border border-black bg-gray-100 p-1.5 font-bold">合同/订单号</td>
-            <td className="border border-black p-1.5">{data.contractNo || '—'}</td>
+            <td className="border border-black p-1.5">{data.contractNo}</td>
             <td className="border border-black bg-gray-100 p-1.5 font-bold">执行标准</td>
-            <td className="border border-black p-1.5">{data.standard || 'GB/T 5782-2016'}</td>
+            <td className="border border-black p-1.5">{data.standard}</td>
           </tr>
           <tr>
             <td className="border border-black bg-gray-100 p-1.5 font-bold">产品名称</td>
@@ -61,7 +61,9 @@ export const QualityCertificateTemplate: React.FC<QualityCertificateTemplateProp
           </tr>
           <tr>
             <td className="border border-black bg-gray-100 p-1.5 font-bold">炉号 / 批号</td>
-            <td className="border border-black p-1.5 font-mono">{data.heatNo} / {data.batchNo}</td>
+            <td className="border border-black p-1.5 font-mono">
+              {[data.heatNo, data.batchNo].filter((text) => text !== undefined && text !== '').join(' / ')}
+            </td>
             <td className="border border-black bg-gray-100 p-1.5 font-bold">数量 / 重量</td>
             <td className="border border-black p-1.5">{data.quantity}</td>
           </tr>
@@ -78,7 +80,8 @@ export const QualityCertificateTemplate: React.FC<QualityCertificateTemplateProp
         </tbody>
       </table>
 
-      {/* 第二部分：化学成分分析表格 */}
+      {/* 第二部分：化学成分分析表格（无真实实测项即整段不渲染，docs/34 §5.1） */}
+      {elements.length > 0 && (
       <div className="mb-3">
         <div className="font-bold text-xs bg-gray-800 text-white px-2 py-1 flex justify-between items-center">
           <span>一、化学成分分析 (Chemical Composition %)</span>
@@ -115,8 +118,10 @@ export const QualityCertificateTemplate: React.FC<QualityCertificateTemplateProp
           </tbody>
         </table>
       </div>
+      )}
 
-      {/* 第三部分：机械物理性能 */}
+      {/* 第三部分：机械物理性能（无真实实测项即整段不渲染） */}
+      {mechanicalItems.length > 0 && (
       <div className="mb-3">
         <div className="font-bold text-xs bg-gray-800 text-white px-2 py-1 flex justify-between items-center">
           <span>二、机械及物理力学性能 (Mechanical & Physical Properties)</span>
@@ -138,15 +143,17 @@ export const QualityCertificateTemplate: React.FC<QualityCertificateTemplateProp
                 <td className="border border-black p-1.5 font-mono">{item.standard}</td>
                 <td className="border border-black p-1.5 font-mono font-semibold text-blue-900">{item.actual}</td>
                 <td className="border border-black p-1.5">
-                  <span className="text-green-700 font-bold">合格</span>
+                  <span className="text-green-700 font-bold">{item.result}</span>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      )}
 
-      {/* 第四部分：尺寸公差及外观检验 */}
+      {/* 第四部分：尺寸公差与几何特征检验（无真实实测项即整段不渲染） */}
+      {dimensions.length > 0 && (
       <div className="mb-3">
         <div className="font-bold text-xs bg-gray-800 text-white px-2 py-1 flex justify-between items-center">
           <span>三、尺寸公差与几何特征检验 (Dimensional & Visual Inspection)</span>
@@ -175,6 +182,7 @@ export const QualityCertificateTemplate: React.FC<QualityCertificateTemplateProp
           </tbody>
         </table>
       </div>
+      )}
 
       {/* 第五部分：综合判定与签发签署 */}
       <div className="border border-black p-2.5 bg-gray-50 mb-3 relative">
@@ -183,20 +191,19 @@ export const QualityCertificateTemplate: React.FC<QualityCertificateTemplateProp
             <div className="font-bold text-xs flex items-center gap-2">
               <span>综合检验判定结论 / Conclusion:</span>
               <span className="px-3 py-0.5 bg-green-600 text-white font-bold rounded text-xs tracking-wider">
-                {data.overallDecision} PASSED
+                {data.overallDecision}
               </span>
             </div>
             <div className="text-[10px] text-gray-700 leading-normal">
-              {data.notes || '经严格物理力学、化学成分及尺寸抽检，所检各项指标完全符合合同协议及国家/行业相关标准，准予放行出厂。'}
+              {data.notes}
             </div>
           </div>
 
           {/* 检验印章模拟 */}
           <div className="border-2 border-red-600 rounded-full w-24 h-24 flex flex-col items-center justify-center text-red-600 font-bold text-[9px] leading-tight rotate-[-12deg] opacity-85 select-none pointer-events-none absolute right-6 -top-2">
-            <div className="text-[10px] border-b border-red-500 pb-0.5">宁波乐天质检</div>
-            <div>质量检验合格</div>
+            <div className="text-[10px] border-b border-red-500 pb-0.5">{data.companyProfile?.qualityStamp ?? ''}</div>
+            <div>{data.overallDecision}</div>
             <div className="text-[8px] font-mono mt-0.5">{data.issueDate}</div>
-            <div className="text-[8px]">(QA PASSED)</div>
           </div>
         </div>
       </div>

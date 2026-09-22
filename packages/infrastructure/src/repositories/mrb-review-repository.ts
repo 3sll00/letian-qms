@@ -1,6 +1,13 @@
 import { Kysely } from 'kysely';
 import type { MRBReviewRepository as IMRBReviewRepository } from '@letian/domain';
-import type { MaterialPermission, MRBFailCategory, MRBReview, MRBStatus } from '@letian/contracts';
+import type {
+  MaterialPermission,
+  MRBDisposition,
+  MRBFailCategory,
+  MRBReview,
+  MRBStatus,
+  MRBUrgencyLevel,
+} from '@letian/contracts';
 import type { Database, MrbReviewInsert, MrbReviewRow } from '../database/schema.js';
 import { buildMaterialPermissionWhere } from './pbac-sql-translator.js';
 
@@ -17,6 +24,16 @@ const SOURCE_TYPES: readonly string[] = [
 
 /** 契约 MRBStatusEnum 的 4 个合法取值 */
 const MRB_STATUSES: readonly string[] = ['PENDING_REVIEW', 'UNDER_REVIEW', 'DISPOSED', 'REJECTED'];
+
+/** 契约 MRBDispositionEnum 的 4 个合法处置方式 */
+const MRB_DISPOSITIONS: readonly string[] = ['RETURN_TO_VENDOR', 'REWORK', 'CONCESSION', 'SCRAP'];
+
+/** 契约 MRBUrgencyLevelEnum 的 3 个合法紧急程度（DB 列为 varchar，读侧收敛回枚举） */
+const MRB_URGENCY_LEVELS: readonly string[] = ['NORMAL', 'URGENT', 'CRITICAL'];
+
+function toUrgencyLevel(value: string): MRBUrgencyLevel {
+  return MRB_URGENCY_LEVELS.includes(value) ? (value as MRBUrgencyLevel) : 'NORMAL';
+}
 
 /** 读侧投影：MRB 列表查询结果（KPI 字段与契约 PaginatedMRBRecords 对齐） */
 export interface MRBListResult {
@@ -41,6 +58,21 @@ function toMrbStatus(value: string): MRBStatus {
     throw new Error(`MRB_STATUS_INVALID: 非法的 MRB 状态 [${value}]`);
   }
   return value as MRBStatus;
+}
+
+function toMrbDisposition(value: string): MRBDisposition {
+  if (!MRB_DISPOSITIONS.includes(value)) {
+    throw new Error(`MRB_DISPOSITION_INVALID: 非法的 MRB 处置方式 [${value}]`);
+  }
+  return value as MRBDisposition;
+}
+
+/**
+ * 模糊检索通配符转义：用户输入中的 % 与 _ 属于 LIKE 元字符，
+ * 不转义会让“按单号搜索”退化成全表匹配（口径失真）。
+ */
+function likePattern(value: string): string {
+  return `%${value.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
 }
 
 /**
@@ -86,7 +118,20 @@ export class KyselyMRBReviewRepository implements IMRBReviewRepository {
    */
   public async listMrbReviews(query: {
     sourceType?: string;
+    /** 单状态过滤（兼容既有调用） */
     status?: string;
+    /** 多状态过滤（列表页「已评审」= DISPOSED + REJECTED 需要）；与 status 同时给出时以本条为准 */
+    statuses?: readonly string[];
+    /** MRB 单号模糊检索 */
+    mrbNo?: string;
+    /** 来源检验单号模糊检索 */
+    sourceOrderNo?: string;
+    /** 处置方式过滤（退货 / 返工 / 特采 / 报废） */
+    disposition?: string;
+    /** 发现日期下界（含） */
+    createdFrom?: Date;
+    /** 发现日期上界（不含），由控制器按「日界右开区间」计算 */
+    createdToExclusive?: Date;
     /** 三维 PBAC 权限过滤（MRB 表无供应商列，限定供应商的规则按 fail-closed 不匹配） */
     permissions?: readonly MaterialPermission[];
     page: number;
@@ -100,10 +145,38 @@ export class KyselyMRBReviewRepository implements IMRBReviewRepository {
       listQuery = listQuery.where('sourceType', '=', sourceType);
       countQuery = countQuery.where('sourceType', '=', sourceType);
     }
-    if (query.status !== undefined) {
-      const status = toMrbStatus(query.status);
-      listQuery = listQuery.where('status', '=', status);
-      countQuery = countQuery.where('status', '=', status);
+    const statuses =
+      query.statuses !== undefined && query.statuses.length > 0
+        ? query.statuses.map((value) => toMrbStatus(value))
+        : query.status !== undefined
+          ? [toMrbStatus(query.status)]
+          : [];
+    if (statuses.length > 0) {
+      listQuery = listQuery.where('status', 'in', statuses);
+      countQuery = countQuery.where('status', 'in', statuses);
+    }
+    if (query.mrbNo !== undefined) {
+      const pattern = likePattern(query.mrbNo);
+      listQuery = listQuery.where('mrbNo', 'ilike', pattern);
+      countQuery = countQuery.where('mrbNo', 'ilike', pattern);
+    }
+    if (query.sourceOrderNo !== undefined) {
+      const pattern = likePattern(query.sourceOrderNo);
+      listQuery = listQuery.where('sourceOrderNo', 'ilike', pattern);
+      countQuery = countQuery.where('sourceOrderNo', 'ilike', pattern);
+    }
+    if (query.disposition !== undefined) {
+      const disposition = toMrbDisposition(query.disposition);
+      listQuery = listQuery.where('disposition', '=', disposition);
+      countQuery = countQuery.where('disposition', '=', disposition);
+    }
+    if (query.createdFrom !== undefined) {
+      listQuery = listQuery.where('createdAt', '>=', query.createdFrom);
+      countQuery = countQuery.where('createdAt', '>=', query.createdFrom);
+    }
+    if (query.createdToExclusive !== undefined) {
+      listQuery = listQuery.where('createdAt', '<', query.createdToExclusive);
+      countQuery = countQuery.where('createdAt', '<', query.createdToExclusive);
     }
     if (query.permissions !== undefined) {
       const pbacWhere = buildMaterialPermissionWhere(query.permissions, {
@@ -119,6 +192,23 @@ export class KyselyMRBReviewRepository implements IMRBReviewRepository {
       .limit(query.pageSize)
       .offset((query.page - 1) * query.pageSize)
       .execute();
+
+    // 读侧派生「检验人」：mrb_reviews 无该物理列，按 source_order_no = order_no 关联 inspection_orders 带出。
+    // 用一次 IN 查询构建映射，避免 N+1 与 join 列表投影的类型歧义。
+    const sourceOrderNos = [...new Set(rows.map((row) => row.sourceOrderNo))];
+    const inspectorByOrderNo = new Map<string, string>();
+    if (sourceOrderNos.length > 0) {
+      const inspectorRows = await this.db
+        .selectFrom('inspectionOrders')
+        .select(['orderNo', 'inspectorName'])
+        .where('orderNo', 'in', sourceOrderNos)
+        .execute();
+      for (const row of inspectorRows) {
+        if (row.inspectorName !== null && row.inspectorName !== undefined) {
+          inspectorByOrderNo.set(row.orderNo, row.inspectorName);
+        }
+      }
+    }
 
     const countRow = await countQuery.executeTakeFirst();
 
@@ -164,7 +254,12 @@ export class KyselyMRBReviewRepository implements IMRBReviewRepository {
         (statusCounts['REJECTED'] ?? 0),
       disposedCount,
       monthlyReviewRate,
-      items: rows.map((row) => this.mapRow(row)),
+      items: rows.map((row) => {
+        const record = this.mapRow(row);
+        const inspectorName = inspectorByOrderNo.get(row.sourceOrderNo);
+        // 可空派生列一律条件展开，绝不写入 undefined（exactOptionalPropertyTypes）
+        return inspectorName !== undefined ? { ...record, inspectorName } : record;
+      }),
     };
   }
 
@@ -206,6 +301,13 @@ export class KyselyMRBReviewRepository implements IMRBReviewRepository {
       dispositionNotes: review.dispositionNotes ?? null,
       approvers: JSON.stringify(review.approvers),
       concessionAttachmentUrl: review.concessionAttachmentUrl ?? null,
+      // 015：发起参数与处置闭环字段
+      pendingDefectId: review.pendingDefectId ?? null,
+      reviewFlowId: review.reviewFlowId ?? null,
+      urgencyLevel: review.urgencyLevel,
+      reviewNotes: review.reviewNotes ?? null,
+      disposedAt: review.disposedAt !== undefined ? new Date(review.disposedAt) : null,
+      disposedBy: review.disposedBy ?? null,
       updatedAt: now,
     };
 
@@ -237,12 +339,18 @@ export class KyselyMRBReviewRepository implements IMRBReviewRepository {
       approvers: row.approvers,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
+      urgencyLevel: toUrgencyLevel(row.urgencyLevel),
       // 可空列一律用条件展开省略，绝不写入 undefined
       ...(row.disposition !== null ? { disposition: row.disposition } : {}),
       ...(row.dispositionNotes !== null ? { dispositionNotes: row.dispositionNotes } : {}),
       ...(row.concessionAttachmentUrl !== null
         ? { concessionAttachmentUrl: row.concessionAttachmentUrl }
         : {}),
+      ...(row.pendingDefectId !== null ? { pendingDefectId: row.pendingDefectId } : {}),
+      ...(row.reviewFlowId !== null ? { reviewFlowId: row.reviewFlowId } : {}),
+      ...(row.reviewNotes !== null ? { reviewNotes: row.reviewNotes } : {}),
+      ...(row.disposedAt !== null ? { disposedAt: row.disposedAt.toISOString() } : {}),
+      ...(row.disposedBy !== null ? { disposedBy: row.disposedBy } : {}),
     };
   }
 }

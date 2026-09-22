@@ -2,29 +2,99 @@ import React, { useState, useEffect } from "react";
 import { ArrowLeft, Printer, ShieldCheck, Atom, Gauge, CheckSquare, Layers, Sparkles, AlertTriangle, FileSpreadsheet } from "lucide-react";
 import { CertificatePrintModal } from "../../../components/certificate/CertificatePrintModal";
 import { PrintTemplateModal } from "../../../components/common/PrintTemplateModal";
+import { IndicatorActualField } from "../../../components/common/IndicatorActualField";
+import { PlanMatchBanner } from "../../../components/common/PlanMatchBanner";
+import { ApprovalButton } from "../../../components/common/ApprovalButton";
 import { QualityCertificateData } from "../../../lib/inspectionTypes";
-import { api } from "../../../lib/api";
+import { buildOqcCertificateData, certificateItemsFromRows } from "../../../lib/certificateDataService";
+import { loadCompanyProfile } from "../../../lib/companyProfile";
+import { api, errorMessage } from "../../../lib/api";
+import { useMatchedPlan } from "../../../hooks/useMatchedPlan";
+import {
+  DECISION_LABEL,
+  judgeIndicatorRow,
+  parseMeasuredNumber,
+  splitIndicatorRows,
+  summarizeJudgements,
+  type PlanIndicatorRow,
+} from "../../../lib/planMatch";
+import type { InspectionItemDecision } from "@letian/contracts";
+
+/** 单项判定徽标：只有 PASSED 才显示合格，待判定不得冒充合格 */
+const VerdictBadge: React.FC<{ decision: InspectionItemDecision }> = ({ decision }) => (
+  <span
+    className={`px-2 py-0.5 rounded text-[11px] font-semibold border ${
+      decision === "PASSED"
+        ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+        : decision === "FAILED"
+        ? "bg-rose-50 text-rose-700 border-rose-200"
+        : "bg-slate-100 text-slate-500 border-slate-200"
+    }`}
+  >
+    {DECISION_LABEL[decision]}
+  </span>
+);
+
+/**
+ * 列表行回填输入框的归一化：列表用 `-` 表示「无值」这一展示占位，不能把它当真实数据带进表单，
+ * 否则录入人会把占位符当成已填内容，甚至原样提交 / 打印。
+ */
+function fromList(value?: string | null): string {
+  return value !== undefined && value !== null && value !== "-" ? value : "";
+}
+
+/** 检验日期默认取「今天」：录入动作真实发生日，不是编造的固定日期 */
+function todayIsoDate(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/** 数量文本（形如「546 件」）-> 数值；解析不出即 null（不猜数量） */
+function parseQuantity(text: string): number | null {
+  const matched = String(text).replace(/,/g, "").match(/\d+(\.\d+)?/);
+  if (matched === null) return null;
+  const value = Number(matched[0]);
+  return Number.isFinite(value) ? value : null;
+}
 
 interface OqcRecordFormProps {
   initialItem?: any;
   onBack: () => void;
   onSubmit: (result: any) => void;
+  /** 只读回看：指标清单与判定取本单方案快照（§7.3「快照即证据」），不允许改动历史结论 */
+  readOnly?: boolean;
 }
 
-export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({ initialItem, onBack, onSubmit }) => {
+export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
+  initialItem,
+  onBack,
+  onSubmit,
+  readOnly = false,
+}) => {
   // 基础合同与出货交付信息 (质量保证证书 Header)
-  const [certNo, setCertNo] = useState(initialItem?.no || "QC-2026-07-0062");
-  const [orderNo, setOrderNo] = useState(initialItem?.doc || "PO-202606-889");
-  const [deliveryNo, setDeliveryNo] = useState(initialItem?.deliveryNo || "DO-20260706-003");
-  const [customer, setCustomer] = useState(initialItem?.client || "江阴开益特种压缩机有限公司");
-  const [productName, setProductName] = useState(initialItem?.name || "双头螺柱 (粗杆)");
-  const [spec, setSpec] = useState(initialItem?.spec || "M20×55-8.8");
-  const [standard, setStandard] = useState("GB/T 899-1988 / GB/T 3098.1");
-  const [materialGrade, setMaterialGrade] = useState("ML40Cr");
-  const [heatNo, setHeatNo] = useState(initialItem?.heatNo || "HN-20260518-03");
-  const [lotNo, setLotNo] = useState(initialItem?.lotNo || "LOT-20260706-002");
-  const [quantity, setQuantity] = useState(initialItem?.qty || "546 件");
-  const [deliveryStatus, setDeliveryStatus] = useState("调质淬回火 (QT)");
+  //
+  // 口径（docs/27 §6.1 / docs/33 §2.1，同款缺陷）：抬头字段一律只由**真实数据源**填充 ——
+  // 出货台账列表行 (initialItem) 或本单方案快照 (planMatch.order，见下方回填 useEffect)；
+  // 两者都没有来源即保持空串，由录入人按占位提示填写。
+  // 历史实现在这里预置了一整套演示值（单号「QC-2026-07-0062」、客户「江阴开益特种压缩机有限公司」、
+  // 材质「ML40Cr」、炉号「HN-20260518-03」、批号「LOT-20260706-002」、数量「546 件」、
+  // 检验人「张检验 (QC)」、检验日期「2026-07-06」、结论长文…）：界面看起来"已经有真实数据"，
+  // 提交与打印时会被当成本单真实值写库、印进对外质量证书 —— 属编造值，故一律移除。
+  const [certNo, setCertNo] = useState(fromList(initialItem?.no));
+  const [orderNo, setOrderNo] = useState(fromList(initialItem?.doc ?? initialItem?.orderNo));
+  const [deliveryNo, setDeliveryNo] = useState(fromList(initialItem?.deliveryNo ?? initialItem?.salesOrderNo));
+  const [customer, setCustomer] = useState(fromList(initialItem?.client ?? initialItem?.customerName));
+  const [productName, setProductName] = useState(fromList(initialItem?.name ?? initialItem?.materialName));
+  const [spec, setSpec] = useState(fromList(initialItem?.spec ?? initialItem?.specification));
+  // 执行标准 / 材质牌号：列表行与本单合同都没有该字段的稳定来源，留空由录入人按图纸填写
+  const [standard, setStandard] = useState("");
+  const [materialGrade, setMaterialGrade] = useState(fromList(initialItem?.steelGrade ?? initialItem?.materialGrade));
+  const [heatNo, setHeatNo] = useState(fromList(initialItem?.heatNo ?? initialItem?.furnaceHeatNo));
+  const [lotNo, setLotNo] = useState(fromList(initialItem?.lotNo ?? initialItem?.batchNo));
+  const [quantity, setQuantity] = useState(
+    initialItem?.qty !== undefined && initialItem?.qty !== null && initialItem?.qty !== ""
+      ? `${initialItem.qty}`
+      : ""
+  );
 
   // 炉批号追溯联动状态与修改追踪
   const [heatTraceLoading, setHeatTraceLoading] = useState(false);
@@ -36,50 +106,101 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({ initialItem, onBac
   const [inheritedValues, setInheritedValues] = useState<Record<string, string>>({});
   const [modifiedItems, setModifiedItems] = useState<Set<string>>(new Set());
 
+  // 当前出货单的物料编码：来自出货检验列表行，缺失时页面明确提示无法自动匹配
+  const materialCode: string = initialItem?.materialCode ?? initialItem?.productCode ?? "";
+
+  // 判定依据的唯一来源（口径：docs/17-检验录入界面说明与质检方案匹配口径.md §7）
+  //   新建 / 继续录入 → 按「物料 + 检验类型」匹配**当前生效方案**；
+  //   只读回看        → 读**本单方案快照**（§7.3「快照即证据」），不按当前方案重算历史判定
+  const planMatch = useMatchedPlan(materialCode, "OQC_SH", {
+    orderId: initialItem?.id ?? null,
+    readOnly,
+  });
+
   // 1. 化学成分全项 (Chemical Composition, %)
-  const [chemElements, setChemElements] = useState([
-    { element: "C", standard: "0.37 ~ 0.44", actual: "0.40", unit: "%", result: "合格" },
-    { element: "Si", standard: "0.17 ~ 0.37", actual: "0.24", unit: "%", result: "合格" },
-    { element: "Mn", standard: "0.50 ~ 0.80", actual: "0.66", unit: "%", result: "合格" },
-    { element: "Cr", standard: "0.80 ~ 1.10", actual: "0.98", unit: "%", result: "合格" },
-    { element: "P", standard: "≤ 0.030", actual: "0.013", unit: "%", result: "合格" },
-    { element: "S", standard: "≤ 0.030", actual: "0.007", unit: "%", result: "合格" },
-    { element: "Ni", standard: "≤ 0.30", actual: "0.04", unit: "%", result: "合格" },
-    { element: "Mo", standard: "≤ 0.15", actual: "0.02", unit: "%", result: "合格" },
-  ]);
+  const [chemElements, setChemElements] = useState<PlanIndicatorRow[]>([]);
 
   // 2. 机械物理性能全项 (Mechanical & Physical Properties)
-  const [mechProperties, setMechProperties] = useState([
-    { item: "抗拉强度 Rm", standard: "800 ~ 1000", actual: "895", unit: "MPa", result: "合格" },
-    { item: "屈服强度 Rp0.2", standard: "≥ 640", actual: "730", unit: "MPa", result: "合格" },
-    { item: "断后伸长率 A", standard: "≥ 12.0", actual: "15.5", unit: "%", result: "合格" },
-    { item: "断面收缩率 Z", standard: "≥ 52.0", actual: "58.0", unit: "%", result: "合格" },
-    { item: "冲击吸收能量 KV2", standard: "≥ 27 (-20℃)", actual: "46", unit: "J", result: "合格" },
-    { item: "洛氏硬度 HRC", standard: "22 ~ 32", actual: "28.5", unit: "HRC", result: "合格" },
-    { item: "脱碳层深度 G", standard: "≤ 0.015", actual: "0.008", unit: "mm", result: "合格" },
-  ]);
+  const [mechProperties, setMechProperties] = useState<PlanIndicatorRow[]>([]);
 
   // 3. 尺寸公差与外观全项 (Dimensions & Visual)
-  const [dimItems, setDimItems] = useState([
-    { item: "旋入端螺纹中径", standard: "6g (18.163~18.334)", actual: "18.250", unit: "mm", result: "合格" },
-    { item: "螺母端螺纹中径", standard: "6g (18.163~18.334)", actual: "18.245", unit: "mm", result: "合格" },
-    { item: "螺柱总公称长度 L", standard: "55.0 ± 0.60", actual: "55.15", unit: "mm", result: "合格" },
-    { item: "光杆直径 ds", standard: "20.0 ± 0.25", actual: "19.92", unit: "mm", result: "合格" },
-    { item: "表面处理与防锈", standard: "无锈斑划伤，发黑油封均匀", actual: "符合规范", unit: "目测", result: "合格" },
-  ]);
+  const [dimItems, setDimItems] = useState<PlanIndicatorRow[]>([]);
+
+  // 指标行就绪即重建三个分区；未命中 / 加载失败时清空，绝不用演示指标行顶替真实方案或本单快照
+  useEffect(() => {
+    const grouped = splitIndicatorRows(planMatch.rows);
+    setChemElements(grouped.CHEMICAL);
+    setMechProperties(grouped.MECHANICAL);
+    setDimItems(grouped.DIMENSIONAL);
+  }, [planMatch.rows]);
+
+  // 本单全部指标行的实时判标汇总（合格率分母已剔除免检项）
+  const judgement = summarizeJudgements(
+    [...chemElements, ...mechProperties, ...dimItems].map(judgeIndicatorRow)
+  );
+
+  /**
+   * 方案版本 ID：新建/录入模式下提交建单时原样回传，服务端据此固化 planSnapshot 快照；
+   * 只读回看模式下是本单已绑定的版本，仅用于展示，不再回传建单。
+   */
+  const planVersionId = planMatch.planVersionId;
 
   // 综合判定与签发
   const [decision, setDecision] = useState<"合格" | "不合格" | "特采">("合格");
-  const [inspector, setInspector] = useState("张检验 (QC)");
-  const [inspectDate, setInspectDate] = useState("2026-07-06");
-  const [conclusion, setConclusion] = useState(
-    "经对本批次产品进行化学成分复验、全项机械力学试验、高倍金相组织、几何尺寸公差及表面外观检验，全部符合 GB/T 899 及客户图纸订货技术条件，综合判定为合格，准予出厂。"
-  );
+  const [inspector, setInspector] = useState(fromList(initialItem?.inspector ?? initialItem?.inspectorName));
+  // 检验日期默认「今天」：录入动作真实发生日；历史默认值是编造的固定日期
+  const [inspectDate, setInspectDate] = useState(todayIsoDate());
+  // 结论不预置演示长文（原文案会让尚未检验的空白单据看起来已经判过合格）
+  const [conclusion, setConclusion] = useState("");
+
+  // 只读回看：合同/交付/证书表头按工单真实值回填，避免"回看历史单据却打印出演示值"
+  useEffect(() => {
+    const order = planMatch.order;
+    if (order === null) return;
+    setCertNo(order.orderNo);
+    if (order.salesOrderPoNo !== undefined && order.salesOrderPoNo !== "") setOrderNo(order.salesOrderPoNo);
+    if (order.salesOrderNo !== undefined && order.salesOrderNo !== "") setDeliveryNo(order.salesOrderNo);
+    if (order.customerName !== undefined && order.customerName !== "") setCustomer(order.customerName);
+    setProductName(order.materialName);
+    const specText = order.specification ?? order.spec;
+    if (specText !== undefined && specText !== "") setSpec(specText);
+    if (order.furnaceHeatNo !== undefined && order.furnaceHeatNo !== "") setHeatNo(order.furnaceHeatNo);
+    setLotNo(order.batchNo);
+    setQuantity(`${order.sampleQty}${order.unit !== undefined ? ` ${order.unit}` : ""}`);
+    if (order.inspectorName !== undefined && order.inspectorName !== "") setInspector(order.inspectorName);
+    const stamp = order.completedAt ?? order.createdAt;
+    if (stamp !== undefined) setInspectDate(stamp.slice(0, 10));
+    if (order.inspectionNotes !== undefined && order.inspectionNotes !== "") setConclusion(order.inspectionNotes);
+    // 签核人 / 签核时间：只认本单真实落库值（未签核即空）
+    setApprover({
+      name: order.approverName !== undefined && order.approverName !== null ? String(order.approverName) : "",
+      at: order.approvedAt !== undefined && order.approvedAt !== null ? String(order.approvedAt) : "",
+    });
+    setDecision(
+      order.overallDecision === "FAILED" ? "不合格" : order.overallDecision === "CONCESSION" ? "特采" : "合格"
+    );
+  }, [planMatch.order]);
 
   // 打印预览控制
   const [certModalOpen, setCertModalOpen] = useState(false);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const [certData, setCertData] = useState<QualityCertificateData | null>(null);
+
+  // 写入路径状态（docs/35 §4 M3）：提交中 / 失败文案 / 成功回执，均为真实请求结果
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState("");
+  const [submitReceipt, setSubmitReceipt] = useState("");
+  /** 已成功落库的检验单（点「完成并返回列表」时回调 onSubmit 退出表单） */
+  const [submitted, setSubmitted] = useState<{ orderId: string; orderNo: string } | null>(null);
+
+  // 质量负责人签核（docs/35 §5）：只认本单真实落库的签核人 / 签核时间，无来源即空（证书留白）
+  const [approver, setApprover] = useState<{ name: string; at: string }>({
+    name: initialItem?.approverName !== undefined && initialItem?.approverName !== null ? String(initialItem.approverName) : "",
+    at: initialItem?.approvedAt !== undefined && initialItem?.approvedAt !== null ? String(initialItem.approvedAt) : "",
+  });
+
+  /** 本单全部指标行（与页面顺序一致）：证书组装与提交写路径共用同一份来源 */
+  const planRowsForSubmit = [...chemElements, ...mechProperties, ...dimItems];
 
   // 自动防抖调用 /api/v1/inspections/heat-batch-trace 追溯原材料与热处理历史数据
   useEffect(() => {
@@ -119,15 +240,15 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({ initialItem, onBac
             prev.map((el) => {
               const matched = res.inheritedItems.find(
                 (item) =>
-                  item.name.toUpperCase() === el.element.toUpperCase() ||
-                  item.itemCode.toUpperCase().includes(el.element.toUpperCase())
+                  item.name.toUpperCase() === el.title.toUpperCase() ||
+                  item.itemCode.toUpperCase().includes(el.title.toUpperCase())
               );
               if (matched) {
                 const val =
                   matched.measuredVal !== undefined
                     ? String(matched.measuredVal)
                     : matched.measuredText ?? el.actual;
-                newInherited[`chem_${el.element}`] = val;
+                newInherited[`chem_${el.title}`] = val;
                 return { ...el, actual: val };
               }
               return el;
@@ -139,20 +260,20 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({ initialItem, onBac
             prev.map((mp) => {
               const matched = res.inheritedItems.find(
                 (item) =>
-                  item.name.includes(mp.item) ||
-                  mp.item.includes(item.name) ||
-                  (mp.item.includes("抗拉") && item.name.includes("抗拉")) ||
-                  (mp.item.includes("屈服") && item.name.includes("屈服")) ||
-                  (mp.item.includes("伸长率") && item.name.includes("伸长率")) ||
-                  (mp.item.includes("硬度") && item.name.includes("硬度")) ||
-                  (mp.item.includes("冲击") && item.name.includes("冲击"))
+                  item.name.includes(mp.title) ||
+                  mp.title.includes(item.name) ||
+                  (mp.title.includes("抗拉") && item.name.includes("抗拉")) ||
+                  (mp.title.includes("屈服") && item.name.includes("屈服")) ||
+                  (mp.title.includes("伸长率") && item.name.includes("伸长率")) ||
+                  (mp.title.includes("硬度") && item.name.includes("硬度")) ||
+                  (mp.title.includes("冲击") && item.name.includes("冲击"))
               );
               if (matched) {
                 const val =
                   matched.measuredVal !== undefined
                     ? String(matched.measuredVal)
                     : matched.measuredText ?? mp.actual;
-                newInherited[`mech_${mp.item}`] = val;
+                newInherited[`mech_${mp.title}`] = val;
                 return { ...mp, actual: val };
               }
               return mp;
@@ -204,56 +325,141 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({ initialItem, onBac
     setModifiedItems(newModified);
   };
 
-  // 组装质量保证证书数据 (EN 10204 3.1)
+  /**
+   * 组装质量保证证书（docs/35 §9 M8）：
+   * 一律经 `certificateDataService.buildOqcCertificateData` 组装 —— 键名口径（issueDate /
+   * specification / steelGrade / batchNo / dimensions…）只在服务里定义一次，表单不再手搓对象
+   * （历史实现手搓 `date / spec / materialGrade / lotNo / deliveryStatus / dimensionalAndVisual`，
+   * 模板读不到 -> 抬头恒空白；`approver: "陈总工程师"` 更是直接编造一个签核人名）。
+   * 实测分区由**本单方案指标行**转换而来，未填实测值的行不下发 -> 该分段不打印。
+   * 企业档案（抬头 / 印章 / 供货单位·产地）取主数据，未维护即留白（不回落硬编码抬头常量）。
+   * 签发日期不取入库日期：不传即由服务取「今天」（生成本证书的动作真实发生在今天）。
+   */
   const handleOpenCert = () => {
-    const cert: QualityCertificateData = {
-      certNo: certNo,
-      date: inspectDate,
-      customer: customer,
-      contractNo: orderNo,
-      deliveryNo: deliveryNo,
-      productName: productName,
-      standard: standard,
-      spec: spec,
-      materialGrade: materialGrade,
-      heatNo: heatNo,
-      lotNo: lotNo,
-      deliveryStatus: deliveryStatus,
-      quantity: quantity,
-      chemicalComposition: {
-        elements: chemElements.map((el) => ({
-          element: el.element,
-          standard: el.standard,
-          actual: el.actual,
-          unit: el.unit,
-        })),
-      },
-      mechanicalProperties: {
-        items: mechProperties.map((mp) => ({
-          name: mp.item,
-          standard: mp.standard,
-          actual: mp.actual,
-          unit: mp.unit,
-          result: mp.result,
-        })),
-      },
-      dimensionalAndVisual: {
-        items: dimItems.map((di) => ({
-          name: di.item,
-          standard: di.standard,
-          actual: di.actual,
-          unit: di.unit,
-          result: di.result,
-        })),
-      },
-      generalConclusion: conclusion,
-      inspector: inspector,
-      approver: "陈总工程师",
-    };
-    setCertData(cert);
-    setCertModalOpen(true);
+    void (async () => {
+      const companyProfile = await loadCompanyProfile();
+      const cert = buildOqcCertificateData({
+        orderNo: certNo,
+        customer,
+        customerAddress: "",
+        contractNo: orderNo,
+        deliveryNo,
+        productName,
+        spec,
+        steelGrade: materialGrade,
+        heatNo,
+        batchNo: lotNo,
+        quantity,
+        standard,
+        inspector,
+        // 质量负责人：有真实签核动作才有值；未签核即空（证书批准人栏留白，docs/35 §5）
+        ...(approver.name !== "" ? { approverName: approver.name } : {}),
+        // 综合判定：只有检验员真的选了判定才打印结论；「特采」是 MRB 会签结论，录入表单无权直接落 CONCESSION
+        ...(decision === "合格" ? { judgment: "PASSED" } : decision === "不合格" ? { judgment: "FAILED" } : {}),
+        inspectionNotes: conclusion,
+        items: certificateItemsFromRows(planRowsForSubmit),
+        ...(companyProfile !== null ? { companyProfile } : {}),
+      });
+      setCertData(cert);
+      setCertModalOpen(true);
+    })();
   };
 
+  /**
+   * 提交出货检验（docs/35 §4 M3 写路径，与委外 / IQC 同一套口径）：
+   *   ① POST /inspections/{id}/submit-measurements —— 只下发本单方案快照内、且已填写的指标项；
+   *      存在空项时按草稿落库（isDraft:true），避免「未录入」被领域终判成不合格并汇入待审池；
+   *   ② POST /inspections/{id}/status —— 终判：合格 -> PASSED(+judgment PASSED)、
+   *      不合格 -> FAILED(+judgment FAILED)、特采 -> FAILED（**不落 CONCESSION**）。
+   *      「特采放行」是 MRB 会签结论且领域要求客户签核凭证（CONCESSION 必带凭证），
+   *      检验员在录入表单里无权直接把单据判成特采放行；此处只把单据推进到不合格待审池，
+   *      由 MRB 决定特采 / 返工 / 结单，并把申请写进备注。
+   * 回执：绿字显示服务端返回的检验单号；失败按 ApiError 文案红字就地提示（不再 alert 假成功）。
+   */
+  const handleSubmitInternal = async () => {
+    if (submitting) return;
+    const orderId = typeof initialItem?.id === "string" ? initialItem.id : "";
+    if (orderId === "") {
+      setSubmitError("本单尚未落库（列表行未带检验单 ID），无法提交实测值与判定");
+      return;
+    }
+    if (inspector.trim() === "") {
+      setSubmitError("请先填写检验员（检验单落库的检验人）");
+      return;
+    }
+    if (planRowsForSubmit.length === 0) {
+      setSubmitError("本单未匹配到质检方案指标行，无法提交（请先确认该物料的已启用质检方案）");
+      return;
+    }
+
+    const measuredRows = planRowsForSubmit.filter((row) => !row.isExempt && String(row.actual).trim() !== "");
+    const hasBlankRows = planRowsForSubmit.some((row) => !row.isExempt && String(row.actual).trim() === "");
+    const qty = parseQuantity(quantity);
+
+    setSubmitting(true);
+    setSubmitError("");
+    setSubmitReceipt("");
+    try {
+      if (measuredRows.length > 0) {
+        await api.post(`/inspections/${encodeURIComponent(orderId)}/submit-measurements`, {
+          isDraft: hasBlankRows,
+          items: measuredRows.map((row) => {
+            const numeric = parseMeasuredNumber(row.actual);
+            return {
+              itemCode: row.itemCode,
+              ...(numeric !== undefined && row.planItem.dataType === "NUMERIC" ? { measuredVal: numeric } : {}),
+              measuredText: row.actual,
+            };
+          }),
+        });
+      }
+
+      const targetStatus = decision === "合格" ? "PASSED" : "FAILED";
+      const note =
+        decision === "特采"
+          ? [conclusion.trim(), "检验员申请特采（让步放行），转 MRB 评审"].filter((part) => part !== "").join("；")
+          : conclusion.trim();
+      const finished = await api.post<{ orderNo?: string }>(
+        `/inspections/${encodeURIComponent(orderId)}/status`,
+        {
+          status: targetStatus,
+          passQty: decision === "合格" && qty !== null ? qty : 0,
+          failQty: decision === "合格" ? 0 : qty !== null ? qty : 0,
+          ...(decision === "特采" ? {} : { judgment: targetStatus }),
+          ...(note !== "" ? { remark: note, inspectionNotes: note } : {}),
+        }
+      );
+
+      const orderNo = finished.orderNo ?? certNo;
+      setSubmitted({ orderId, orderNo });
+      setSubmitReceipt(`已保存并终判：${orderNo}（判定：${decision}）`);
+    } catch (err) {
+      setSubmitError(errorMessage(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  /** 完成并返回列表：写路径与回执已在上一步给过，这里只做状态复位回调（父页不再 alert 假成功） */
+  const handleFinish = () => {
+    onSubmit({
+      certNo,
+      orderNo,
+      decision,
+      modifiedItems: Array.from(modifiedItems),
+      inspector,
+      planVersionId,
+      planMatchSource: planMatch.matchSource,
+      items: planRowsForSubmit.map((row) => ({
+        itemCode: row.itemCode,
+        name: row.title,
+        standard: row.standard,
+        measuredText: row.actual,
+        unit: row.unit,
+        result: DECISION_LABEL[judgeIndicatorRow(row)],
+      })),
+    });
+  };
   return (
     <div className="space-y-4 max-w-7xl mx-auto pb-12">
       {/* 顶部工具栏 */}
@@ -282,6 +488,14 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({ initialItem, onBac
         </div>
 
         <div className="flex items-center gap-2">
+          <ApprovalButton
+            orderId={typeof initialItem?.id === "string" ? initialItem.id : ""}
+            approverName={approver.name}
+            approvedAt={approver.at}
+            onApproved={(result) =>
+              setApprover({ name: result.approverName ?? approver.name, at: result.approvedAt ?? approver.at })
+            }
+          />
           <button
             type="button"
             onClick={() => setTemplateModalOpen(true)}
@@ -299,6 +513,15 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({ initialItem, onBac
         </div>
       </div>
 
+      {/* 质检方案匹配状态：命中才渲染指标清单，未命中则引导配置方案 */}
+      <PlanMatchBanner state={planMatch} materialCode={materialCode} inspectionType="OQC_SH" />
+
+      {/*
+        只读回看（readOnly）把「指标清单 + 标准值 + 实测值 + 判定」整段置为不可编辑：
+        fieldset[disabled] 一次性禁用内部全部表单控件，避免"能看历史单据、却能改历史结论"。
+        底部判定与打印按钮不在其中，回看时依旧可出质保书。
+      */}
+      <fieldset disabled={readOnly} className="border-0 p-0 m-0 min-w-0 space-y-4">
       {/* 炉批号溯源联动提示 Banner */}
       {heatTraceSource && (
         <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-3 flex items-center justify-between text-xs text-blue-900 shadow-sm">
@@ -393,12 +616,18 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({ initialItem, onBac
           <span className="text-[11px] text-slate-500">依据材料标准全元素光谱复验</span>
         </div>
         <div className="p-4 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-8 gap-3 text-xs">
+          {chemElements.length === 0 && (
+            <div className="col-span-full text-center text-[11px] text-slate-400 py-3">
+              本单质检方案未包含化学成分类指标项，无需录入。
+            </div>
+          )}
           {chemElements.map((el, idx) => {
-            const key = `chem_${el.element}`;
+            const key = `chem_${el.title}`;
             const isMod = modifiedItems.has(key);
+            const decision = judgeIndicatorRow(el);
             return (
               <div
-                key={el.element}
+                key={`${el.itemCode}-${idx}`}
                 className={`border rounded-lg p-2.5 text-center space-y-1 transition-all ${
                   isMod
                     ? "border-amber-400 bg-amber-50/40 shadow-sm ring-1 ring-amber-300"
@@ -406,7 +635,7 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({ initialItem, onBac
                 }`}
               >
                 <div className="font-bold text-slate-800 text-sm flex items-center justify-center gap-1">
-                  <span>{el.element}</span>
+                  <span>{el.title}</span>
                   {isMod && (
                     <span className="text-[9px] bg-amber-200 text-amber-800 px-1 rounded font-normal" title={`原溯源值: ${inheritedValues[key]}`}>
                       改
@@ -414,15 +643,27 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({ initialItem, onBac
                   )}
                 </div>
                 <div className="text-[10px] text-slate-400">标准: {el.standard}</div>
-                <input
-                  type="text"
-                  value={el.actual}
-                  onChange={(e) => handleChemChange(idx, el.element, e.target.value)}
+                <IndicatorActualField
+                  row={el}
+                  readOnly={readOnly}
+                  onValueChange={(value) => handleChemChange(idx, el.title, value)}
                   className={`w-full bg-white border rounded px-1.5 py-0.5 text-center font-mono font-medium text-xs focus:outline-none ${
-                    isMod ? "border-amber-400 text-amber-900 font-bold" : "border-slate-300 focus:border-blue-500"
+                    isMod
+                      ? "border-amber-400 text-amber-900 font-bold"
+                      : decision === "FAILED"
+                      ? "border-rose-400 text-rose-600"
+                      : "border-slate-300 focus:border-blue-500"
                   }`}
                 />
-                <div className="text-[10px] text-emerald-600 font-medium">✓ 符合要求</div>
+                {decision === "PASSED" && (
+                  <div className="text-[10px] text-emerald-600 font-medium">✓ 符合要求</div>
+                )}
+                {decision === "FAILED" && (
+                  <div className="text-[10px] text-rose-600 font-semibold">× 不符合要求</div>
+                )}
+                {decision === "PENDING" && (
+                  <div className="text-[10px] text-slate-400 font-medium">— 待判定</div>
+                )}
               </div>
             );
           })}
@@ -454,14 +695,22 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({ initialItem, onBac
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
+            {mechProperties.length === 0 && (
+              <tr>
+                <td colSpan={5} className="py-6 text-center text-[11px] text-slate-400">
+                  本单质检方案未包含力学与物理性能类指标项，无需录入。
+                </td>
+              </tr>
+            )}
             {mechProperties.map((item, idx) => {
-              const key = `mech_${item.item}`;
+              const key = `mech_${item.title}`;
               const isMod = modifiedItems.has(key);
+              const decision = judgeIndicatorRow(item);
               return (
-                <tr key={item.item} className={`hover:bg-slate-50/50 ${isMod ? "bg-amber-50/20" : ""}`}>
+                <tr key={`${item.itemCode}-${idx}`} className={`hover:bg-slate-50/50 ${isMod ? "bg-amber-50/20" : ""}`}>
                   <td className="py-2.5 px-4 font-medium text-slate-800">
                     <div className="flex items-center gap-1.5">
-                      <span>{item.item}</span>
+                      <span>{item.title}</span>
                       {isMod && (
                         <span className="text-[10px] bg-amber-100 text-amber-800 px-1.5 py-0.2 rounded font-medium border border-amber-300">
                           ✎ 已手动修改 (原值: {inheritedValues[key]})
@@ -472,19 +721,21 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({ initialItem, onBac
                   <td className="py-2.5 px-4 text-slate-500">{item.unit}</td>
                   <td className="py-2.5 px-4 text-slate-600 font-mono">{item.standard}</td>
                   <td className="py-2.5 px-4">
-                    <input
-                      type="text"
-                      value={item.actual}
-                      onChange={(e) => handleMechChange(idx, item.item, e.target.value)}
+                    <IndicatorActualField
+                      row={item}
+                      readOnly={readOnly}
+                      onValueChange={(value) => handleMechChange(idx, item.title, value)}
                       className={`w-48 bg-white border rounded px-2 py-1 font-mono font-medium text-xs focus:outline-none ${
-                        isMod ? "border-amber-400 text-amber-900 bg-amber-50/30 ring-1 ring-amber-300" : "border-slate-200 focus:border-blue-500"
+                        isMod
+                          ? "border-amber-400 text-amber-900 bg-amber-50/30 ring-1 ring-amber-300"
+                          : decision === "FAILED"
+                          ? "border-rose-400 text-rose-600"
+                          : "border-slate-200 focus:border-blue-500"
                       }`}
                     />
                   </td>
                   <td className="py-2.5 px-4 text-center">
-                    <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                      {item.result}
-                    </span>
+                    <VerdictBadge decision={decision} />
                   </td>
                 </tr>
               );
@@ -513,27 +764,36 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({ initialItem, onBac
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
+            {dimItems.length === 0 && (
+              <tr>
+                <td colSpan={5} className="py-6 text-center text-[11px] text-slate-400">
+                  本单质检方案未包含尺寸与外观类指标项，无需录入。
+                </td>
+              </tr>
+            )}
             {dimItems.map((item, idx) => (
-              <tr key={item.item} className="hover:bg-slate-50/50">
-                <td className="py-2.5 px-4 font-medium text-slate-800">{item.item}</td>
+              <tr key={`${item.itemCode}-${idx}`} className="hover:bg-slate-50/50">
+                <td className="py-2.5 px-4 font-medium text-slate-800">{item.title}</td>
                 <td className="py-2.5 px-4 text-slate-500">{item.unit}</td>
                 <td className="py-2.5 px-4 text-slate-600 font-mono">{item.standard}</td>
                 <td className="py-2.5 px-4">
-                  <input
-                    type="text"
-                    value={item.actual}
-                    onChange={(e) => {
+                  <IndicatorActualField
+                    row={item}
+                    readOnly={readOnly}
+                    onValueChange={(value) => {
                       const updated = [...dimItems];
-                      updated[idx].actual = e.target.value;
+                      updated[idx].actual = value;
                       setDimItems(updated);
                     }}
-                    className="w-48 bg-white border border-slate-200 rounded px-2 py-1 font-mono font-medium focus:border-blue-500"
+                    className={`w-48 bg-white border rounded px-2 py-1 font-mono font-medium focus:outline-none ${
+                      judgeIndicatorRow(item) === "FAILED"
+                        ? "border-rose-400 text-rose-600"
+                        : "border-slate-200 focus:border-blue-500"
+                    }`}
                   />
                 </td>
                 <td className="py-2.5 px-4 text-center">
-                  <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                    {item.result}
-                  </span>
+                  <VerdictBadge decision={judgeIndicatorRow(item)} />
                 </td>
               </tr>
             ))}
@@ -541,9 +801,42 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({ initialItem, onBac
         </table>
       </div>
 
+      </fieldset>
+
       {/* 底部综合判定与操作区 */}
       <div className="bg-white border border-slate-200/80 rounded-lg p-4 shadow-sm flex items-center justify-between">
         <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-4 text-xs">
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-500">检验项:</span>
+              <span className="font-bold text-slate-800">{judgement.total} 项</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-500">免检:</span>
+              <span className="font-bold text-sky-700">{judgement.exempt} 项</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-500">待判定:</span>
+              <span className="font-bold text-slate-500">{judgement.pending} 项</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-500">指标合格率:</span>
+              {judgement.passRate === null ? (
+                <span className="font-bold text-slate-500">暂无有效参检项</span>
+              ) : (
+                <span
+                  className={`font-black px-2 py-0.5 rounded border ${
+                    judgement.failed > 0
+                      ? "bg-rose-100 text-rose-800 border-rose-300"
+                      : "bg-emerald-100 text-emerald-800 border-emerald-300"
+                  }`}
+                >
+                  {(judgement.passRate * 100).toFixed(1)}%
+                </span>
+              )}
+            </div>
+          </div>
+          <span className="text-slate-200">|</span>
           <span className="text-xs font-bold text-slate-700">综合判定结论:</span>
           <div className="flex gap-2">
             {(["合格", "不合格", "特采"] as const).map((dec) => (
@@ -551,6 +844,7 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({ initialItem, onBac
                 key={dec}
                 type="button"
                 onClick={() => setDecision(dec)}
+                disabled={readOnly}
                 className={`px-3 py-1 rounded text-xs font-bold transition-all ${
                   decision === dec
                     ? dec === "合格"
@@ -564,6 +858,15 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({ initialItem, onBac
             ))}
           </div>
         </div>
+
+        {(submitReceipt !== "" || submitError !== "") && (
+          <div
+            className={`mb-2 text-xs ${submitError !== "" ? "text-rose-600" : "text-emerald-700"}`}
+            data-testid="oqc-submit-receipt"
+          >
+            {submitError !== "" ? submitError : submitReceipt}
+          </div>
+        )}
 
         <div className="flex items-center gap-2">
           <button
@@ -587,21 +890,28 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({ initialItem, onBac
           >
             <Printer className="w-3.5 h-3.5" /> 预览与打印质保书
           </button>
+          {/* 只读回看：不出提交按钮，避免"回看历史单据"被误当成"重新提交判定" */}
+          {!readOnly && submitted === null && (
           <button
             type="button"
-            onClick={() =>
-              onSubmit({
-                certNo,
-                orderNo,
-                decision,
-                modifiedItems: Array.from(modifiedItems),
-                inspector,
-              })
-            }
-            className="px-5 py-1.5 rounded bg-blue-600 text-white text-xs font-medium hover:bg-blue-500 shadow-sm"
+            onClick={() => {
+              void handleSubmitInternal();
+            }}
+            disabled={submitting}
+            className="px-5 py-1.5 rounded bg-blue-600 text-white text-xs font-medium hover:bg-blue-500 shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            提交出货检验单
+            {submitting ? "提交中…" : "保存并提交出货判定"}
           </button>
+          )}
+          {!readOnly && submitted !== null && (
+          <button
+            type="button"
+            onClick={handleFinish}
+            className="px-5 py-1.5 rounded bg-emerald-600 text-white text-xs font-medium hover:bg-emerald-500 shadow-sm"
+          >
+            完成并返回列表
+          </button>
+          )}
         </div>
       </div>
 

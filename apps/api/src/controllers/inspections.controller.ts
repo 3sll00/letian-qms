@@ -1,4 +1,5 @@
 import { HeatBatchTraceService } from "@letian/domain";
+import { randomUUID } from 'node:crypto';
 import { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import {
@@ -6,6 +7,7 @@ import {
   BatchRecordInspectionItemsRequestSchema,
   InspectionTypeEnum,
   InspectionStatusEnum,
+  ApproveInspectionOrderRequestSchema,
   type InspectionOrder,
 } from '@letian/contracts';
 import { NotFoundError, ValidationFailedError } from '@letian/application';
@@ -15,6 +17,7 @@ import {
   getRequestPermissions,
   buildRequestSecurityContext,
   logAuthorizationCheck,
+  assertQualityApprover,
 } from '../lib/permission-guard';
 
 /**
@@ -64,17 +67,25 @@ const InspectionQuerySchema = z.object({
   dateFrom: z.string().regex(DATE_PATTERN, 'dateFrom 必须是 YYYY-MM-DD 格式').optional(),
   dateTo: z.string().regex(DATE_PATTERN, 'dateTo 必须是 YYYY-MM-DD 格式').optional(),
   batchNo: z.string().optional(),
-  receiptNo: z.string().optional(),
+  /** 入库单号模糊匹配（来料检验台账「入库单号」列，006 字段扩展；迁移 021 起物理列为 inbound_no） */
+  inboundNo: z.string().optional(),
   materialCode: z.string().optional(),
   outsourceNo: z.string().optional(),
   processType: z.string().optional(),
   /** 供应商名称 / 客户名称 模糊匹配 */
   partner: z.string().optional(),
   keyword: z.string().optional(),
-  /** 「检验单号 / 入库单号」模糊匹配（order_no OR receipt_no），供来料检验台账单号筛选 */
+  /** 「检验单号 / 入库单号」模糊匹配（order_no OR inbound_no），供来料检验台账单号筛选 */
   docKeyword: z.string().optional(),
   /** 「物料编号 / 物料名称」模糊匹配（material_code OR material_name），供来料检验台账物料筛选 */
   materialKeyword: z.string().optional(),
+  /**
+   * 「检验工单」= 检验单号（order_no）模糊匹配，供过程检验台账单号筛选。
+   * 与 docKeyword 刻意区分：本参数只命中 order_no，不含 inbound_no（过程检验无入库单概念），
+   * 口径见 docs/28-过程检验台账工单号双筛选项数据字段与接口打通设计.md §2.1。
+   */
+  orderNo: z.string().optional(),
+  /** 「生产工单」= MES 生产工单号（work_order_no，物理列为空时以 batch_no 兜底）模糊匹配，供过程检验台账 */
   workOrderNo: z.string().optional(),
   operatorName: z.string().optional(),
   equipmentCode: z.string().optional(),
@@ -233,13 +244,14 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
         ...(query.dateTo !== undefined ? { dateTo: query.dateTo } : {}),
         ...(query.partner !== undefined ? { partnerKeyword: query.partner } : {}),
         ...(query.batchNo !== undefined ? { batchNo: query.batchNo } : {}),
-        ...(query.receiptNo !== undefined ? { receiptNo: query.receiptNo } : {}),
+        ...(query.inboundNo !== undefined ? { inboundNo: query.inboundNo } : {}),
         ...(query.materialCode !== undefined ? { materialCode: query.materialCode } : {}),
         ...(query.outsourceNo !== undefined ? { outsourceNo: query.outsourceNo } : {}),
         ...(query.processType !== undefined ? { processType: query.processType } : {}),
         ...(query.keyword !== undefined ? { keyword: query.keyword } : {}),
         ...(query.docKeyword !== undefined ? { docKeyword: query.docKeyword } : {}),
         ...(query.materialKeyword !== undefined ? { materialKeyword: query.materialKeyword } : {}),
+        ...(query.orderNo !== undefined ? { orderNo: query.orderNo } : {}),
         ...(query.workOrderNo !== undefined ? { workOrderNo: query.workOrderNo } : {}),
         ...(query.operatorName !== undefined ? { operatorName: query.operatorName } : {}),
         ...(query.equipmentCode !== undefined ? { equipmentCode: query.equipmentCode } : {}),
@@ -276,7 +288,7 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
     });
   });
 
-  // 2. 创建检验单：按 planVersionId 精确绑定方案版本快照，注入 PBAC 校验
+  // 2. 创建检验单：绑定方案版本快照（精确指定或按物料自动匹配），注入 PBAC 校验
   fastify.post(
     '/',
     {
@@ -289,10 +301,17 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
       const operator = operatorOf(request);
       const securityCtx = await buildRequestSecurityContext(request, container);
 
-      // planVersionId 必须是真实存在的方案版本行主键，否则无法生成快照，禁止静默降级为"自动匹配"
-      const resolved = await container.repositories.plans.findVersionById(body.planVersionId);
-      if (!resolved) {
-        throw new NotFoundError(`质检方案版本不存在: ${body.planVersionId}`);
+      // 方案绑定口径 (docs/17-检验录入界面说明与质检方案匹配口径.md §7)：
+      //   1) 显式传入 planVersionId -> 必须是真实存在的方案版本行主键，否则 404（禁止静默降级为其它方案）；
+      //   2) 未传入 -> 交由用例按「物料编码 + 检验类型」自动匹配已启用方案，匹配不到返回 400 inspection-plan-not-found。
+      const planBinding: { planId?: string; planVersionNo?: string } = {};
+      if (body.planVersionId !== undefined) {
+        const resolved = await container.repositories.plans.findVersionById(body.planVersionId);
+        if (!resolved) {
+          throw new NotFoundError(`质检方案版本不存在: ${body.planVersionId}`);
+        }
+        planBinding.planId = resolved.version.id ?? body.planVersionId;
+        planBinding.planVersionNo = resolved.version.versionNo;
       }
 
       const order = await container.useCases.createInspectionOrder.execute(
@@ -301,21 +320,23 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
           ...(body.orderNo !== undefined ? { orderNo: body.orderNo } : {}),
           inspectionType: body.inspectionType,
           materialCode: body.materialCode,
-          materialName: body.materialName,
+          // 物料名称省略时不传：由用例按 materialCode 从存货档案 materials.material_name 补齐
+          ...(body.materialName !== undefined ? { materialName: body.materialName } : {}),
           batchNo: body.batchNo,
-          // 契约工单 DTO 不含批量总数，以送检数占位（batch_qty 列保持 NULL，不被覆盖）
-          batchQty: body.sampleQty,
+          // 报检批量：契约 totalQty 显式传入时以它为批量数；未传时以送检数占位。
+          // （batch_qty 不是物理列，此处只用于聚合根的 AQL 抽样默认值；台账「数量」列 = total_qty，
+          //  由下方 totalQty 透传写入，见 docs/29 §5.3）
+          batchQty: body.totalQty ?? body.sampleQty,
           sampleSize: body.sampleQty,
-          planId: resolved.version.id ?? body.planVersionId,
-          planVersionNo: resolved.version.versionNo,
+          ...planBinding,
           mandatoryGate:
             body.isMandatoryGate ?? MANDATORY_GATE_TYPES.includes(body.inspectionType),
           ...(body.supplierCode !== undefined ? { supplierCode: body.supplierCode } : {}),
           ...(body.supplierName !== undefined ? { supplierName: body.supplierName } : {}),
-          // 006 来料检验 (IQC) 采购入库单号 / 入库日期 / 规格型号 / 计量单位
+          // 006 来料检验 (IQC) 入库单号 / 入库日期 / 规格型号 / 计量单位
           // （此前 create 契约声明了这些字段但控制器未透传，调用方传了也会被静默丢弃）
-          ...(body.receiptNo !== undefined ? { receiptNo: body.receiptNo } : {}),
-          ...(body.receiptDate !== undefined ? { receiptDate: body.receiptDate } : {}),
+          ...(body.inboundNo !== undefined ? { inboundNo: body.inboundNo } : {}),
+          ...(body.inboundDate !== undefined ? { inboundDate: body.inboundDate } : {}),
           ...(body.specification !== undefined ? { specification: body.specification } : {}),
           ...(body.spec !== undefined ? { spec: body.spec } : {}),
           ...(body.unit !== undefined ? { unit: body.unit } : {}),
@@ -329,6 +350,26 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
           ...(body.processType !== undefined ? { processType: body.processType } : {}),
           ...(body.returnDate !== undefined ? { returnDate: body.returnDate } : {}),
           ...(body.vendorName !== undefined ? { vendorName: body.vendorName } : {}),
+          // 台账「检验人」列（inspection_orders.inspector_id / inspector_name）：契约早已声明 inspectorName，
+          // 但此前控制器两条都没透传，建单传入的检验人被静默丢弃 -> 台账「检验人」恒为 --（见 docs/30 §3）
+          ...(body.inspectorId !== undefined ? { inspectorId: body.inspectorId } : {}),
+          ...(body.inspectorName !== undefined ? { inspectorName: body.inspectorName } : {}),
+          // 007 过程检验 (IPQC) 台账字段：契约早已声明，但此前控制器未透传 -> 传了也被静默丢弃
+          // （与 docs/26 §5 同型）。这里收拢进 ipqcProcess 分组下发，避免契约 operatorName/
+          // operatorId（机台作业员）与下面的「当前操作人」同名撞车（见 docs/29 §5.3）。
+          ...(body.totalQty !== undefined ? { totalQty: body.totalQty } : {}),
+          ipqcProcess: {
+            ...(body.workOrderNo !== undefined ? { workOrderNo: body.workOrderNo } : {}),
+            ...(body.blankingLength !== undefined ? { blankingLength: body.blankingLength } : {}),
+            ...(body.operatorName !== undefined ? { operatorName: body.operatorName } : {}),
+            ...(body.operatorId !== undefined ? { operatorId: body.operatorId } : {}),
+            ...(body.equipmentCode !== undefined ? { equipmentCode: body.equipmentCode } : {}),
+            ...(body.equipmentName !== undefined ? { equipmentName: body.equipmentName } : {}),
+            ...(body.threadSpec !== undefined ? { threadSpec: body.threadSpec } : {}),
+            ...(body.inspectionTeam !== undefined ? { inspectionTeam: body.inspectionTeam } : {}),
+            ...(body.processStep !== undefined ? { processStep: body.processStep } : {}),
+            ...(body.completedAt !== undefined ? { completedAt: body.completedAt } : {}),
+          },
           operatorId: operator.userId,
           operatorName: operator.userName,
         },
@@ -470,6 +511,69 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
       if (isFinished) updatePayload.completedAt = new Date();
 
       await orders.updateStatsAndVerdict(id, updatePayload);
+
+      const updated = await orders.findById(id);
+      return reply.status(200).send(updated);
+    }
+  );
+
+  // 6. 质量负责人签核（docs/35 §5）
+  //
+  //   制造证书的「质量负责人」栏此前没有任何数据源（永远留白）。本路由写入**真实签核动作**：
+  //   签核人 = 当前登录用户（不接受请求体自称的签核人），时间 = 服务端 now()。
+  //   approver_id 指向 employees 外键：登录账号可能不是员工档案（如系统账号），
+  //   此时只记姓名、不写外键 —— 宁可少一个外键，也不写一条指向不存在员工的引用（会直接 500）。
+  fastify.post(
+    '/:id/approve',
+    {
+      schema: {
+        params: InspectionParamsSchema,
+        body: ApproveInspectionOrderRequestSchema,
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params as z.infer<typeof InspectionParamsSchema>;
+      const body = request.body as z.infer<typeof ApproveInspectionOrderRequestSchema>;
+      const operator = operatorOf(request);
+      assertQualityApprover(operator);
+
+      const order = await orders.findById(id);
+      if (!order) {
+        throw new NotFoundError(`检验单不存在: ${id}`);
+      }
+
+      const employees = await container.repositories.masterData.getEmployees();
+      const matched = employees.find((employee) => employee.id === operator.userId);
+
+      const approverName = matched?.name ?? operator.userName;
+
+      // 签核动作与审计留痕写在同一个事务里：签核意见进审计日志（append-only 且可追溯），
+      // 不写检验单备注（备注记的是检验过程，两个渠道互不覆盖）。
+      await container.uow.execute(async (ctx) => {
+        await ctx.inspectionOrders.recordApproval(id, {
+          ...(matched?.id !== undefined ? { approverId: matched.id } : {}),
+          approverName,
+        });
+        await ctx.auditLogs.insert({
+          id: randomUUID(),
+          traceId: randomUUID(),
+          userId: operator.userId,
+          userName: approverName,
+          // 审计 action 取值受 audit_logs_action_check 约束（没有 APPROVE 这一档），签核是对单据的一次更新
+          action: 'UPDATE',
+          resourceType: 'INSPECTION_ORDER',
+          resourceId: id,
+          status: 'SUCCESS',
+          diffPatch: {
+            event: 'QUALITY_APPROVAL',
+            orderNo: order.orderNo,
+            approverName,
+            ...(body.remark !== undefined ? { remark: body.remark } : {}),
+          },
+          // 契约 AuditLog.createdAt 是 ISO 字符串（与物理列 timestamptz 的映射在仓储层完成）
+          createdAt: new Date().toISOString(),
+        });
+      });
 
       const updated = await orders.findById(id);
       return reply.status(200).send(updated);

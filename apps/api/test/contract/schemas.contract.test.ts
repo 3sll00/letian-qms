@@ -4,12 +4,18 @@ import {
   AuditStatsResponseSchema,
   ProblemDetailsSchema,
   CreateInspectionOrderRequestSchema,
+  MatchedInspectionPlanSchema,
+  CreateInspectionPlanRequestSchema,
   BatchRecordInspectionItemsRequestSchema,
+  TogglePlanVersionStatusRequestSchema,
+  UpgradePlanVersionRequestSchema,
   InspectionOrderSchema,
   CreateMRBReviewRequestSchema,
   SubmitNodeReviewRequestSchema,
   MRBReviewSchema,
   TraceabilityGraphResponseSchema,
+  TraceBatchSearchResponseSchema,
+  TraceOrderChainResponseSchema,
   ErrorCode,
 } from '@letian/contracts';
 import {
@@ -115,21 +121,192 @@ expectPass(
   {
     orderNo: 'IQC-20260901-001',
     inspectionType: 'IQC',
-    materialCode: 'CL-001',
-    materialName: '圆钢 Φ20',
+    materialCode: 'MAT-35CRMO-08',
+    materialName: '35CrMo 合金圆钢 Φ8.0mm',
     batchNo: 'BATCH-20260901-01',
     sampleQty: 50,
     planVersionId: '11111111-1111-1111-1111-111111111111',
   },
   '合法创建检验单请求'
 );
+expectPass(
+  CreateInspectionOrderRequestSchema,
+  {
+    orderNo: 'IQC-20260901-002',
+    inspectionType: 'IQC',
+    materialCode: 'MAT-35CRMO-08',
+    materialName: '35CrMo 合金圆钢 Φ8.0mm',
+    batchNo: 'BATCH-20260901-02',
+    sampleQty: 50,
+  },
+  '省略 planVersionId 的创建请求（服务端按物料 + 检验类型自动匹配已启用方案）'
+);
+
+expectPass(
+  MatchedInspectionPlanSchema,
+  {
+    planCode: 'QP-IQC-304SS',
+    planName: '304 不锈钢来料检验方案',
+    matchSource: 'MATERIAL',
+    planVersionId: '11111111-1111-1111-1111-111111111111',
+    versionNo: 'v1.0.0',
+    inspectionType: 'IQC',
+    materialCode: 'MAT-35CRMO-08',
+    samplingScheme: 'GB_T_2828',
+    aqlLevel: 'II',
+    strictness: 'NORMAL',
+    items: [
+      {
+        itemCode: 'ITEM-C-01',
+        name: '化学成分 C',
+        dataType: 'NUMERIC',
+        metricCategory: 'CHEMICAL_COMPOSITION',
+        nominalValue: 0.08,
+        upperTolerance: 0.02,
+        lowerTolerance: 0.02,
+      },
+    ],
+    matchedAt: '2026-09-21T08:00:00Z',
+  },
+  '质检方案匹配结果（待检指标清单）'
+);
+expectFail(
+  MatchedInspectionPlanSchema,
+  {
+    planCode: 'QP-IQC-304SS',
+    planName: '304 不锈钢来料检验方案',
+    matchSource: 'MATERIAL_CATEGORY',
+    planVersionId: 'AUTO_MATCHED',
+    versionNo: 'v1.0.0',
+    inspectionType: 'IQC',
+    materialCode: 'MAT-35CRMO-08',
+    samplingScheme: 'GB_T_2828',
+    aqlLevel: 'II',
+    strictness: 'NORMAL',
+    items: [],
+    matchedAt: '2026-09-21T08:00:00Z',
+  },
+  'planVersionId 为非 UUID 占位串的方案匹配结果'
+);
+
+expectPass(
+  CreateInspectionPlanRequestSchema,
+  {
+    planCode: 'QP-PERIOD-01',
+    planName: '带生效周期的新建方案请求',
+    inspectionType: 'IQC',
+    versions: [
+      {
+        versionNo: 'V1.0',
+        samplingScheme: 'GB_T_2828',
+        aqlLevel: 'II',
+        strictness: 'NORMAL',
+        effectiveStartDate: '2026-09-21',
+        effectiveEndDate: '2099-12-31',
+        items: [
+          {
+            itemCode: 'DIM-01',
+            name: '外径尺寸',
+            dataType: 'NUMERIC',
+            metricCategory: 'DIMENSION',
+            nominalValue: 12,
+            upperTolerance: 0.1,
+            lowerTolerance: -0.1,
+          },
+        ],
+      },
+    ],
+  },
+  '方案设计页新建方案请求体（planId / createdBy / 版本行 id 由服务端派生，不在请求体内）'
+);
+// planCode 自 TBD-11 起为可选：留空由服务端按 QP-{YYYYMMDD}-{NNN} 取号
+expectPass(
+  CreateInspectionPlanRequestSchema,
+  { planName: '省略 planCode 的新建方案请求', inspectionType: 'IQC' },
+  '省略 planCode 的新建方案请求（服务端取号）'
+);
+expectFail(
+  CreateInspectionPlanRequestSchema,
+  { planCode: '', planName: 'planCode 传空串的新建方案请求', inspectionType: 'IQC' },
+  'planCode 传空串的新建方案请求（留空必须"不传字段"，不能传空串）'
+);
+expectFail(
+  CreateInspectionPlanRequestSchema,
+  { planCode: 'QP-20260921-001', planName: '缺少检验类型的新建方案请求' },
+  '缺少 inspectionType 的新建方案请求'
+);
+
+// 方案版本启停（审批）请求体：只传动作，目标版本由 URL 的版本行 UUID 指定
+expectPass(
+  TogglePlanVersionStatusRequestSchema,
+  { action: 'ACTIVATE' },
+  '方案版本审批启用请求'
+);
+expectPass(
+  TogglePlanVersionStatusRequestSchema,
+  { action: 'DEACTIVATE' },
+  '方案版本停用请求'
+);
+expectFail(
+  TogglePlanVersionStatusRequestSchema,
+  { action: 'ENABLE' },
+  '使用非契约启停动作（ENABLE）的方案版本启停请求'
+);
+expectFail(
+  TogglePlanVersionStatusRequestSchema,
+  {},
+  '缺少 action 的方案版本启停请求'
+);
+
+// 方案版本升版请求体：新建的是 DRAFT 草稿版本，目标模板版本由 URL 的版本行 UUID 指定。
+// 全部字段可省略 —— 省略 versionNo 由服务端按 max(version) 自动升位（TBD-14），
+// 省略指标项 / 抽样参数则沿用 URL 指向的模板版本行。
+expectPass(
+  UpgradePlanVersionRequestSchema,
+  {},
+  '全部省略的方案版本升版请求（版本号与指标项均由服务端/模板版本行派生）'
+);
+expectPass(
+  UpgradePlanVersionRequestSchema,
+  {
+    versionNo: 'V3.0',
+    samplingScheme: 'GB_T_2828',
+    aqlLevel: 'II',
+    strictness: 'NORMAL',
+    effectiveStartDate: '2026-10-01',
+    effectiveEndDate: '2099-12-31',
+    items: [
+      {
+        itemCode: 'DIM-02',
+        name: '外径尺寸',
+        dataType: 'NUMERIC',
+        metricCategory: 'DIMENSION',
+        nominalValue: 12,
+        upperTolerance: 0.1,
+        lowerTolerance: -0.1,
+      },
+    ],
+  },
+  '显式指定版本号与合法指标项的方案版本升版请求'
+);
+expectFail(
+  UpgradePlanVersionRequestSchema,
+  { versionNo: '' },
+  '版本号传空串的方案版本升版请求（留空必须"不传字段"，不能传空串）'
+);
+expectFail(
+  UpgradePlanVersionRequestSchema,
+  { items: [] },
+  '指标项传空数组的方案版本升版请求（留空必须"不传字段"，不能传空数组）'
+);
+
 expectFail(
   CreateInspectionOrderRequestSchema,
   {
     orderNo: 'IQC-20260901-001',
     inspectionType: 'IQC',
-    materialCode: 'CL-001',
-    materialName: '圆钢 Φ20',
+    materialCode: 'MAT-35CRMO-08',
+    materialName: '35CrMo 合金圆钢 Φ8.0mm',
     batchNo: 'BATCH-20260901-01',
     sampleQty: 0,
     planVersionId: '11111111-1111-1111-1111-111111111111',
@@ -142,8 +319,8 @@ expectFail(
     orderNo: 'IQC-20260901-001',
     // 旧迁移脚本中曾使用的检验类型，不属于契约枚举
     inspectionType: 'OQC',
-    materialCode: 'CL-001',
-    materialName: '圆钢 Φ20',
+    materialCode: 'MAT-35CRMO-08',
+    materialName: '35CrMo 合金圆钢 Φ8.0mm',
     batchNo: 'BATCH-20260901-01',
     sampleQty: 50,
     planVersionId: '11111111-1111-1111-1111-111111111111',
@@ -169,7 +346,7 @@ expectFail(
 const orderWithDefaults = InspectionOrderSchema.parse({
   orderNo: 'OQC-20260901-001',
   inspectionType: 'OQC_SF',
-  materialCode: 'CP-001',
+  materialCode: 'MAT-BLT-88-M10',
   materialName: '六角螺栓',
   batchNo: 'LOT-20260901-01',
   sampleQty: 125,
@@ -207,7 +384,7 @@ expectPass(
     sourceType: 'SHIPMENT_FAIL',
     sourceOrderNo: 'OQC-SF-20260706-0002',
     batchNo: 'LOT-20260706-003',
-    materialCode: 'CP-001',
+    materialCode: 'MAT-BLT-88-M10',
     materialName: '六角螺栓 M10×45',
     defectDescription: '对边宽度超上限',
     defectQty: 5,
@@ -220,7 +397,7 @@ expectFail(
     sourceType: 'IQC_INCOMING',
     sourceOrderNo: 'IQC-001',
     batchNo: 'LOT-001',
-    materialCode: 'CP-001',
+    materialCode: 'MAT-BLT-88-M10',
     materialName: '螺栓',
     defectDescription: '缺陷',
     defectQty: 5,
@@ -264,6 +441,14 @@ const validTrace = {
       relationType: 'RAW_TO_PROCESS',
     },
   ],
+  impact: {
+    downstreamBatchCount: 1,
+    upstreamBatchCount: 1,
+    downstreamOrderCount: 1,
+    downstreamPartyCount: 1,
+    downstreamOrderNos: ['OQC-SH-20260706-002'],
+    downstreamParties: ['客户B制造'],
+  },
 };
 expectPass(TraceabilityGraphResponseSchema, validTrace, '合法追溯图谱');
 expectFail(
@@ -278,6 +463,85 @@ expectFail(
   TraceabilityGraphResponseSchema,
   { ...validTrace, nodes: [{ ...validTrace.nodes[0], nodeStatus: 'QUALIFIED' }] },
   '使用旧节点状态 QUALIFIED 的图谱'
+);
+
+// 影响面统计是必填：缺失即视为口径不完整（docs/24 §8 验收口径 2）
+expectFail(
+  TraceabilityGraphResponseSchema,
+  {
+    batchNo: validTrace.batchNo,
+    hasCycle: false,
+    nodes: validTrace.nodes,
+    edges: validTrace.edges,
+  },
+  '缺少 impact 影响面统计的图谱'
+);
+
+// 特采（让步接收）是合法节点状态，且必须能携带 MRB 单号与客户授权件（docs/24 §4 R4）
+expectPass(
+  TraceabilityGraphResponseSchema,
+  {
+    ...validTrace,
+    nodes: [
+      {
+        ...validTrace.nodes[0],
+        nodeStatus: 'CONCESSION',
+        mrbNo: 'MRB-20231011-01',
+        concessionAttachmentUrl: 'https://qms.letian.com/docs/concession/CONC-20231011-01.pdf',
+      },
+    ],
+  },
+  '特采（CONCESSION）节点状态的图谱'
+);
+
+// 批次检索响应：sources 只允许两个数据源取值
+const validBatchSearch = {
+  total: 1,
+  page: 1,
+  pageSize: 20,
+  items: [
+    {
+      batchNo: 'B20231011-92',
+      materialName: '35CrMo 合金圆钢 Φ8.0mm',
+      materialCode: 'MAT-35CRMO-08',
+      furnaceHeatBatchNo: '230910-112',
+      nodeStatus: 'CONCESSION',
+      sources: ['TRACE_NODE', 'INSPECTION_ORDER'],
+      relatedOrderNos: ['INS-20231011-0001'],
+    },
+  ],
+};
+expectPass(TraceBatchSearchResponseSchema, validBatchSearch, '合法批次检索响应');
+expectFail(
+  TraceBatchSearchResponseSchema,
+  { ...validBatchSearch, items: [{ ...validBatchSearch.items[0], sources: ['ERP_SYNC'] }] },
+  '使用非契约检索来源的批次检索结果'
+);
+
+// 订单检验环节响应：stages 是并列台账，不是血缘链路；matchedBy 只允许四个订单字段
+const validOrderChain = {
+  orderNo: 'WO-20231012-01',
+  matchedBy: 'WORK_ORDER_NO',
+  batchNos: ['B20231012-02', 'B20231012-03'],
+  stages: [
+    {
+      seq: 2,
+      stageName: '下料检',
+      orderNo: 'INS-20231012-0002',
+      orderType: 'IPQC_CT',
+      batchNo: 'B20231012-02',
+      sourceDocNo: 'WO-20231012-01',
+      status: 'FAILED',
+      judgment: 'FAILED',
+      durationMinutes: 30,
+    },
+  ],
+};
+expectPass(TraceOrderChainResponseSchema, validOrderChain, '合法订单检验环节响应');
+expectFail(
+  TraceOrderChainResponseSchema,
+  { ...validOrderChain, matchedBy: 'BATCH_NO' },
+  '使用非契约检索字段的订单检验环节响应'
 );
 
 // ============================================================================

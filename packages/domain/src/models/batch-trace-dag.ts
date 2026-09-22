@@ -206,11 +206,37 @@ export class BatchTraceDAG {
 
     const cycleInfo = this.detectCycles();
 
+    // 影响面统计：本模型已求出上下游批次集合，直接据此派生，无需再回库（docs/24 §5.3）。
+    // 节点表只有单一 supplierOrCustomer 列承载外部单位，不区分客户与供应商，
+    // 因此这里输出 downstreamParties（下游单位），不写「客户数」。
+    const downstreamOrderNos = Array.from(
+      new Set(
+        downstream
+          .map((n) => n.orderNo)
+          .filter((orderNo): orderNo is string => orderNo !== undefined && orderNo !== null)
+      )
+    ).sort();
+    const downstreamParties = Array.from(
+      new Set(
+        downstream
+          .map((n) => n.supplierOrCustomer)
+          .filter((party): party is string => party !== undefined && party !== null)
+      )
+    ).sort();
+
     return {
       batchNo: targetBatchNo,
       nodes: subgraphNodes,
       edges: subgraphEdges,
       hasCycle: cycleInfo.hasCycle,
+      impact: {
+        downstreamBatchCount: new Set(downstream.map((n) => n.batchNo)).size,
+        upstreamBatchCount: new Set(upstream.map((n) => n.batchNo)).size,
+        downstreamOrderCount: downstreamOrderNos.length,
+        downstreamPartyCount: downstreamParties.length,
+        downstreamOrderNos,
+        downstreamParties,
+      },
     };
   }
 }

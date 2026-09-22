@@ -52,10 +52,15 @@
 - `outsource_no` 为空时以 `batch_no` 占位；
 - `return_date` 为空时以 `created_at` 的日期占位。
 
+> **口径更正（2026-09-22，见 `docs/32` §2）**：上述两条「占位」口径**已废止**。
+> `outsource_no` / `return_date` 是外部单据号与回厂登记日期，用 `batch_no` / `created_at` 顶替属
+> 「推导值冒充真实字段」，已被 `docs/09` §2.4 表格与 `scripts/testing/README.md` 的断言口径明令禁止；
+> 现口径为：**只取物理列，为空即不输出该键，界面渲染 `-`**（读路径见本文件 §6.3）。
+
 ### 2.1 迁移 `011_backfill_outsource_vendor_name.ts`（加工商名称回填）
 
-009 只对**新增/重新写入**的委外工单写入 `vendor_name`。历史委外行（如 `INS-20231012-005`、
-`INS-20231013-005`）仅有 `supplier_code`，读取侧按兜底链回落到编码本身，界面「加工商」列会
+009 只对**新增/重新写入**的委外工单写入 `vendor_name`。历史委外行（如 `OQC-SF-20231012-0001`、
+`OQC-SF-20231013-0001`）仅有 `supplier_code`，读取侧按兜底链回落到编码本身，界面「加工商」列会
 直接显示内部编码（如 `SUP-004`），与「加工商」这一展示列的业务语义不符。
 
 011 迁移把历史委外行的 `vendor_name` 在为空时补齐为 `suppliers.supplier_name`：
@@ -112,9 +117,11 @@
 2. **写入路径**：`save()` 的 `values` 与 `onConflict.doUpdateSet` 均按条件展开写入 4 个新列，
    避免非委外工单被覆盖为 NULL。
 3. **读取路径（`mapRow`）**：
-   - `outsourceNo`：优先取 `outsource_no`，为空时回落 `batch_no`；
+   - `outsourceNo`：**只取 `outsource_no`**；为空即不输出该键，界面按 `-` 渲染
+     （2026-09-22 更正：此前「为空时回落 `batch_no`」的口径已废止，见 `docs/32` §2.2）；
    - `processType`：直接取 `process_type`；
-   - `returnDate`：优先取 `return_date`，为空时回落 `created_at` 的日期部分；
+   - `returnDate`：**只取 `return_date`**；为空即不输出该键，界面按 `-` 渲染
+     （2026-09-22 更正：此前「为空时回落 `created_at`」的口径已废止，见 `docs/32` §2.2）；
    - `vendorName`：优先取 `vendor_name`（011 迁移已把历史委外行按供应商主数据回填），
      其次 `supplier_name`；仅在两者皆空时才回落 `supplier_code`；
    - `inspectorName`：优先取 `inspector_name` 快照，为空时按员工主数据
@@ -157,6 +164,20 @@
 
 `apps/web/src/components/AppLayout.tsx`：委外检验角标统计规则由 `type === 'OQC_SF'`
 放宽为 `type.startsWith('OQC_') && type !== 'OQC_SH'`，委外七分类全部计入。
+
+`apps/web/src/pages/inspections/components/OutsourceInspectionForm.tsx`（2026-09-22 按 `docs/33` 收口）：
+
+- 抬头字段（检验单号 / 委外加工单号 / 外协加工商 / 加工工序类别 / 产品名称及规格 / 规格型号 / 委外批次号 / 交付数量 / 检验员 / 检验日期）一律取自**台账列表行或本单快照**；
+  本单与列表都无来源的字段（材质牌号、执行技术标准）**留空并给占位提示**，不猜值；
+- 实测区（膜厚测点 / 盐雾 / 附着力 / 心部与表面硬度 / 去氢 / 外观 / 螺纹）**不再预置演示值**；
+  「平均实测值」按实际填写的测点计算，一个测点都没有时显示 `-`（不再把「没测过」算成 `0.00 μm`）；
+- `buildManufacturingCertData()`（`apps/web/src/lib/certificateDataService.ts`）改为**纯字段映射**，删除全部编造默认值（厂名 / 单号 / 数量 / 实测值 / 签发人名），并按模板真实读取口径输出 `certNo` / `dateOfIssue` / `testResults`；
+- （2026-09-22 按 `docs/34` 收口）「技术规范要求」六栏全部改由**本单命中的方案指标行 `standard`** 驱动（膜厚 / 盐雾 / 附着力 / 心部与表面硬度 / 去氢回火 / 外观；未命中即留空 + 占位「方案未定义…」，去氢回火原温度 / 时间两栏合并为一栏）；单项判定与证书 `Decision` 只打印方案判标结果或录入人显式下拉结论，未判定即留白（不再打印任何未经检验的 `PASS`）；
+- （2026-09-22 按 `docs/34` §6.3 收口）「5 点膜厚」与方案指标「镀层厚度」是同一指标的两个入口：只填 5 个测点时，5 点平均值作为该指标行实测值参与**判标 / 证书 / 落库**；指标行有显式录入时以显式值为准；
+- （2026-09-22 按 `docs/34` §6.2 收口）录入表单写路径打通：`POST /inspections`（新建取号）→ `POST /inspections/{id}/submit-measurements`（未录满按草稿落库）→ `POST /inspections/{id}/status`（终判 `PASSED` / `FAILED` / `RE_INSPECTING`），表单内回吐服务端单号，失败按 `ApiError` 文案就地提示；父页不再重复 `alert('委外检验单已保存提交！')`；
+  实测分区无数据即**整块不渲染**，质量负责人留空并提示「待质量负责人签核」。
+
+> 一句话口径：**制造证书与录入表单都不允许用演示值冒充真实数据**（与 `docs/27` §6.1 来料检验同款）。
 
 ---
 

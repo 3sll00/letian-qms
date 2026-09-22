@@ -60,6 +60,10 @@ export interface PlanSamplingConfig {
   samplingScheme: string;
   aqlLevel: string;
   strictness: string;
+  /** 方案版本生效起始日 (YYYY-MM-DD)，空表示即刻生效 */
+  effectiveStartDate?: string;
+  /** 方案版本生效截止日 (YYYY-MM-DD)，空表示长期有效 */
+  effectiveEndDate?: string;
 }
 
 // ============================================================================
@@ -133,9 +137,11 @@ export interface InspectionPlansTable {
   planCode: string;
   planName: string;
   materialCode: string;
+  /** 方案归属的存货分类编码：material_code 为空串时表示"该分类的通用方案"（014 迁移新增） */
+  categoryCode: string | null;
   version: Generated<string>;
   versionStatus: Generated<PlanVersionStatus>;
-  /** 与契约 InspectionTypeEnum 的 6 个取值一致（002 迁移已对齐 CHECK 约束） */
+  /** 与契约 InspectionTypeEnum 的 13 个取值一致（016 迁移已把 CHECK 约束补齐到含委外七分类） */
   inspectionStage: InspectionType;
   items: JsonColumnType<InspectionPlanItem[]>;
   samplingConfig: JsonColumnType<PlanSamplingConfig>;
@@ -149,7 +155,7 @@ export interface InspectionPlansTable {
 export interface InspectionOrdersTable {
   id: Generated<string>;
   orderNo: string;
-  /** 与契约 InspectionTypeEnum 的 6 个取值一致 */
+  /** 与契约 InspectionTypeEnum 的 13 个取值一致（009 迁移已对齐 CHECK 约束） */
   orderType: InspectionType;
   planId: string;
   batchNo: string;
@@ -178,9 +184,9 @@ export interface InspectionOrdersTable {
   projectNo?: string | null;
   shortProjectNo?: string | null;
   manufactureDate?: Date | null;
-  // 006 来料检验采购入库与规格对账字段
-  receiptNo?: string | null;
-  receiptDate?: Date | null;
+  // 006 来料检验 (IQC) 入库单号 / 入库日期 / 规格对账字段（迁移 021 起列名统一为 inbound_*）
+  inboundNo?: string | null;
+  inboundDate?: Date | null;
   specification?: string | null;
   unit?: string | null;
   supplierName?: string | null;
@@ -207,6 +213,11 @@ export interface InspectionOrdersTable {
   processType?: string | null;
   returnDate?: string | null;
   vendorName?: string | null;
+  // 029 质量负责人签核（docs/35 §5）：由 POST /inspections/{id}/approve 写入**真实签核动作**
+  // （签核人 = 当前登录用户）。三列为 NULL 表示尚未签核 —— 证书留白，不打印任何人名。
+  approverId?: string | null;
+  approverName?: string | null;
+  approvedAt?: Date | null;
 }
 
 // ============================================================================
@@ -217,9 +228,12 @@ export interface ReviewFlowsTable {
   id: Generated<string>;
   flowCode: string;
   flowName: string;
+  /** 019：流程说明（流程设置页卡片与详情展示） */
+  description: string | null;
   applicableType: MRBFailCategory;
   version: Generated<string>;
   isActive: Generated<boolean>;
+  /** 节点列表；每项含 nodeLevel / nodeName / roleCode / roleName / isRequired / allowConcession / requireCustomerSign */
   nodes: JsonColumnType<ReviewFlowNode[]>;
   createdAt: Generated<Date>;
   updatedAt: Generated<Date>;
@@ -243,6 +257,18 @@ export interface MrbReviewsTable {
   approvers: JsonColumnType<MRBApproverAction[]>;
   concessionAttachmentUrl: string | null;
   confidentialityLevel: Generated<number>;
+  /** 015：关联的不合格待审核池条目（池 -> MRB 的正向溯源） */
+  pendingDefectId: string | null;
+  /** 015：发起时选用的评审流程定义 */
+  reviewFlowId: string | null;
+  /** 015：紧急程度 NORMAL / URGENT / CRITICAL */
+  urgencyLevel: Generated<string>;
+  /** 015：发起说明（与不合格描述文本分离） */
+  reviewNotes: string | null;
+  /** 015：处置闭环时间 */
+  disposedAt: Date | null;
+  /** 015：最终裁决人姓名 */
+  disposedBy: string | null;
   createdAt: Generated<Date>;
   updatedAt: Generated<Date>;
 }
@@ -271,6 +297,13 @@ export interface BatchTraceNodesTable {
   supplierOrCustomer: string | null;
   occurredAt: Generated<Date>;
   createdAt: Generated<Date>;
+  // 020 迁移新增：节点血缘标识（缺值一律留 NULL，不用空串占位）
+  /** 物料编码；主数据未建档时为空 */
+  materialCode?: string | null;
+  /** 炉批号：钢材炉号 / 热处理炉批号；无炉批概念时为空 */
+  furnaceHeatBatchNo?: string | null;
+  /** 本节点对应的检验单号；该环节尚未建检验单时为空 */
+  inspectionOrderNo?: string | null;
 }
 
 // ============================================================================
@@ -414,8 +447,19 @@ export interface PendingMrbItemsTable {
   batchNo: string;
   defectQty: NumericColumnType;
   defectRate: NumericColumnType;
+  /** 015：报检总数量（不良率分母） */
+  totalQty: NumericColumnType;
   failReason: string;
   failedItems: JsonColumnType<any[]>;
+  /** 015：首个判不合格的指标项编码 */
+  defectItemCode: string | null;
+  /** 015：来源检验单供应商（IQC / 委外） */
+  supplierName: string | null;
+  /** 015：来源检验单客户（OQC） */
+  customerName: string | null;
+  /** 015：来源检验单检验人 */
+  inspectorId: string | null;
+  inspectorName: string | null;
   status: Generated<string>;
   mrbReviewId: string | null;
   reviewStartedAt: Date | null;
@@ -457,6 +501,84 @@ export interface WarehousesTable {
   updatedAt: Generated<Date>;
 }
 
+/**
+ * 方案编码流水号池（迁移 017）：主键 (prefix, day_key) 同时是并发取号的排他锁点，
+ * 由仓储 `InspectionPlanRepository.allocatePlanCodeSequence` 以原子 upsert 取号。
+ * 与检验单号流水号池（迁移 012）同构，区别只是编码段位数为 3 位。
+ */
+export interface InspectionPlanCodeSequencesTable {
+  prefix: string;
+  dayKey: string;
+  lastSeq: Generated<number>;
+  updatedAt: Generated<Date>;
+}
+
+/**
+ * 检验单号改号留痕（迁移 025）：历史三段式单号 `INS-{YYYYMMDD}-{NNN}` ->
+ * `{前缀}-{YYYYMMDD}-{NNNN}` 的逐条映射，既是「改号 ↔ 对账」的唯一依据，也是迁移 down 的回滚依据。
+ * `audit_logs` 为 append-only 不可改写，故留痕独立成表；完整设计见 docs/31。
+ */
+export interface InspectionOrderNoRenumberingsTable {
+  oldNo: string;
+  newNo: string;
+  orderId: string;
+  orderType: string;
+  migratedAt: Generated<Date>;
+}
+
+/**
+ * 物料编码改号留痕（迁移 026）：原型遗留编码 `CP-*` -> 主数据口径 `MAT-*` 的逐条映射，
+ * 既是「改号 ↔ 对账」的唯一依据，也是迁移 down 的回滚依据；完整设计见 docs/32。
+ */
+export interface MaterialCodeRenumberingsTable {
+  oldCode: string;
+  newCode: string;
+  materialId: string | null;
+  materialName: string | null;
+  note: string | null;
+  migratedAt: Generated<Date>;
+}
+/**
+ * 委外单号 / 委外批次号改号留痕（迁移 028）：`kind` 区分 OUTSOURCE_NO（`WW-` -> `WWJG-`）与
+ * BATCH_NO（`WW-` -> `B…`），既是「改号 ↔ 对账」的唯一依据，也是迁移 down 的回滚依据；
+ * 完整设计见 docs/34 §2。
+ */
+export interface OutsourceReferenceRenumberingsTable {
+  id: Generated<string>;
+  orderId: string | null;
+  orderNo: string | null;
+  kind: string;
+  oldValue: string;
+  newValue: string;
+  note: string | null;
+  migratedAt: Generated<Date>;
+}
+export interface MaterialCategoryReassignmentsTable {
+  materialCode: string;
+  oldCategoryCode: string | null;
+  newCategoryCode: string;
+  note: string | null;
+  migratedAt: Generated<Date>;
+}
+/**
+ * 企业档案主数据（迁移 029）：证书抬头「签发主体 / 供货单位 / 产地」的唯一真实来源。
+ * 单行表：`profile_id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (profile_id)`，结构上不可能有第二行。
+ */
+export interface CompanyProfileTable {
+  profileId: Generated<boolean>;
+  legalName: string | null;
+  legalNameEn: string | null;
+  shortName: string | null;
+  address: string | null;
+  originPlace: string | null;
+  phone: string | null;
+  email: string | null;
+  /** 证书印章文字（如「宁波乐天质检」）；无值即不打印印章 */
+  qualityStamp: string | null;
+  updatedBy: string | null;
+  updatedAt: Generated<Date>;
+}
+
 export interface Database {
   warehouses: WarehousesTable;
   materials: MaterialsTable;
@@ -465,6 +587,7 @@ export interface Database {
   customers: CustomersTable;
   workshops: WorkshopsTable;
   employees: EmployeesTable;
+  companyProfile: CompanyProfileTable;
   inspectionPlans: InspectionPlansTable;
   inspectionOrders: InspectionOrdersTable;
   reviewFlows: ReviewFlowsTable;
@@ -481,6 +604,11 @@ export interface Database {
   authorizationLogs: AuthorizationLogsTable;
   pendingMrbItems: PendingMrbItemsTable;
   reportTemplates: ReportTemplatesTable;
+  inspectionPlanCodeSequences: InspectionPlanCodeSequencesTable;
+  inspectionOrderNoRenumberings: InspectionOrderNoRenumberingsTable;
+  materialCodeRenumberings: MaterialCodeRenumberingsTable;
+  materialCategoryReassignments: MaterialCategoryReassignmentsTable;
+  outsourceReferenceRenumberings: OutsourceReferenceRenumberingsTable;
 }
 
 // ============================================================================
@@ -494,6 +622,7 @@ export type CustomerRow = Selectable<CustomersTable>;
 export type WorkshopRow = Selectable<WorkshopsTable>;
 export type EmployeeRow = Selectable<EmployeesTable>;
 export type InspectionPlanRow = Selectable<InspectionPlansTable>;
+export type CompanyProfileRow = Selectable<CompanyProfileTable>;
 export type InspectionOrderRow = Selectable<InspectionOrdersTable>;
 export type ReviewFlowRow = Selectable<ReviewFlowsTable>;
 export type MrbReviewRow = Selectable<MrbReviewsTable>;
@@ -530,6 +659,7 @@ export type SupplierInsert = Insertable<SuppliersTable>;
 export type CustomerInsert = Insertable<CustomersTable>;
 export type WorkshopInsert = Insertable<WorkshopsTable>;
 export type EmployeeInsert = Insertable<EmployeesTable>;
+export type CompanyProfileInsert = Insertable<CompanyProfileTable>;
 export type InspectionPlanInsert = Insertable<InspectionPlansTable>;
 export type InspectionOrderInsert = Insertable<InspectionOrdersTable>;
 export type InspectionOrderUpdate = Updateable<InspectionOrdersTable>;

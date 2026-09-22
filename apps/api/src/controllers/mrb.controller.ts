@@ -5,7 +5,10 @@ import {
   SubmitNodeReviewRequestSchema,
   InitiateReviewRequestSchema,
   MRBCategoryTabEnum,
+  MRBDispositionEnum,
   MRBStatusEnum,
+  MRBApproverActionSchema,
+  PendingDefectStatusEnum,
   type MRBReview,
 } from '@letian/contracts';
 import { NotFoundError, ConflictError } from '@letian/application';
@@ -17,12 +20,59 @@ import {
   logAuthorizationCheck,
 } from '../lib/permission-guard';
 
+/** 日期入参格式：`YYYY-MM-DD` */
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
 const MRBQuerySchema = z.object({
   categoryTab: MRBCategoryTabEnum.default('ALL'),
-  status: MRBStatusEnum.optional(),
+  /**
+   * 评审状态过滤：支持单值或逗号分隔多值。
+   * 页面「已评审」页签 = `DISPOSED,REJECTED`（已评审为已处置的父集，见 docs/19 §4）。
+   * 逐项按 MRBStatusEnum 校验，非法值直接 400，绝不静默忽略。
+   */
+  status: z
+    .string()
+    .optional()
+    .transform((value) =>
+      value === undefined
+        ? undefined
+        : value
+            .split(',')
+            .map((item) => item.trim())
+            .filter((item) => item !== '')
+    )
+    .pipe(z.array(MRBStatusEnum).nonempty().optional()),
+  /** MRB 单号模糊检索 */
+  mrbNo: z.string().trim().min(1).optional(),
+  /** 来源检验单号模糊检索 */
+  sourceOrderNo: z.string().trim().min(1).optional(),
+  /** 处置方式过滤：退货 / 返工 / 特采 / 报废 */
+  disposition: MRBDispositionEnum.optional(),
+  /** 发现日期下界（含） */
+  dateFrom: z.string().regex(DATE_PATTERN, '日期格式必须为 YYYY-MM-DD').optional(),
+  /** 发现日期上界（含） */
+  dateTo: z.string().regex(DATE_PATTERN, '日期格式必须为 YYYY-MM-DD').optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
 });
+
+/**
+ * `YYYY-MM-DD` → 本地日界时间点。
+ * `offsetDays = 0` 取当日 00:00:00（含），`offsetDays = 1` 取次日 00:00:00（不含），
+ * 二者构成「日界右开区间」，避免 `<= 23:59:59` 写法丢毫秒。
+ */
+function localDayBoundary(date: string, offsetDays: number): Date {
+  const [yearText = '1970', monthText = '01', dayText = '01'] = date.split('-');
+  return new Date(
+    Number(yearText),
+    Number(monthText) - 1,
+    Number(dayText) + offsetDays,
+    0,
+    0,
+    0,
+    0
+  );
+}
 
 const PendingPoolQuerySchema = z.object({
   sourceStage: z.enum(['IQC', 'IPQC', 'FQC', 'OQC']).optional(),
@@ -30,7 +80,11 @@ const PendingPoolQuerySchema = z.object({
   inspectionType: z.string().optional(),
   materialCode: z.string().optional(),
   batchNo: z.string().optional(),
-  status: z.enum(['PENDING_INITIATE', 'INITIATED', 'DISMISSED', 'PENDING_REVIEW', 'REVIEWING', 'RESOLVED']).optional(),
+  /**
+   * 池状态：只接受契约三态。004 建表时的历史词表（PENDING_REVIEW / REVIEWING / RESOLVED）
+   * 已由迁移 015 归一，此处不再兼容，传入旧值直接 400（口径收敛，见 docs/21 §9 遗留 3）。
+   */
+  status: PendingDefectStatusEnum.optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
 });
@@ -51,13 +105,30 @@ const SignatureRequestSchema = z.object({
   signatureUrl: z.string().optional(),
 });
 
-const DispositionBodySchema = z.object({
-  disposition: z.enum(['CONCESSION', 'REWORK', 'SCRAP', 'RETURN_TO_VENDOR', 'RETURN']).transform((val) => (val === 'RETURN' ? 'RETURN_TO_VENDOR' : val)),
-  reason: z.string().optional(),
-  dispositionReason: z.string().optional(),
-  dispositionNotes: z.string().optional(),
-  concessionAttachmentUrl: z.string().optional(),
-});
+/**
+ * 处置提交体：与契约 `DisposeMRBRequest` 同名同义
+ * （`dispositionReason` 为页面字段名，`dispositionNotes`/`reason` 为兼容别名，值统一落
+ * `mrb_reviews.disposition_notes`）；`approvers` 省略时沿用会签历史。
+ * 特采附件**不做任何默认兜底**：缺失即由用例抛 400 CONCESSION_NOT_SIGNED_OFF。
+ */
+const DispositionBodySchema = z
+  .object({
+    disposition: z
+      .enum(['CONCESSION', 'REWORK', 'SCRAP', 'RETURN_TO_VENDOR', 'RETURN'])
+      .transform((val) => (val === 'RETURN' ? 'RETURN_TO_VENDOR' : val)),
+    dispositionReason: z.string().min(2).optional(),
+    dispositionNotes: z.string().min(2).optional(),
+    reason: z.string().optional(),
+    approvers: z.array(MRBApproverActionSchema).default([]),
+    concessionAttachmentUrl: z.string().optional(),
+  })
+  .refine(
+    (value) =>
+      value.dispositionReason !== undefined ||
+      value.dispositionNotes !== undefined ||
+      value.reason !== undefined,
+    { message: '必须提供处置决议理由（dispositionReason / dispositionNotes）', path: ['dispositionReason'] }
+  );
 
 /** 分类页签 -> MRB 不合格来源类型 (MRBFailCategoryEnum) */
 const CATEGORY_TAB_TO_SOURCE: Partial<Record<
@@ -86,7 +157,9 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
     },
     async (request, reply) => {
       const query = request.query as z.infer<typeof PendingPoolQuerySchema>;
-      const securityCtx = await buildRequestSecurityContext(request, container);
+      // 行级权限随查询下推 SQL（分类维度按 materials.category_code 换算），
+      // 因此这里传权限规则而不是应用层安全上下文，见 docs/21 §9 遗留 1
+      const permissions = await getRequestPermissions(request, container);
 
       const result = await container.useCases.pendingMRBPool.getPendingList(
         {
@@ -99,7 +172,7 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
           page: query.page,
           pageSize: query.pageSize,
         },
-        securityCtx
+        permissions
       );
 
       return reply.status(200).send({
@@ -154,7 +227,16 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
         pageSize: query.pageSize,
         permissions,
         ...(sourceType !== undefined ? { sourceType } : {}),
-        ...(query.status !== undefined ? { status: query.status } : {}),
+        ...(query.status !== undefined ? { statuses: query.status } : {}),
+        ...(query.mrbNo !== undefined ? { mrbNo: query.mrbNo } : {}),
+        ...(query.sourceOrderNo !== undefined ? { sourceOrderNo: query.sourceOrderNo } : {}),
+        ...(query.disposition !== undefined ? { disposition: query.disposition } : {}),
+        ...(query.dateFrom !== undefined
+          ? { createdFrom: localDayBoundary(query.dateFrom, 0) }
+          : {}),
+        ...(query.dateTo !== undefined
+          ? { createdToExclusive: localDayBoundary(query.dateTo, 1) }
+          : {}),
       });
 
       return reply.status(200).send({
@@ -192,6 +274,12 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
 
       const now = new Date().toISOString();
 
+      // 手工建单路径可选关联池条目：仅当池中确有该条目时才写外键（避免 FK 违约）
+      const linkedPoolItem =
+        body.pendingDefectId !== undefined
+          ? await container.repositories.pendingDefects.findById(body.pendingDefectId)
+          : null;
+
       const record: MRBReview = {
         id: crypto.randomUUID(),
         mrbNo: `MRB-${body.sourceType.slice(0, 3)}-${Date.now().toString().slice(-6)}-${Math.floor(
@@ -205,9 +293,12 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
         defectDescription: body.defectDescription,
         defectQty: body.defectQty,
         status: 'PENDING_REVIEW',
+        // 手工建单没有发起弹窗，紧急程度取默认值；池发起路径由 initiate 接口透传
+        urgencyLevel: 'NORMAL',
         approvers: [],
         createdAt: now,
         updatedAt: now,
+        ...(linkedPoolItem !== null ? { pendingDefectId: linkedPoolItem.id } : {}),
       };
 
       await container.uow.execute(async (ctx) => {
@@ -402,20 +493,41 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
         operationName: '提交MRB最终处置结论',
       });
 
-      const reason = body.dispositionReason || body.reason || body.dispositionNotes || '多方会签评审确认处置方式';
+      const reason =
+        body.dispositionReason || body.dispositionNotes || body.reason || '多方会签评审确认处置方式';
       const updated = await container.useCases.decideMrbDisposition.execute(
         {
           mrbId: id,
           disposition: body.disposition,
           dispositionReason: reason,
-          concessionAttachmentUrl: body.concessionAttachmentUrl || record.concessionAttachmentUrl || (body.disposition === 'CONCESSION' ? '/attachments/concession_signed.pdf' : undefined),
+          approvers: body.approvers,
+          // 特采附件只认「本次提交」或「单据已有」的客户书面签核件，绝不生成默认路径
+          ...(body.concessionAttachmentUrl !== undefined
+            ? { concessionAttachmentUrl: body.concessionAttachmentUrl }
+            : record.concessionAttachmentUrl !== undefined
+              ? { concessionAttachmentUrl: record.concessionAttachmentUrl }
+              : {}),
           operatorId: operator.userId,
           operatorName: operator.userName,
         },
         securityCtx
       );
 
-      return reply.status(200).send(updated);
+      // 契约响应体 = MRBRecord 本体 + 处置连带产物（DisposeMRBResponse）：
+      // 返工（REWORK）处置会在同一事务内生成下一轮复检单，这里把复检单标识一并回吐，
+      // 前端无需按批次号反查即可展示「已生成复检单 {单号}」（此前用例已算出却被丢弃）。
+      // 注意：响应体仍是 MRB 单据本身（此前把用例包装对象 { mrbReview } 当 DTO 下发，
+      // 前端拿到后 status/disposition 全为 undefined，见 docs/20 §3.2 D6），
+      // 这里只是在其上追加两个可选字段，非返工处置的响应与旧版逐字段一致。
+      return reply.status(200).send({
+        ...updated.mrbReview,
+        ...(updated.reinspectionOrderId !== undefined
+          ? { reinspectionOrderId: updated.reinspectionOrderId }
+          : {}),
+        ...(updated.reinspectionOrderNo !== undefined
+          ? { reinspectionOrderNo: updated.reinspectionOrderNo }
+          : {}),
+      });
     }
   );
 };

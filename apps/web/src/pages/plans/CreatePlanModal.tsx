@@ -1,19 +1,51 @@
 import React, { useState } from 'react';
 import { X, Plus, Trash2, ShieldCheck } from 'lucide-react';
 import { api } from '../../lib/api';
+import { todayLocalDate } from '../../lib/planMatch';
+import type { InspectionPlan } from '@letian/contracts';
+
+/**
+ * 指标行的枚举必须与契约 `DataTypeEnum` / `MetricCategoryEnum` 逐字对齐：
+ * 这两个字段在 POST /api/v1/plans 上由 Zod 校验，写错枚举值服务端直接 400，方案根本存不进库。
+ */
+type PlanItemDataType = 'NUMERIC' | 'TEXT' | 'QUALITATIVE';
+type PlanItemCategory =
+  | 'DIMENSION'
+  | 'APPEARANCE'
+  | 'HARDNESS'
+  | 'COATING_THICKNESS'
+  | 'TENSILE_STRENGTH'
+  | 'MECHANICAL_PERFORMANCE'
+  | 'CHEMICAL_COMPOSITION'
+  | 'TEXT_INTERVAL';
 
 interface PlanItemRow {
   seq: number;
   itemCode: string;
   name: string;
-  dataType: 'NUMERIC' | 'BOOLEAN';
-  metricCategory: 'APPEARANCE' | 'DIMENSION' | 'PERFORMANCE' | 'CHEMICAL';
+  dataType: PlanItemDataType;
+  metricCategory: PlanItemCategory;
+  /** 标准语：数值型由 nominalValue + 公差回拼展示；文本/定性型是判定基准的文本表述 */
+  standardText: string;
+  /** 「可接受值」输入框原文（逗号等分隔）；提交时拆成结构化清单 acceptableValues（TBD-06） */
+  acceptableValues: string;
   nominalValue?: number;
   upperTolerance?: number;
   lowerTolerance?: number;
   unit: string;
   measurementTool: string;
   sampleSize: number;
+}
+
+/**
+ * 「可接受值」输入框 → 结构化清单（TBD-06）。
+ * 分隔符只是**录入便利**；入库后判定只认清单成员本身，不再依赖标准语的文本约定。
+ */
+function splitAcceptableValues(raw: string): string[] {
+  return raw
+    .split(/[,，、/|]/)
+    .map((value) => value.trim())
+    .filter((value) => value !== '');
 }
 
 interface CreatePlanModalProps {
@@ -23,12 +55,18 @@ interface CreatePlanModalProps {
 }
 
 export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalProps) {
-  const [planCode, setPlanCode] = useState(`QP-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 900) + 100)}`);
+  // 方案编号留空即由服务端取号（`QP-{YYYYMMDD}-{NNN}`，当日流水，见 @letian/domain 的
+  // inspection-plan-number）。原实现预填 `QP-{年份}-{随机数}`：既不是当日流水、又可能撞号，已删除。
+  const [planCode, setPlanCode] = useState('');
   const [planName, setPlanName] = useState('');
   const [inspectionType, setInspectionType] = useState('IQC');
   const [materialCode, setMaterialCode] = useState('');
   const [aqlLevel, setAqlLevel] = useState('II');
   const [strictness, setStrictness] = useState('NORMAL');
+  // 版本生效周期（TBD-08）：与抽样方案同属版本级属性，服务端落 sampling_config JSONB，
+  // 匹配时按「起始日 <= 今天 <= 截止日」过滤，超期版本继续往分类级兜底
+  const [effectiveStartDate, setEffectiveStartDate] = useState(todayLocalDate());
+  const [effectiveEndDate, setEffectiveEndDate] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [items, setItems] = useState<PlanItemRow[]>([
     {
@@ -37,6 +75,8 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
       name: '外径尺寸',
       dataType: 'NUMERIC',
       metricCategory: 'DIMENSION',
+      standardText: '',
+      acceptableValues: '',
       nominalValue: 12.0,
       upperTolerance: 0.1,
       lowerTolerance: -0.1,
@@ -48,8 +88,10 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
       seq: 2,
       itemCode: 'APP-01',
       name: '表面裂纹与毛刺',
-      dataType: 'BOOLEAN',
+      dataType: 'QUALITATIVE',
       metricCategory: 'APPEARANCE',
+      standardText: '无裂纹',
+      acceptableValues: '无裂纹, 无肉眼可见裂纹',
       unit: '外观',
       measurementTool: '目视/放大镜',
       sampleSize: 8,
@@ -68,6 +110,8 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
         name: `检验项目 ${nextSeq}`,
         dataType: 'NUMERIC',
         metricCategory: 'DIMENSION',
+        standardText: '',
+        acceptableValues: '',
         nominalValue: 10.0,
         upperTolerance: 0.05,
         lowerTolerance: -0.05,
@@ -94,10 +138,16 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
       alert('请填写方案名称');
       return;
     }
+    // 日期为定长 YYYY-MM-DD 文本，字典序即时间序：起点晚于终点时该版本永远不会参与匹配
+    if (effectiveStartDate !== '' && effectiveEndDate !== '' && effectiveStartDate > effectiveEndDate) {
+      alert('版本生效起始日不能晚于截止日，否则该版本永远不会参与自动匹配');
+      return;
+    }
     setSubmitting(true);
     try {
-      await api.post('/plans', {
-        planCode,
+      const created = await api.post<InspectionPlan>('/plans', {
+        // 留空即服务端取号：**不传 planCode 字段**（而不是传空串，空串会被契约 .min(1) 拒绝）
+        ...(planCode.trim() !== '' ? { planCode: planCode.trim() } : {}),
         planName,
         inspectionType,
         materialCode: materialCode.trim() || undefined,
@@ -107,13 +157,19 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
             samplingScheme: 'GB_T_2828',
             aqlLevel,
             strictness,
-            status: 'ACTIVE',
+            // 服务端 createDraftVersion 固定以 DRAFT 落库（待审批后启用），这里不写 ACTIVE，
+            // 避免读代码的人误以为「提交即启用」；生效周期缺失 = 不限制该侧边界
+            status: 'DRAFT',
+            effectiveStartDate: effectiveStartDate.trim() || undefined,
+            effectiveEndDate: effectiveEndDate.trim() || undefined,
             items: items.map((it, idx) => ({
               seq: idx + 1,
               itemCode: it.itemCode,
               name: it.name,
               dataType: it.dataType,
               metricCategory: it.metricCategory,
+              standardText: it.standardText.trim() || undefined,
+              acceptableValues: splitAcceptableValues(it.acceptableValues),
               nominalValue: it.nominalValue,
               upperTolerance: it.upperTolerance,
               lowerTolerance: it.lowerTolerance,
@@ -125,7 +181,9 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
           },
         ],
       });
-      alert('质检方案已创建成功！');
+      alert(
+        `质检方案 ${created.planCode} 已保存为草稿版本，待质量主管在方案列表「审批」启用后才参与自动匹配。`
+      );
       onSuccess();
       onClose();
     } catch (err: any) {
@@ -161,12 +219,12 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
             <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">1. 基础配置信息</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">方案编号 <span className="text-rose-500">*</span></label>
+                <label className="block text-xs font-medium text-slate-700 mb-1">方案编号</label>
                 <input
                   type="text"
-                  required
                   value={planCode}
                   onChange={(e) => setPlanCode(e.target.value)}
+                  placeholder="留空 = 系统取号 QP-YYYYMMDD-NNN"
                   className="w-full h-8 px-2.5 text-xs rounded-md border border-slate-300 focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono"
                 />
               </div>
@@ -218,8 +276,8 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
 
           {/* Section 2: AQL Sampling */}
           <div>
-            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">2. GB/T 2828 抽样方案配置</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 bg-slate-50 p-3.5 rounded-lg border border-slate-200">
+            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">2. 版本级配置：GB/T 2828 抽样方案与生效周期</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 bg-slate-50 p-3.5 rounded-lg border border-slate-200">
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1">抽样检验水准</label>
                 <select
@@ -255,6 +313,29 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
                   className="w-full h-8 px-2.5 text-xs rounded-md border border-slate-200 bg-slate-100 text-slate-500"
                 />
               </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">版本生效起始日</label>
+                <input
+                  type="date"
+                  value={effectiveStartDate}
+                  onChange={(e) => setEffectiveStartDate(e.target.value)}
+                  title="该版本从这一天起参与自动匹配；留空 = 不限制起始日"
+                  className="w-full h-8 px-2.5 text-xs rounded-md border border-slate-300 bg-white"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">版本生效截止日</label>
+                <input
+                  type="date"
+                  value={effectiveEndDate}
+                  onChange={(e) => setEffectiveEndDate(e.target.value)}
+                  title="超过这一天该版本自动退出匹配；留空 = 长期有效"
+                  className="w-full h-8 px-2.5 text-xs rounded-md border border-slate-300 bg-white"
+                />
+              </div>
+              <p className="sm:col-span-2 lg:col-span-5 text-[11px] leading-relaxed text-slate-500">
+                生效周期存于版本级 sampling_config：起始日到达后该版本才参与自动匹配，截止日过后自动退出并继续往存货分类级兜底；两项都留空 = 即刻生效、长期有效。
+              </p>
             </div>
           </div>
 
@@ -272,7 +353,7 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
               </button>
             </div>
 
-            <div className="border border-slate-200 rounded-lg overflow-hidden">
+            <div className="border border-slate-200 rounded-lg overflow-x-auto">
               <table className="w-full text-left text-xs border-collapse">
                 <thead className="bg-slate-100 text-slate-700 font-medium border-b border-slate-200">
                   <tr>
@@ -280,6 +361,7 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
                     <th className="py-2 px-3">指标名称</th>
                     <th className="py-2 px-3 w-24">类别</th>
                     <th className="py-2 px-3 w-20">数据类型</th>
+                    <th className="py-2 px-3 w-44">可接受值</th>
                     <th className="py-2 px-3 w-20">标准值</th>
                     <th className="py-2 px-3 w-20">上公差(+)</th>
                     <th className="py-2 px-3 w-20">下公差(-)</th>
@@ -308,10 +390,14 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
                           onChange={(e) => handleItemChange(idx, 'metricCategory', e.target.value)}
                           className="w-full h-7 px-1.5 text-xs border border-slate-200 rounded bg-white"
                         >
-                          <option value="DIMENSION">尺寸</option>
-                          <option value="APPEARANCE">外观</option>
-                          <option value="PERFORMANCE">性能</option>
-                          <option value="CHEMICAL">化学成分</option>
+                          <option value="DIMENSION">尺寸规格</option>
+                          <option value="APPEARANCE">外观表面</option>
+                          <option value="HARDNESS">材质硬度</option>
+                          <option value="COATING_THICKNESS">镀层膜厚</option>
+                          <option value="TENSILE_STRENGTH">抗拉强度</option>
+                          <option value="MECHANICAL_PERFORMANCE">机械性能</option>
+                          <option value="CHEMICAL_COMPOSITION">化学成分</option>
+                          <option value="TEXT_INTERVAL">文本成分区间</option>
                         </select>
                       </td>
                       <td className="py-2 px-3">
@@ -321,8 +407,20 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
                           className="w-full h-7 px-1.5 text-xs border border-slate-200 rounded bg-white"
                         >
                           <option value="NUMERIC">数值</option>
-                          <option value="BOOLEAN">定性</option>
+                          <option value="TEXT">文本</option>
+                          <option value="QUALITATIVE">定性</option>
                         </select>
+                      </td>
+                      <td className="py-2 px-3">
+                        <input
+                          type="text"
+                          value={it.acceptableValues}
+                          disabled={it.dataType === 'NUMERIC'}
+                          onChange={(e) => handleItemChange(idx, 'acceptableValues', e.target.value)}
+                          placeholder={it.dataType === 'NUMERIC' ? '数值型不适用' : '逗号分隔，如 无裂纹,合格'}
+                          title="文本/定性型指标的可接受值清单；录入页会把它变成下拉候选值，实测必须与其中之一一致"
+                          className="w-full h-7 px-2 text-xs border border-slate-200 rounded disabled:bg-slate-50 disabled:text-slate-400"
+                        />
                       </td>
                       <td className="py-2 px-3">
                         {it.dataType === 'NUMERIC' ? (
@@ -334,7 +432,13 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
                             className="w-full h-7 px-2 text-xs border border-slate-200 rounded"
                           />
                         ) : (
-                          <span className="text-slate-400 text-[11px]">—</span>
+                          <input
+                            type="text"
+                            value={it.standardText}
+                            onChange={(e) => handleItemChange(idx, 'standardText', e.target.value)}
+                            placeholder="标准语，如 无裂纹"
+                            className="w-full h-7 px-2 text-xs border border-slate-200 rounded"
+                          />
                         )}
                       </td>
                       <td className="py-2 px-3">
@@ -420,7 +524,7 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
               disabled={submitting}
               className="px-5 py-2 text-xs font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 shadow-sm"
             >
-              {submitting ? '保存中...' : '确认发布新方案'}
+              {submitting ? '保存中...' : '保存为新方案草稿'}
             </button>
           </div>
         </form>

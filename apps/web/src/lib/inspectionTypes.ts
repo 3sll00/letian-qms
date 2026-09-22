@@ -134,9 +134,26 @@ export interface DimensionItem {
   name: string; // 螺纹通止规、外径、杆长、头部厚度等
   standard: string;
   actual: string;
-  result: '合格' | '不合格';
+  /** 判定：未录入 / 未判定即空串（证书该格留白，不冒充合格） */
+  result: '合格' | '不合格' | '';
 }
 
+/**
+ * 证书抬头 / 印章用的企业档案主数据（`company_profile`，docs/35 §6）。
+ *
+ * 未维护即缺省 —— 模板按空白渲染，绝不回落模板里的硬编码抬头常量：
+ * 常量即编造，企业信息一改证书就会打印旧抬头。
+ */
+export interface CertificateCompanyProfile {
+  legalName?: string;
+  legalNameEn?: string;
+  shortName?: string;
+  address?: string;
+  originPlace?: string;
+  phone?: string;
+  email?: string;
+  qualityStamp?: string;
+}
 // 模板一：《质量保证证书》导出模型 (用于 IQC / IPQC / OQC)
 export interface QualityCertificateData {
   certNo: string; // 证书编号
@@ -171,48 +188,65 @@ export interface QualityCertificateData {
   inspector: string;
   reviewer?: string;
   approver?: string;
+  /** 企业档案主数据（证书抬头 / 印章文字 / 供货单位·产地）；未维护即缺省 */
+  companyProfile?: CertificateCompanyProfile;
+  /** 本单未录入实测值、因而证书**不打印**的分段名（docs/35 §7：仅用于弹窗非打印提示条） */
+  missingSections?: string[];
   remarks?: string;
   [key: string]: any;
 }
 
 // 模板二：《MANUFACTURING CERT》导出模型 (用于 委外检验 Outsource)
+//
+// 每个分项的 `decision` = 该分项在制造证书 Decision 列的结论（`Pass` / `Fail`）。
+// 由委外表单按「方案指标判标结果 → 该分项录入人显式选择」的顺序写入；未判定即不传，
+// 模板渲染成空白单元格 —— 证书绝不打印未经检验的合格结论（docs/34 §5.2）。
 export interface OutsourceTestResult {
   coatingThickness?: {
     standard: string; // 如 8 - 12 μm
     actual: string; // 如 9.8 μm
     points?: string[]; // 多点测量值
+    decision?: string; // Pass / Fail；未判定不传
   };
   saltSprayHours?: {
     standard: string; // 如 ≥480h 无红锈
     actual: string; // 如 720h 合格
+    decision?: string; // Pass / Fail；未判定不传
   };
   adhesion?: {
     standard: string; // 如 划格法 0级
     actual: string; // 如 0级 无脱落
+    decision?: string; // Pass / Fail；未判定不传
   };
   deEmbrittlement?: {
     standard: string; // 如 200℃±10℃, ≥4小时
     actual: string; // 如 205℃, 4.5小时
+    decision?: string; // Pass / Fail；未判定不传
   };
   surfaceHardness?: {
     standard: string; // 如 32-39 HRC
     actual: string; // 如 35.5 HRC
+    decision?: string; // Pass / Fail；未判定不传
   };
   coreHardness?: {
     standard: string; // 如 32-39 HRC
     actual: string; // 如 34.0 HRC
+    decision?: string; // Pass / Fail；未判定不传
   };
   caseDepth?: {
     standard: string; // 如 0.15-0.25 mm
     actual: string; // 如 0.19 mm
+    decision?: string; // Pass / Fail；未判定不传
   };
   torqueStrength?: {
     standard: string; // 如 ≥55 N·m
     actual: string; // 如 62 N·m
+    decision?: string; // Pass / Fail；未判定不传
   };
   tensileStrength?: {
     standard: string; // 如 ≥800 MPa
     actual: string; // 如 850 MPa
+    decision?: string; // Pass / Fail；未判定不传
   };
 }
 
@@ -244,10 +278,16 @@ export interface ManufacturingCertData {
   testResults?: OutsourceTestResult;
   tests?: any[];
   visualInspection?: 'Pass' | 'Fail' | string;
+  /** 外观行的「规范标准要求」：取本单命中的外观指标 standard，未命中即空 */
+  visualStandard?: string;
+  /** 外观行的「实测检验结果」：取表单的外观 / 螺纹实测记录，未录入即空 */
+  visualActual?: string;
   complianceStatement?: string;
   overallDecision?: string;
   inspectorName?: string;
   qaManagerName?: string;
+  /** 企业档案主数据（制造证书抬头）；未维护即缺省 */
+  companyProfile?: CertificateCompanyProfile;
   remarks?: string;
   [key: string]: any;
 }

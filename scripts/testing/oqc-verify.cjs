@@ -19,6 +19,34 @@ fs.mkdirSync(OUT_DIR, { recursive: true });
 const PORT = 9334;
 const WEB = 'http://127.0.0.1:5200/';
 const API = 'http://127.0.0.1:3100/api/v1';
+// 多会话环境下 vite dev 端口可能自增（5200 -> 5201 -> 5202），
+// 且 API 端口也可能被改动，故支持环境变量覆盖 + 自动探测，避免"跑错了实例"。
+const WEB_CANDIDATES = process.env.WEB_BASE
+  ? [process.env.WEB_BASE]
+  : ['http://127.0.0.1:5200/', 'http://127.0.0.1:5201/', 'http://127.0.0.1:5202/'];
+const API_BASE = process.env.API_BASE || API;
+
+/** 端口探测：只看 HTTP 状态码（首页返回 HTML，不能按 JSON 解析） */
+function probeHttp(url) {
+  return new Promise((resolve, reject) => {
+    const req = require('node:http').get(url, (res) => {
+      res.resume();
+      if (res.statusCode && res.statusCode >= 200 && res.statusCode < 400) resolve(res.statusCode);
+      else reject(new Error('status ' + res.statusCode));
+    });
+    req.on('error', reject);
+    req.setTimeout(3000, () => req.destroy(new Error('timeout')));
+  });
+}
+async function resolveWebBase() {
+  for (const base of WEB_CANDIDATES) {
+    try {
+      const res = await probeHttp(new URL('/', base).href);
+      if (res) return base;
+    } catch { /* 试下一个 */ }
+  }
+  throw new Error(`前端未监听，候选地址均不可用: ${WEB_CANDIDATES.join(', ')}`);
+}
 const LOG = path.join(OUT_DIR, 'oqc-verify.log');
 fs.writeFileSync(LOG, '');
 const log = (...a) => {
@@ -140,7 +168,9 @@ const check = (name, ok, detail) => {
     log('SHOT:', file);
   };
 
-  await cdp.send('Page.navigate', { url: WEB });
+  const webBase = await resolveWebBase();
+  log('web base:', webBase);
+  await cdp.send('Page.navigate', { url: webBase });
   await sleep(7000);
 
   const entered = await evalJs(cdp, `(() => {
@@ -182,8 +212,8 @@ const check = (name, ok, detail) => {
   check('列表存在数据行', probe.rowCount > 0, probe.rowCount);
 
   // ---- 与接口逐行对账：证明列值来自库字段，而不是前端推导或编造 ----
-  const login = await httpJsonWith(`${API}/auth/login`, '', { userId: '11000000-0000-4000-8000-000000000001' });
-  const apiList = await httpJsonWith(`${API}/inspections?type=OQC_SH&pageSize=50&page=1`, login.token);
+  const login = await httpJsonWith(`${API_BASE}/auth/login`, '', { userId: '11000000-0000-4000-8000-000000000001' });
+  const apiList = await httpJsonWith(`${API_BASE}/inspections?type=OQC_SH&pageSize=50&page=1`, login.token);
   const apiRows = Array.isArray(apiList.list) ? apiList.list : [];
   log('api total:', apiList.total, 'rows:', apiRows.length);
 

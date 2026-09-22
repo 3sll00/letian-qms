@@ -1,0 +1,185 @@
+# 乐天质量管理系统 (Letian QMS) - MRB 不合格品处置页整合设计
+
+> **版本**：v1.0.0 ｜ **更新日期**：2026-09-21 ｜ **状态**：已定稿并实施
+> **原型基准**：`docs/prototypes/WPS图片(13).png`（MRB不合格品处置）、`docs/prototypes/WPS图片(14).png`（评审流程设置）
+> **关联文档**：[01-PRD.md](./01-PRD.md) §3.6 ｜ [04-API与导入规范.md](./04-API与导入规范.md) §3.5 ｜ [09-界面与开源组件.md](./09-界面与开源组件.md) §2.5 ｜ [17-检验录入界面说明与质检方案匹配口径.md](./17-检验录入界面说明与质检方案匹配口径.md) §5
+
+---
+
+## 1. 变更动因（为什么要整合）
+
+1. **客户确认基线只有两项**：`docs/requirements/doc_dump.txt` §3.7 与 21 项功能确认清单第 10、11 项，不合格品处置模块只承认 **MRB处置列表** 与 **评审流程设置**（原型 WPS图片(13)/(14)）。
+2. **原实现是三项并列**：侧边栏「不合格品处置」下为 `不合格待审核池` / `MRB评审工单` / `评审流程设置`，菜单口径与客户基线不一致。
+3. **原「MRB评审工单」页存在真实缺陷**：
+   - 会签提交打 `POST /mrb/records/{id}/signatures`——后端**不存在**该路由（仅 MSW mock 有），真机必然 404；
+   - 页面**没有处置结论提交入口**，退货/返工/特采/报废四类决策无处落地；
+   - 深色皮肤遗留自 initial commit，与全站浅色（WPS 原型）不一致；页内还内嵌了与侧边栏重复的「MRB 评审流程设置」子页签。
+4. **整合结论**：两页合并为单页 **「MRB不合格品处置」**；待审核池降级为页内抽屉；评审流程设置保留独立菜单。
+
+---
+
+## 2. 信息架构（菜单口径）
+
+| 分组 | 菜单项 | 导航键 | 承载组件 | 说明 |
+| :--- | :--- | :--- | :--- | :--- |
+| 不合格品处置 | **MRB不合格品处置** | `mrb` | `apps/web/src/pages/mrb/index.tsx` | 新的整合单页（KPI + 筛选 + 4 状态页签 + 处置列表 + 两个抽屉） |
+| 不合格品处置 | 评审流程设置 | `review-workflow` | `apps/web/src/pages/mrb/ReviewWorkflowView.tsx` | 保持不变（独立菜单，页面内不再重复内嵌） |
+
+- **删除**：`不合格待审核池`（键 `mrb-pending`）独立菜单项；`MRB评审工单` 旧菜单名。
+- **角标口径**：`mrb` 菜单角标 = **待评审数**（`GET /mrb/records` 返回的 `pendingCount`）。
+- **面包屑**：`不合格品处置 / MRB不合格品处置`（与原型一致）。
+
+---
+
+## 3. 页面结构（自上而下，对齐 WPS图片(13)）
+
+1. **页头**：标题「MRB不合格品处置」+ 副标题「不合格品评审与处置 · 支持多级评审流程」；右侧 `导出报表` 与主按钮 `+ 发起评审`。
+2. **5 张 KPI 卡**：待评审 / 评审中 / 已评审 / 已处置 / 本月评审率。
+3. **筛选栏**：MRB单号、来源检验单、评审状态、处置方式、日期 + `重置` / `查询`。
+4. **4 个状态页签**：待评审 / 评审中 / 已评审 / 已处置（默认选中「待评审」，与 `WPS图片(13)` 一致；跨状态检索用筛选栏「评审状态 = 全部」）。
+5. **处置列表（主表格，10 列）**：MRB单号、来源检验单、物料编码、物料名称、不合格原因、不合格数量、检验人、发现日期、评审状态、操作。
+6. **分页**：沿用 `page` / `pageSize`，默认 20 条/页。
+
+---
+
+## 4. 状态与 KPI 口径（定稿）
+
+### 4.1 页签 → 状态谓词
+
+| 页签 | 状态谓词 | 说明 |
+| :--- | :--- | :--- |
+| 待评审 | `status = PENDING_REVIEW` | 已发起、尚未开始会签 |
+| 评审中 | `status = UNDER_REVIEW` | 会签流转中 |
+| 已评审 | `status IN (DISPOSED, REJECTED)` | 已有评审结论（含驳回终止） |
+| 已处置 | `status = DISPOSED` | 处置结论已落库，闭环终态 |
+
+> **口径说明（重要）**：「已评审」与「已处置」为**包含关系**（已处置是已评审的子集），与后端既有统计口径一致，见 `packages/infrastructure/src/repositories/mrb-review-repository.ts` 中的 `totalReviewedCount`。本期**不改状态机、不加数据库迁移**；若客户后续要求两者严格互斥，则需新增 `REVIEWED` 状态并落地迁移（见 §10）。
+
+### 4.2 KPI 定义
+
+| KPI | 取值 | 来源 |
+| :--- | :--- | :--- |
+| 待评审 | `pendingCount` | 库内 `status = PENDING_REVIEW` 计数 |
+| 评审中 | `underReviewCount` | 库内 `status = UNDER_REVIEW` 计数 |
+| 已评审 | `totalReviewedCount` | 评审中 + 已处置 + 已驳回（累计已评审） |
+| 已处置 | `disposedCount` | 库内 `status = DISPOSED` 计数 |
+| 本月评审率 | `monthlyReviewRate` | 本月 `DISPOSED` ÷ 本月发起总数 × 100% |
+
+> KPI 全部由服务端在**当前用户 PBAC 过滤之后**计算，页面不得自行用当页数据推算（否则分页下必然失真）。
+
+---
+
+## 5. 字段映射（页面列 → 数据来源）
+
+| 表格列 | 字段 | 来源 |
+| :--- | :--- | :--- |
+| MRB单号 | `mrbNo` | `mrb_reviews.mrb_no` |
+| 来源检验单 | `sourceOrderNo` | `mrb_reviews.source_order_no` |
+| 物料编码 | `materialCode` | `mrb_reviews.material_code` |
+| 物料名称 | `materialName` | `mrb_reviews.material_name` |
+| 不合格原因 | `defectDescription` | `mrb_reviews.defect_description`（胶囊展示；表头用词对齐 `WPS图片(13)`） |
+| 不合格数量 | `defectQty` | `mrb_reviews.defect_qty` |
+| 检验人 | `inspectorName` | **联表派生**：`inspection_orders.inspector_name`（按 `source_order_no = order_no`），本期不加列、不落快照 |
+| 发现日期 | `createdAt` | `mrb_reviews.created_at` |
+| 评审状态 | `status` | `mrb_reviews.status` |
+| 操作 | — | `评审` 打开评审处置抽屉 |
+
+---
+
+## 6. 接口清单
+
+### 6.1 本次新增/扩展
+
+- `GET /api/v1/mrb/records`（**扩展查询参数**，契约仍以控制器 Zod 为准）
+  - 新增：`mrbNo`（模糊）、`sourceOrderNo`（模糊）、`disposition`（等值）、`dateFrom` / `dateTo`（`created_at` 区间，`YYYY-MM-DD`）
+  - 既有：`categoryTab`、`status`、`page`、`pageSize`
+  - 返回：`items` / `list` / `total` + 5 项 KPI（`pendingCount`、`underReviewCount`、`totalReviewedCount`、`disposedCount`、`monthlyReviewRate`）
+  - 新增返回字段：`inspectorName`（联表派生）
+
+### 6.2 沿用（不改造）
+
+| 接口 | 用途 |
+| :--- | :--- |
+| `GET /api/v1/mrb/pending-pool` | 发起评审抽屉：待审不合格记录清单 |
+| `POST /api/v1/mrb/pending-pool/initiate` | 发起评审抽屉：逐条发起独立 MRB 工单 |
+| `GET /api/v1/review-flows` | 发起评审抽屉：评审流程定义选择（**替换原 404 的 `GET /mrb/flows`**） |
+| `POST /api/v1/mrb/records/{id}/reviews` | 评审处置抽屉：节点会签提交（**替换原 404 的 `/signatures`**） |
+| `POST /api/v1/mrb/records/{id}/disposition` | 评审处置抽屉：处置结论提交（退货/返工/特采/报废，特采强制客户签核凭证） |
+
+---
+
+## 7. 交互定义
+
+1. **+ 发起评审** → 右侧抽屉「不合格待审核池」：待审清单（检验单号/环节、物料、炉批号、不合格数/抽样数、不良率、超差原因、池状态、发现时间）+ 高级筛选；行内 `发起评审` 打开「选用流程 + 紧急程度 + 发起说明」弹窗；发起成功后刷新主列表、提示 MRB 单号与池状态变为「已入评审」。
+2. **行内 评审** → 右侧抽屉「评审与处置」：单据概览（批次/影响数量/处置决策/发起时间）、不合格缺陷描述、四方签核进展（质量/工程/生产/管理，读 `approvers` 真实签署记录）、电子签核表单、处置结论提交表单（特采必须填写客户签核凭证路径，否则后端按 `MRB_CONCESSION_REQUIRES_CUSTOMER_APPROVAL` 拒绝）。
+3. **导出报表** → 导出当前查询条件下的处置列表（CSV / Excel），实现方式复用 `apps/web/src/pages/dashboard/history.tsx` 的 `toCsv` / `toExcelHtml` / `downloadFile`。
+4. **浅色主题**：整页使用白底卡片 + `border-slate-200` + 主色 `#2563EB`；状态胶囊配色：待评审 amber、评审中 blue、已评审 purple、已处置 emerald、评审率 rose。
+
+---
+
+## 8. 代码落点
+
+| 文件 | 动作 |
+| :--- | :--- |
+| `apps/web/src/pages/mrb/index.tsx` | 重写为浅色整合单页（页头 + KPI + 筛选 + 4 页签 + 表格 + 分页 + 两个抽屉挂载） |
+| `apps/web/src/pages/mrb/InitiateReviewDrawer.tsx` | **新增**：待审核池抽屉（由原 `PendingMRBPoolPage.tsx` 迁入） |
+| `apps/web/src/pages/mrb/ReviewDispositionDrawer.tsx` | **新增**：评审与处置抽屉（由原 `index.tsx` 深色工作台迁入并浅色化，修正会签接口、补处置提交） |
+| `apps/web/src/pages/mrb/PendingMRBPoolPage.tsx` | **删除**（能力已迁入抽屉，避免死文件） |
+| `apps/web/src/pages/mrb/ReviewWorkflowView.tsx` | 保持不变 |
+| `apps/web/src/components/AppLayout.tsx` | 删除两个菜单项与 `NavItemKey` 成员；角标改为 `pendingCount` |
+| `apps/web/src/App.tsx` | 删除 `mrb-pending` 分支；`mrb` 指向整合单页；`review-workflow` 直接渲染 `ReviewWorkflowView` |
+| `apps/api/src/controllers/mrb.controller.ts` | `MRBQuerySchema` 扩展查询参数并透传 |
+| `packages/infrastructure/src/repositories/mrb-review-repository.ts` | `listMrbReviews` 增加筛选条件 + 联表带出 `inspectorName` |
+| `packages/contracts/src/schemas/mrb.ts` | `MRBReviewSchema` 增加可选 `inspectorName` |
+| `apps/web/src/mocks/{handlers,data}.ts` | 同步新查询参数与 `inspectorName`，保持 MSW Zod 校验通过 |
+| `docs/api/letian-qms-openapi.yaml` | 同步 `/mrb/records` 查询参数与 `MRBRecord.inspectorName` |
+
+---
+
+## 9. 验证与验收
+
+### 9.1 已执行（2026-09-21）
+
+| 检查项 | 命令 | 结果 |
+| :--- | :--- | :--- |
+| 全仓类型检查 | `pnpm -r --no-bail run typecheck` | 7/7 包通过 |
+| 前端生产构建 | `pnpm --filter @letian/web run build` | 通过（`tsc` + `vite build`） |
+| Mock 数据契约校验 | `pnpm --filter @letian/web run validate:mocks` | 13 组数据集全部通过（含新增 `PendingDefectItem` / `ReviewFlow`） |
+| 源码审计（不新增 `any` / `@ts-ignore`） | `node scripts/testing/audit_check.js` | 通过（`any` 167 / 预算 177） |
+| 页面级走查（离线 Mock） | `node scripts/testing/mrb-verify.cjs`（`pnpm run verify:mrb`） | 15/15 断言通过（第四轮扩充至 **23/23**，见 `docs/21` §11）；截图 `scripts/logs/mrb-*.png` |
+
+### 9.2 走查断言（15 项）
+
+1. 页头标题「MRB不合格品处置」+ 副标题「不合格品评审与处置 · 支持多级评审流程」；
+2. 十列表头与 `WPS图片(13)` 逐字一致（第 5 列为**不合格原因**）；
+3. 页签行 = 待评审 / 评审中 / 已评审 / 已处置（不渲染「全部」），且**默认选中「待评审」**；
+4. 5 张 KPI 卡齐全，取值来自 `GET /mrb/records`（Mock 层实算：待评审 0 / 评审中 2 / 已评审 3 / 已处置 1 / 本月评审率 33.33%）；
+5. 「待评审」页签空态、切「评审中」取到 2 条记录、`检验人` 列由 `sourceOrderNo` 派生（李伟 / 刘芳，非占位值）；
+6. 浅色主题：MRB 页面子树内不存在深色（亮度 < 140 且不透明）容器；
+7. 「+ 发起评审」抽屉取到待审核池 3 条（IQC / IPQC / OQC），环节筛选含 IQC/IPQC/FQC/OQC；
+8. 行内「评审」抽屉渲染四方会签席位、电子签核与处置结论表单。
+
+### 9.3 未在本环境执行
+
+- `pnpm --filter @letian/api run test`（集成测试依赖 `pnpm db:up` 启动的 PostgreSQL 与迁移/种子数据）。接口层改动以 `MRBQuerySchema` 参数校验、控制器透传、仓储读侧投影与 13 组契约校验作为替代证据；正式联调前需补跑一次。
+- 发起评审 → 会签 → 处置的**写库闭环**走查（同上依赖数据库）。离线 Mock 已覆盖三个写接口的请求体、状态流转（`PENDING_REVIEW → UNDER_REVIEW / REJECTED → DISPOSED`）与特采客户凭证校验分支。
+
+---
+
+## 10. 未纳入本次范围（后续可选项）
+
+1. 「已评审 / 已处置」严格互斥口径：需新增 `REVIEWED` 状态 + 数据库迁移 + 状态机与用例改造。
+2. `mrb_reviews.inspector_name` 快照列：当前采用联表派生，若客户要求「快照即证据」可加迁移与发起时写入。
+3. 超时催办（>24h 未决策红标告警）在前端列表的可视化标识。
+
+---
+
+## 11. 变更记录
+
+| 日期 | 版本 | 变更内容 |
+| :--- | :--- | :--- |
+| 2026-09-21 | v1.0.0 | 首次定稿：待审核池 + MRB 评审工单合并为「MRB不合格品处置」单页，浅色化，口径对齐 WPS图片(13)；修正会签接口 404 并补齐处置提交入口。 |
+| 2026-09-21 | v1.0.1 | 联动 `21-MRB不合格品处置数据字段与接口打通设计.md`：本页的字段链路已按该文档完成数据库迁移 `015`、契约、端口/仓储与 API 打通（池 6 列 + MRB 6 列、特采凭证强制校验、处置返回裸 `MRBRecord`）；本页仅描述界面口径与交互，字段落库口径以 21 号文档为准。 |
+| 2026-09-21 | v1.0.2 | 联动 `21` 号文档 §9 遗留闭环：①「发起评审」抽屉读的待审核池接口改为**行级权限随查询下推 SQL**（分类维度经 `materials.category_code` 换算、供应商维度 fail-closed），`total` 与页内条数同口径，不再有 500 条扫描上限；② 迁移 `018` 把池表 `source_order_id` 收紧为 `UUID` + 级联外键，源检验单删除后池条目不再残留（抽屉里不会出现点「发起评审」必 404 的死条目）；③ 池接口 `status` 只接受三态，旧词表直接 `400`。**页面与交互口径无变更**。 |
+| 2026-09-21 | v1.0.3 | 联动 `21` 号文档 §10，闭环并列菜单**「评审流程设置」子页**（`mrb-workflow`，与本页共用 `review_flows` / `GET /review-flows`）的三处断链：① **流程说明**恒空 —— 契约与物理表都没有 `description`，用户提交的说明被 Zod 静默剥离，迁移 `019` 新增 `review_flows.description` 并打通契约/仓储/种子；② 节点「顺序 / 授权签署角色 / 是否必签 / 特采审批权」四列恒空或恒否 —— 前端自建 `nodeSeq/roleName/isRequired/allowConcession` 与契约 `nodeLevel/roleCode` 及库内 JSONB 对不上，节点字段统一收敛到契约 `nodeLevel` + `roleName`（缺省回退 `roleCode`）/ `isRequired`（默认 `true`）/ `allowConcession`（仅终审层级 `true`），并删除只在接口异常时生效、正好掩盖不一致的写死 `defaults`；③ **启停假成功** —— 前端打 `POST /review-flows/{id}/toggle` 恒 404，被 `catch` 本地翻转后弹「已更新」，现收敛到唯一路径 `POST /review-flows/{id}/toggle-active` 并删除假成功兜底，失败必须可见。**【MRB不合格品处置】主页面的页面与交互口径仍无变更**。 |
+| 2026-09-22 | v1.0.4 | 联动 `21` 号文档 §11，闭环「返工处置回吐复检单号」：本页「评审与处置」抽屉提交 `REWORK` 后，**新增绿色成功横幅**「返工处置已生效，系统已生成下一轮复检单：{单号}」（取自处置响应新契约 `DisposeMRBResponse` 的 `reinspectionOrderNo`，此前调用方只能按 `batchNo` 反查、复检单未提交时恒为空）；横幅只在**切换单据**时清空，处置成功回填状态时不会被擦掉。离线 Mock 同步复刻后端「生成 `{原单号}-R{n}` 复检单 + 源单翻 `RE_INSPECTING`」的事务行为，**离线演示与真实环境单数一致**。页面列集、页签与 KPI 口径无变更。 |

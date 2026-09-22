@@ -90,6 +90,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       await v1.register(traceController, { prefix: '/trace', container });
       // 批次全链路双向追溯（对齐前端调用路径 /api/v1/traceability/graph/:batchNo）
       await v1.register(traceController, { prefix: '/traceability/graph', container });
+      // 质量追溯看板：批次检索（/traceability/batches）与订单检验环节（/traceability/orders/:orderNo）
+      await v1.register(traceController, { prefix: '/traceability', container });
 
       // 质检方案库
       await v1.register(plansController, { prefix: '/plans', container });

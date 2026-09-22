@@ -1,11 +1,13 @@
 import type { FastifyRequest } from 'fastify';
+import { ErrorCode } from '@letian/contracts';
 import type { MaterialPermission } from '@letian/contracts';
 import {
+  ForbiddenError,
   SecurityContextFactory,
   type ISecurityContext,
 } from '@letian/application';
 import type { ApiContainer } from '../container';
-import { operatorOf } from './operator';
+import { operatorOf, type OperatorIdentity } from './operator';
 
 /**
  * 权限接线公共工具：
@@ -170,4 +172,43 @@ export function logAuthorization(
     ...(operator.role !== 'SYSTEM' ? { roleCode: operator.role } : {}),
     ...input,
   });
+}
+
+/** 可执行「方案版本启停（审批）」的角色：质量主管与系统管理员 */
+const PLAN_APPROVER_ROLES: ReadonlySet<string> = new Set(['QA_MANAGER', 'ADMIN', 'SYSTEM']);
+
+/**
+ * 方案版本启停的角色门禁：仅质量主管 / 系统管理员可启用或停用质检方案版本，其余角色 403。
+ *
+ * 这里按**角色**判定而不是复用 `requirePermission`：登录签发的 JWT 只带 `role`、
+ * 不带 `permissions`（见 controllers/auth.controller.ts），用权限位判定会让真实登录一律 403；
+ * 而方案启停是「配置变更」类动作，PRD 归于质量主管职责，角色判定即是业务口径。
+ */
+export function assertPlanApprover(operator: OperatorIdentity): void {
+  if (PLAN_APPROVER_ROLES.has(operator.role)) {
+    return;
+  }
+  throw new ForbiddenError(
+    `权限不足：仅质量主管可启用 / 停用质检方案版本，当前角色 [${operator.role}]`,
+    ErrorCode.FORBIDDEN
+  );
+}
+
+/** 可执行「质量负责人签核」的角色：质量主管与系统管理员（与方案审批同一角色口径） */
+const QUALITY_APPROVER_ROLES: ReadonlySet<string> = new Set(['QA_MANAGER', 'ADMIN', 'SYSTEM']);
+
+/**
+ * 质量负责人签核的角色门禁（docs/35 §5）：仅质量主管 / 系统管理员可签核，其余角色 403。
+ *
+ * 与 `assertPlanApprover` 同一判定方式（按角色，不用权限位）：登录签发的 JWT 只带 `role`，
+ * 用权限位判定会让真实登录一律 403；签核是「对外证书签发」动作，PRD 归于质量主管职责。
+ */
+export function assertQualityApprover(operator: OperatorIdentity): void {
+  if (QUALITY_APPROVER_ROLES.has(operator.role)) {
+    return;
+  }
+  throw new ForbiddenError(
+    `权限不足：仅质量主管可执行质量负责人签核，当前角色 [${operator.role}]`,
+    ErrorCode.FORBIDDEN
+  );
 }

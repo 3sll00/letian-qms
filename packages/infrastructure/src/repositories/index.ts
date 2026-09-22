@@ -3,6 +3,7 @@ export * from './master-data-repository.js';
 export * from './inspection-plan-repository.js';
 export * from './inspection-order-repository.js';
 export * from './mrb-review-repository.js';
+export * from './pending-defect-pool-repository.js';
 export * from './review-flow-repository.js';
 export * from './batch-trace-repository.js';
 export * from './audit-log-repository.js';

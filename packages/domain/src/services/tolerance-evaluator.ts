@@ -9,11 +9,12 @@ import { InspectionItem, InspectionItemDecision } from '@letian/contracts';
  * 2. 结果必为四态：'PASSED' | 'FAILED' | 'PENDING' | 'EXEMPT'；
  * 3. 数值型指标：必须同时具备 nominalValue、measuredVal 以及公差带（upperTolerance/lowerTolerance）；
  *    超出 [nominalValue - lowerTolerance, nominalValue + upperTolerance] 范围判为 FAILED，在区间内判为 PASSED；
- * 4. 文本/定性型指标：必须录入 measuredText 并与 standardText 比对，缺失或不匹配严禁默认放行；
+ * 4. 文本/定性型指标：必须录入 measuredText 并与「可接受值清单 acceptableValues」比对；
+ *    清单为空时回落到 standardText 按 [,，/|] 拆分出的候选值；两者都拿不到一律 PENDING，缺失或不匹配严禁默认放行；
  * 5. 无法匹配或实测数据未录入时，必须明确返回 'PENDING'，严禁静默返回 'PASSED'。
  */
 export function evaluateInspectionItem(item: Pick<InspectionItem, 
-  'dataType' | 'measuredVal' | 'measuredText' | 'nominalValue' | 'upperTolerance' | 'lowerTolerance' | 'standardText' | 'isExempt'
+  'dataType' | 'measuredVal' | 'measuredText' | 'nominalValue' | 'upperTolerance' | 'lowerTolerance' | 'standardText' | 'acceptableValues' | 'isExempt'
 >): InspectionItemDecision {
   // 1. 过程检验“不解检”/免检判定优先拦截
   if (item.isExempt) {
@@ -53,16 +54,26 @@ export function evaluateInspectionItem(item: Pick<InspectionItem,
       return 'PENDING';
     }
 
+    // 标准化文本匹配（去除首尾空白并忽略大小写对比）
+    const normalizedMeasured = measuredText.trim().toLowerCase();
+
+    // 判定基准优先级（TBD-06）：
+    //   1) 方案侧结构化配置的 acceptableValues 清单（唯一权威，不做分隔符猜测）
+    //   2) 回落标准语 standardText 按 [,，/|] 拆分（历史方案沿用文本约定，行为不变）
+    //   3) 两者都拿不到 → PENDING，严禁无标准放行
+    const configuredOptions = (item.acceptableValues ?? [])
+      .map(value => value.trim().toLowerCase())
+      .filter(value => value !== '');
+
+    if (configuredOptions.length > 0) {
+      return configuredOptions.includes(normalizedMeasured) ? 'PASSED' : 'FAILED';
+    }
+
     if (!standardText || standardText.trim() === '') {
       return 'PENDING'; // 缺少标准判定语，挂起待确认
     }
 
-    // 标准化文本匹配（去除首尾空白并忽略大小写对比）
-    const normalizedMeasured = measuredText.trim().toLowerCase();
-    const normalizedStandard = standardText.trim().toLowerCase();
-
-    // 支持多选标准值匹配（如标准语中允许逗号分隔 "合格,OK,Pass"）
-    const standardOptions = normalizedStandard.split(/[,，/|]/).map(s => s.trim());
+    const standardOptions = standardText.trim().toLowerCase().split(/[,，/|]/).map(s => s.trim());
 
     if (standardOptions.includes(normalizedMeasured)) {
       return 'PASSED';

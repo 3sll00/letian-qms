@@ -13,6 +13,8 @@ import {
 } from 'lucide-react';
 import { CertificatePrintModal } from '../../../components/certificate/CertificatePrintModal';
 import { QualityCertificateData } from '../../../lib/inspectionTypes';
+import { buildOqcCertificateData } from '../../../lib/certificateDataService';
+import { loadCompanyProfile } from '../../../lib/companyProfile';
 import { api } from '../../../lib/api';
 
 export interface OqcItem {
@@ -22,7 +24,7 @@ export interface OqcItem {
   dispatchDate: string; // 出库日期, 如 '2026-07-06'
   customer: string; // 客户, 如 '客户A科技'
   orderNo: string; // 订单号, 如 'PO-A-001'
-  productCode: string; // 成品编码, 如 'CP-001'
+  productCode: string; // 成品编码, 如 'MAT-BLT-88-M10'
   productName: string; // 成品名称, 如 '六角螺栓M10'
   qty: number; // 数量, 如 5000
   erpStatus: '待审核' | '已审核' | '已拦截' | '-'; // ERP状态（缺失显示 '-'，不由检验结论反推）
@@ -31,6 +33,18 @@ export interface OqcItem {
   actionText?: '检验' | '继续' | '详情';
   spec?: string;
   batchNo?: string;
+  /** 物料编码（接口 materialCode）：证书与方案匹配的真实来源 */
+  materialCode?: string;
+  /** 材质牌号（接口 steelGrade）：无来源即空，证书留白 */
+  steelGrade?: string;
+  /** 炉号（接口 furnaceHeatNo）：证书「炉号」列的真实来源 */
+  heatNo?: string;
+  /** 工单实测项（inspection_orders.items）：证书「化学成分 / 力学性能 / 尺寸」三段的唯一真实来源 */
+  items?: any[];
+  /** 质量负责人签核人姓名（inspection_orders.approver_name，docs/35 §5）：未签核即空 */
+  approverName?: string;
+  /** 签核时间（inspection_orders.approved_at） */
+  approvedAt?: string;
   rawStatus?: string;
   judgment?: string | null;
 }
@@ -155,8 +169,16 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
             // 其余状态展示库中真实姓名，缺失时同样以 '-' 兜底，绝不用占位人名冒充
             inspectorName: statusText === '待检验' ? '-' : item.inspectorName || '-',
             actionText,
-            spec: item.materialSpec || '',
+            // 规格型号取契约真实列（specification / spec）：历史实现读 `materialSpec`，库里没有该列，
+            // 于是「规格型号」在台账与证书上恒为空 —— 属字段名错位，不是数据缺失
+            spec: item.specification || item.spec || item.materialSpec || '',
             batchNo: item.batchNo,
+            materialCode: item.materialCode || '',
+            steelGrade: item.steelGrade || '',
+            heatNo: item.furnaceHeatNo || '',
+            items: Array.isArray(item.items) ? item.items : undefined,
+            approverName: item.approverName || '',
+            approvedAt: item.approvedAt || '',
             rawStatus: item.status,
             judgment: item.overallDecision,
           };
@@ -250,6 +272,42 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
       status: item.status,
       isReadOnly: item.status === '已合格' || item.status === '不合格',
     });
+  };
+
+  /**
+   * 行级证书（docs/35 §10 M9）：按本行真实数据组装，未录入的项留白。
+   * 键名口径由 certificateDataService 单点维护；企业档案（抬头 / 印章 / 供货单位·产地）取主数据，
+   * 未维护即留白（不回落硬编码抬头）。
+   */
+  const handleOpenCert = (item: OqcItem) => {
+    void (async () => {
+      const companyProfile = await loadCompanyProfile();
+      setCertData(
+        buildOqcCertificateData({
+          orderNo: item.docNo,
+          customer: item.customer,
+          contractNo: item.orderNo,
+          deliveryNo: item.salesOrderNo,
+          productName: item.productName,
+          spec: item.spec,
+          steelGrade: item.steelGrade,
+          heatNo: item.heatNo,
+          batchNo: item.batchNo,
+          quantity: item.qty,
+          // 检验人必须是真实承担人，未录入时留空，绝不用示例姓名代替（证书为对外交付物）
+          inspector: item.inspectorName !== '-' ? item.inspectorName : '',
+          ...(item.approverName !== undefined && item.approverName !== '' ? { approverName: item.approverName } : {}),
+          ...(item.judgment === 'PASSED'
+            ? { judgment: 'PASSED' }
+            : item.judgment === 'FAILED'
+            ? { judgment: 'FAILED' }
+            : {}),
+          items: item.items,
+          ...(companyProfile !== null ? { companyProfile } : {}),
+        })
+      );
+      setCertModalOpen(true);
+    })();
   };
 
   return (
@@ -532,6 +590,17 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
                           详情
                         </button>
                       )}
+                      {/* 行级证书入口：所有行可点，数据缺失由证书留白体现（不用「按钮消失」表达，docs/35 §10） */}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleOpenCert(item);
+                        }}
+                        title="按本行数据导出证书（未录入的项留白）"
+                        className="text-[#2B5AED] hover:text-blue-700 text-[13px] hover:underline ml-3"
+                      >
+                        证书
+                      </button>
                     </td>
                   </tr>
                 );

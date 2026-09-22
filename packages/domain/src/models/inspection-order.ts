@@ -37,9 +37,9 @@ export class InspectionOrder {
   // 检验人快照（姓名冗余自员工主数据，台账/证书直接展示；写入方为实际承担检验的操作人）
   private inspectorId?: string | undefined;
   private inspectorName?: string | undefined;
-  // 006 来料检验 (IQC) 采购入库与规格对账字段
-  private receiptNo?: string | undefined;
-  private receiptDate?: string | undefined;
+  // 006 来料检验 (IQC) 入库单号 / 入库日期 / 规格型号对账字段
+  private inboundNo?: string | undefined;
+  private inboundDate?: string | undefined;
   private specification?: string | undefined;
   private unit?: string | undefined;
   // 008 出货检验 (OQC_SH) 销售出库台账字段
@@ -52,6 +52,19 @@ export class InspectionOrder {
   private processType?: string | undefined;
   private returnDate?: string | undefined;
   private vendorName?: string | undefined;
+  // 007 过程检验 (IPQC: 下料检验/滚丝检验/成品检) 工序追溯字段
+  private workOrderNo?: string | undefined;
+  private blankingLength?: number | undefined;
+  private operatorName?: string | undefined;
+  private operatorId?: string | undefined;
+  private equipmentCode?: string | undefined;
+  private equipmentName?: string | undefined;
+  private threadSpec?: string | undefined;
+  private inspectionTeam?: string | undefined;
+  private processStep?: string | undefined;
+  // 报检批量（物理列 total_qty，过程检验台账「数量」列）；与 batchQty 语义一致但允许缺省，
+  // 缺省时不落库、不推导 —— 避免用 sampleQty 顶替批量数造成假值（见 docs/29 §2 第 5 列）
+  private totalQty?: number | undefined;
   private overallDecision?: OverallDecision | undefined;
   private planSnapshot?: PlanSnapshotDTO | undefined;
   private items: InspectionItemDTO[];
@@ -80,8 +93,8 @@ export class InspectionOrder {
     customerName?: string | undefined;
     inspectorId?: string | undefined;
     inspectorName?: string | undefined;
-    receiptNo?: string | undefined;
-    receiptDate?: string | undefined;
+    inboundNo?: string | undefined;
+    inboundDate?: string | undefined;
     specification?: string | undefined;
     unit?: string | undefined;
     salesOrderNo?: string | undefined;
@@ -92,6 +105,16 @@ export class InspectionOrder {
     processType?: string | undefined;
     returnDate?: string | undefined;
     vendorName?: string | undefined;
+    workOrderNo?: string | undefined;
+    blankingLength?: number | undefined;
+    operatorName?: string | undefined;
+    operatorId?: string | undefined;
+    equipmentCode?: string | undefined;
+    equipmentName?: string | undefined;
+    threadSpec?: string | undefined;
+    inspectionTeam?: string | undefined;
+    processStep?: string | undefined;
+    totalQty?: number | undefined;
     overallDecision?: OverallDecision | undefined;
     planSnapshot?: PlanSnapshotDTO | undefined;
     items?: InspectionItemDTO[] | undefined;
@@ -119,8 +142,8 @@ export class InspectionOrder {
     this.customerName = params.customerName;
     this.inspectorId = params.inspectorId;
     this.inspectorName = params.inspectorName;
-    this.receiptNo = params.receiptNo;
-    this.receiptDate = params.receiptDate;
+    this.inboundNo = params.inboundNo;
+    this.inboundDate = params.inboundDate;
     this.specification = params.specification;
     this.unit = params.unit;
     this.salesOrderNo = params.salesOrderNo;
@@ -131,6 +154,16 @@ export class InspectionOrder {
     this.processType = params.processType;
     this.returnDate = params.returnDate;
     this.vendorName = params.vendorName;
+    this.workOrderNo = params.workOrderNo;
+    this.blankingLength = params.blankingLength;
+    this.operatorName = params.operatorName;
+    this.operatorId = params.operatorId;
+    this.equipmentCode = params.equipmentCode;
+    this.equipmentName = params.equipmentName;
+    this.threadSpec = params.threadSpec;
+    this.inspectionTeam = params.inspectionTeam;
+    this.processStep = params.processStep;
+    this.totalQty = params.totalQty;
     this.overallDecision = params.overallDecision;
     this.planSnapshot = params.planSnapshot ? JSON.parse(JSON.stringify(params.planSnapshot)) : undefined;
     this.items = params.items ? JSON.parse(JSON.stringify(params.items)) : [];
@@ -226,12 +259,12 @@ export class InspectionOrder {
     return this.inspectorName;
   }
 
-  public getReceiptNo(): string | undefined {
-    return this.receiptNo;
+  public getInboundNo(): string | undefined {
+    return this.inboundNo;
   }
 
-  public getReceiptDate(): string | undefined {
-    return this.receiptDate;
+  public getInboundDate(): string | undefined {
+    return this.inboundDate;
   }
 
   public getSpecification(): string | undefined {
@@ -272,6 +305,50 @@ export class InspectionOrder {
 
   public getVendorName(): string | undefined {
     return this.vendorName;
+  }
+
+  public getWorkOrderNo(): string | undefined {
+    return this.workOrderNo;
+  }
+
+  public getBlankingLength(): number | undefined {
+    return this.blankingLength;
+  }
+
+  public getOperatorName(): string | undefined {
+    return this.operatorName;
+  }
+
+  public getOperatorId(): string | undefined {
+    return this.operatorId;
+  }
+
+  public getEquipmentCode(): string | undefined {
+    return this.equipmentCode;
+  }
+
+  public getEquipmentName(): string | undefined {
+    return this.equipmentName;
+  }
+
+  public getThreadSpec(): string | undefined {
+    return this.threadSpec;
+  }
+
+  public getInspectionTeam(): string | undefined {
+    return this.inspectionTeam;
+  }
+
+  public getProcessStep(): string | undefined {
+    return this.processStep;
+  }
+
+  public getTotalQty(): number | undefined {
+    return this.totalQty;
+  }
+
+  public getCompletedAt(): string | undefined {
+    return this.completedAt;
   }
 
   public getOverallDecision(): OverallDecision | undefined {
@@ -331,6 +408,7 @@ export class InspectionOrder {
       upperTolerance: pItem.upperTolerance,
       lowerTolerance: pItem.lowerTolerance,
       standardText: pItem.standardText,
+      acceptableValues: pItem.acceptableValues,
       unit: pItem.unit,
       sampleSize: this.sampleQty,
       result: 'PENDING',
@@ -496,6 +574,7 @@ export class InspectionOrder {
       materialName: this.materialName,
       batchNo: this.batchNo,
       sampleQty: this.sampleQty,
+      ...(this.totalQty !== undefined ? { totalQty: this.totalQty } : {}),
       passQty: this.passQty,
       failQty: this.failQty,
       isMandatoryGate: this._isMandatoryGate,
@@ -511,10 +590,10 @@ export class InspectionOrder {
       ...(this.customerName !== undefined ? { customerName: this.customerName } : {}),
       ...(this.inspectorId !== undefined ? { inspectorId: this.inspectorId } : {}),
       ...(this.inspectorName !== undefined ? { inspectorName: this.inspectorName } : {}),
-      // 006 采购入库单号 / 入库日期 / 规格型号 / 计量单位：
+      // 006 入库单号 / 入库日期 / 规格型号 / 计量单位：
       // specification 同时回填契约里的别名字段 spec，保证两个口径一致
-      ...(this.receiptNo !== undefined ? { receiptNo: this.receiptNo } : {}),
-      ...(this.receiptDate !== undefined ? { receiptDate: this.receiptDate } : {}),
+      ...(this.inboundNo !== undefined ? { inboundNo: this.inboundNo } : {}),
+      ...(this.inboundDate !== undefined ? { inboundDate: this.inboundDate } : {}),
       ...(this.specification !== undefined
         ? { specification: this.specification, spec: this.specification }
         : {}),
@@ -527,8 +606,21 @@ export class InspectionOrder {
       ...(this.processType !== undefined ? { processType: this.processType } : {}),
       ...(this.returnDate !== undefined ? { returnDate: this.returnDate } : {}),
       ...(this.vendorName !== undefined ? { vendorName: this.vendorName } : {}),
+      // 007 过程检验工序追溯字段：此前聚合根完全没有这些属性，重建型用例的 `...orderDto` 展开
+      // 传进来后被构造签名静默吞掉，序列化回去就丢了（下料检验台账的断料长度/操作员/设备列）
+      ...(this.workOrderNo !== undefined ? { workOrderNo: this.workOrderNo } : {}),
+      ...(this.blankingLength !== undefined ? { blankingLength: this.blankingLength } : {}),
+      ...(this.operatorName !== undefined ? { operatorName: this.operatorName } : {}),
+      ...(this.operatorId !== undefined ? { operatorId: this.operatorId } : {}),
+      ...(this.equipmentCode !== undefined ? { equipmentCode: this.equipmentCode } : {}),
+      ...(this.equipmentName !== undefined ? { equipmentName: this.equipmentName } : {}),
+      ...(this.threadSpec !== undefined ? { threadSpec: this.threadSpec } : {}),
+      ...(this.inspectionTeam !== undefined ? { inspectionTeam: this.inspectionTeam } : {}),
+      ...(this.processStep !== undefined ? { processStep: this.processStep } : {}),
       ...(this.overallDecision !== undefined ? { overallDecision: this.overallDecision } : {}),
-      ...(this.completedAt !== undefined ? { updatedAt: this.completedAt } : {}),
+      // 完成时间就是 completedAt：此前这里把它写进了 updatedAt，调用方拿到的「完成时间」
+      // 与库列 completed_at 对不上（读侧 mapRow 用的是 completed_at）—— 口径统一
+      ...(this.completedAt !== undefined ? { completedAt: this.completedAt } : {}),
     };
   }
 }

@@ -60,6 +60,23 @@ export const CertificatePrintModal: React.FC<CertificatePrintModalProps> = ({
     URL.revokeObjectURL(url);
   };
 
+  /**
+   * 非打印提示条内容（docs/35 §6 / §7）：
+   *   1) 本单「含该分段指标、但一条实测值都没录入」的分段 —— 证书按口径不打印该分段，
+   *      这里显式说出来，避免「什么都没有」被读成接口坏了；
+   *   2) 企业档案未维护 —— 抬头 / 印章留白，而不是回落模板里的硬编码抬头常量。
+   * 两条都只出现在**非打印区**，打印区口径不变（绝不为了好看打印未发生的检验结果）。
+   */
+  const missingSections =
+    (type === 'quality' ? qualityData?.missingSections : manufacturingData?.missingSections) ?? [];
+  const activeProfile = type === 'quality' ? qualityData?.companyProfile : manufacturingData?.companyProfile;
+  const hints: string[] = [];
+  if (missingSections.length > 0) {
+    hints.push(`本单未录入实测值：${missingSections.join('、')} —— 证书不打印该分段`);
+  }
+  if (activeProfile === undefined || (activeProfile.legalName ?? '').trim() === '') {
+    hints.push('企业档案未维护：证书抬头 / 印章留白（可在「主数据 · 企业档案」维护后重新生成）');
+  }
   const title =
     type === 'quality'
       ? `质量保证证书预览 (${qualityData?.certNo || ''})`
@@ -132,6 +149,14 @@ export const CertificatePrintModal: React.FC<CertificatePrintModalProps> = ({
           </div>
         </div>
 
+        {/* 非打印提示条：说清「为什么证书上有空白」，打印时自动隐藏 */}
+        {hints.length > 0 && (
+          <div className="px-6 py-2 bg-amber-50 border-b border-amber-200 text-[11px] text-amber-800 space-y-0.5 print:hidden">
+            {hints.map((hint) => (
+              <div key={hint}>提示：{hint}</div>
+            ))}
+          </div>
+        )}
         {/* 证书展示区域 (带滚动条与A4纸底色模拟) */}
         <div className="flex-1 overflow-y-auto p-6 bg-slate-200/70 print:p-0 print:bg-white print:overflow-visible">
           <div

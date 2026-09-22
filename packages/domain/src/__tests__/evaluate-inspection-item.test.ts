@@ -18,6 +18,7 @@ function makeItem(overrides: Partial<EvalInput> = {}): EvalInput {
     upperTolerance: undefined,
     lowerTolerance: undefined,
     standardText: undefined,
+    acceptableValues: undefined,
     ...overrides,
   };
 }
@@ -155,6 +156,69 @@ export function runEvaluateInspectionItemTests(): { total: number; passed: numbe
     assert(evaluateInspectionItem(makeItem({ dataType: 'TEXT', standardText, measuredText: '通过' })) === 'PASSED', '斜杠选项应 PASSED');
     assert(evaluateInspectionItem(makeItem({ dataType: 'TEXT', standardText, measuredText: 'pass' })) === 'PASSED', '竖线选项忽略大小写应 PASSED');
     assert(evaluateInspectionItem(makeItem({ dataType: 'TEXT', standardText, measuredText: 'NG' })) === 'FAILED', '非标准选项必须 FAILED');
+  });
+
+  // ===================== 2.1 可接受值清单（TBD-06） =====================
+
+  test('TEXT/QUALITATIVE: acceptableValues 优先于标准语拆分（清单成员可直接放行）', () => {
+    for (const dataType of ['TEXT', 'QUALITATIVE'] as const) {
+      assert(
+        evaluateInspectionItem(
+          makeItem({
+            dataType,
+            standardText: '无裂纹',
+            acceptableValues: ['无裂纹', '无肉眼可见裂纹'],
+            measuredText: '无肉眼可见裂纹',
+          })
+        ) === 'PASSED',
+        `${dataType}: 清单里明写的取值必须 PASSED（哪怕标准语里没有它）`
+      );
+    }
+  });
+
+  test('TEXT: 清单存在时以清单为准 —— 标准语里多出来的取值不再放行', () => {
+    assert(
+      evaluateInspectionItem(
+        makeItem({
+          dataType: 'TEXT',
+          standardText: '合格/OK',
+          acceptableValues: ['PASS'],
+          measuredText: '合格',
+        })
+      ) === 'FAILED',
+      '清单是唯一权威，标准语里的旧取值必须被忽略'
+    );
+  });
+
+  test('TEXT: 清单成员比对同样去空白 + 忽略大小写', () => {
+    assert(
+      evaluateInspectionItem(
+        makeItem({ dataType: 'TEXT', acceptableValues: ['Pass', '  OK  '], measuredText: ' pass ' })
+      ) === 'PASSED',
+      '清单成员与实测值都应标准化后比对'
+    );
+  });
+
+  test('TEXT: 空清单 / 纯空白清单回落标准语拆分（历史方案行为不变）', () => {
+    for (const acceptableValues of [[], ['', '   ']]) {
+      assert(
+        evaluateInspectionItem(
+          makeItem({ dataType: 'TEXT', standardText: '合格,OK', acceptableValues, measuredText: 'OK' })
+        ) === 'PASSED',
+        `acceptableValues=${JSON.stringify(acceptableValues)} 时应回落标准语`
+      );
+    }
+  });
+
+  test('TEXT/QUALITATIVE: 清单与标准语双缺失一律 PENDING（清单不得成为放行后门）', () => {
+    for (const dataType of ['TEXT', 'QUALITATIVE'] as const) {
+      assert(
+        evaluateInspectionItem(
+          makeItem({ dataType, acceptableValues: ['', '  '], measuredText: '无裂纹' })
+        ) === 'PENDING',
+        `${dataType}: 只有空白清单、又无标准语时必须 PENDING`
+      );
+    }
   });
 
   test('TEXT/QUALITATIVE: 实测文本缺失或纯空白一律 PENDING', () => {

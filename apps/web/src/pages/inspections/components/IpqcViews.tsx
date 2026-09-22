@@ -6,7 +6,6 @@ import {
   Clock,
   AlertTriangle,
   Layers,
-  Eye,
   FileText,
   Printer,
   RefreshCw,
@@ -19,10 +18,34 @@ import {
   X
 } from 'lucide-react';
 import { CertificatePrintModal } from '../../../components/certificate/CertificatePrintModal';
+import { PlanMatchBanner } from '../../../components/common/PlanMatchBanner';
 import { buildIpqcCertificateData } from '../../../lib/certificateDataService';
 import type { QualityCertificateData } from '../../../lib/inspectionTypes';
-import { api } from '../../../lib/api';
+import { api, errorMessage } from '../../../lib/api';
+import { loadCompanyProfile } from '../../../lib/companyProfile';
 import { StatusBadge, BadgeTone } from '../../../components/StatusBadge';
+import { useMatchedPlan } from '../../../hooks/useMatchedPlan';
+import {
+  DECISION_LABEL,
+  decisionTone,
+  judgeIndicatorRow,
+  parseMeasuredNumber,
+  summarizeJudgements,
+  type PlanIndicatorRow,
+} from '../../../lib/planMatch';
+import type { InspectionType } from '@letian/contracts';
+
+/**
+ * 回看行的判定徽标样式。
+ * 判定值域是契约的 PASSED / FAILED / PENDING / EXEMPT（**不是** FAIL），
+ * 之前弹窗里写的是 `result === 'FAIL'`，导致不合格项一律显示成 OK —— 回看结论必须与落库判定一字不差。
+ */
+const DECISION_BADGE_CLASS: Record<ReturnType<typeof decisionTone>, string> = {
+  pass: 'px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-600 font-semibold text-[10px]',
+  fail: 'px-1.5 py-0.5 rounded bg-rose-50 text-rose-600 font-semibold text-[10px]',
+  pending: 'px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 font-semibold text-[10px]',
+  exempt: 'px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 font-semibold text-[10px]',
+};
 
 export interface IpqcViewsProps {
   sub: 'overview' | 'blanking' | 'rolling' | 'finished';
@@ -64,6 +87,10 @@ interface InspectionItemData {
   status: string;
   judgment?: string;
   inspectorName?: string;
+  /** 质量负责人签核人姓名（inspection_orders.approver_name，docs/35 §5）：未签核即空 */
+  approverName?: string;
+  /** 签核时间（inspection_orders.approved_at） */
+  approvedAt?: string;
   createdAt: string;
   completedAt?: string;
   inspectionNotes?: string;
@@ -89,6 +116,27 @@ interface InspectionItemData {
   }>;
 }
 
+/**
+ * 断料长度展示：`25.15` -> `25.15 mm`、`200` -> `200 mm`（整数不带小数，否则保留 1 位）。
+ * 值为空/非法一律 `--`：下料检验台账「断料长度」列只认库列 blanking_length，不做字段间推导。
+ */
+export function formatBlankingLengthMm(value: number | string | null | undefined): string {
+  if (value === null || value === undefined || value === '') return '--';
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '--';
+  return `${Number.isInteger(num) ? String(num) : num.toFixed(1)} mm`;
+}
+
+/**
+ * 台账时间列展示：ISO8601(`2026-07-06T08:30:00.000Z`) -> `2026-07-06 08:30`。
+ * 沿用本页既有的「直接截取 ISO 串」口径（与详情弹窗一致），解析不出来即 `--`，绝不回落到其它字段。
+ */
+export function formatLedgerDateTime(value: string | null | undefined): string {
+  if (!value) return '--';
+  const match = /^(\d{4}-\d{2}-\d{2})(?:T| )(\d{2}:\d{2})/.exec(value);
+  return match ? `${match[1]} ${match[2]}` : '--';
+}
+
 export function formatIpqcStatus(status: string): { label: string; tone: BadgeTone } {
   const s = (status || '').toUpperCase();
   if (['PASSED', 'PASS', 'COMPLETED', 'QUALIFIED', '已合格', '合格'].includes(s)) {
@@ -106,6 +154,213 @@ export function formatIpqcStatus(status: string): { label: string; tone: BadgeTo
   return { label: '待检验', tone: 'amber' };
 }
 
+/** 过程检验台账三页代号：下料 / 滚丝 / 成品检 */
+type IpQcLedgerSub = 'blanking' | 'rolling' | 'finished';
+
+/** 台账列定义：表头与数据行共用同一份口径，杜绝「表头改了行没改」的口径漂移 */
+interface IpQcLedgerColumn {
+  key: string;
+  title: string;
+  /** 表头单元格附加样式（仅用于对齐） */
+  thClass?: string;
+  /** 数据单元格附加样式 */
+  tdClass?: string;
+  render: (row: InspectionItemData) => React.ReactNode;
+}
+
+interface IpQcLedgerHandlers {
+  onOpenDetail: (row: InspectionItemData) => void;
+  onOpenInspect: (row: InspectionItemData) => void;
+  /** 行级证书入口（docs/35 §10 M9）：所有行可点，未录入的项留白 */
+  onOpenCert: (row: InspectionItemData) => void;
+}
+
+const LEDGER_TH_CLASS = 'py-2.5 px-3 whitespace-nowrap';
+const LEDGER_TD_CLASS = 'py-2.5 px-3';
+
+/** 台账单元格取值：只认库字段本身，缺失（含空串）一律 `--`，绝不用其它字段顶替 */
+const ledgerText = (value?: string | number | null): string | number =>
+  value === undefined || value === null || value === '' ? '--' : value;
+
+/**
+ * 过程检验台账列集（三页各 11 列，见 docs/29 §2 下料 / docs/30 §2 滚丝·成品检）：
+ *
+ *   检验单号 | [★ 强制检关卡，仅成品检] | MES工单号 | 物料编码 | 物料名称 | 数量 |
+ *   工序专有列… | 完成时间 | 状态 | [检验人，仅滚丝/成品检] | 操作
+ *
+ * 「工序专有列」是三页唯一的分叉点（其余列逐列同构）：
+ *   - 下料检验：断料长度 · 操作员 · 设备
+ *   - 滚丝检验：操作员 · 设备
+ *   - 成品检  ：终检组
+ *
+ * 所有单元格一律直连库字段（order_no / work_order_no / material_code / material_name / total_qty /
+ * blanking_length / operator_name / equipment_code / inspection_team / inspector_name / completed_at
+ * 以及 is_mandatory_gate），缺值统一展示 `--`，**严禁**用 sampleQty 等其它字段推导假值。
+ */
+function buildIpqcLedgerColumns(sub: IpQcLedgerSub, handlers: IpQcLedgerHandlers): IpQcLedgerColumn[] {
+  const columns: IpQcLedgerColumn[] = [
+    {
+      key: 'orderNo',
+      title: '检验单号',
+      tdClass: 'whitespace-nowrap',
+      render: (row) => (
+        <button
+          type="button"
+          onClick={() => handlers.onOpenDetail(row)}
+          className="font-mono font-medium text-blue-600 hover:text-blue-800 hover:underline"
+        >
+          {row.orderNo}
+        </button>
+      ),
+    },
+  ];
+
+  // 成品检专属：★ 强制检关卡标记列（物理列 is_mandatory_gate，设计图 WPS图片(7) 第 2 列）
+  if (sub === 'finished') {
+    columns.push({
+      key: 'mandatoryGate',
+      title: '★',
+      thClass: 'text-center',
+      tdClass: 'text-center',
+      render: (row) => (
+        <span
+          className={row.isMandatoryGate ? 'font-bold text-amber-500' : 'text-slate-300'}
+          title={row.isMandatoryGate ? '强制检关卡：未完成检验或判定不合格严禁入库流转' : '非强制检关卡'}
+        >
+          {row.isMandatoryGate ? '★' : '--'}
+        </span>
+      ),
+    });
+  }
+
+  columns.push(
+    {
+      key: 'workOrderNo',
+      title: 'MES工单号',
+      tdClass: 'font-mono text-slate-700 whitespace-nowrap',
+      render: (row) => <>{ledgerText(row.workOrderNo || row.batchNo)}</>,
+    },
+    {
+      key: 'materialCode',
+      title: '物料编码',
+      tdClass: 'font-mono text-slate-700 whitespace-nowrap',
+      render: (row) => <>{row.materialCode}</>,
+    },
+    {
+      key: 'materialName',
+      title: '物料名称',
+      tdClass: 'text-slate-800 whitespace-nowrap',
+      render: (row) => <>{row.materialName}</>,
+    },
+    {
+      key: 'totalQty',
+      title: '数量',
+      tdClass: 'font-semibold text-slate-800 whitespace-nowrap',
+      render: (row) => <>{ledgerText(row.totalQty)}</>,
+    }
+  );
+
+  // 工序专有列：三页唯一的分叉点
+  if (sub === 'blanking') {
+    columns.push({
+      key: 'blankingLength',
+      title: '断料长度',
+      tdClass: 'font-mono text-slate-800 whitespace-nowrap',
+      render: (row) => <>{formatBlankingLengthMm(row.blankingLength)}</>,
+    });
+  }
+  if (sub === 'blanking' || sub === 'rolling') {
+    columns.push(
+      {
+        key: 'operatorName',
+        title: '操作员',
+        tdClass: 'text-slate-700 whitespace-nowrap',
+        render: (row) => <>{ledgerText(row.operatorName)}</>,
+      },
+      {
+        key: 'equipmentCode',
+        title: '设备',
+        tdClass: 'font-mono text-slate-700 whitespace-nowrap',
+        render: (row) => <>{ledgerText(row.equipmentCode)}</>,
+      }
+    );
+  }
+  if (sub === 'finished') {
+    columns.push({
+      key: 'inspectionTeam',
+      title: '终检组',
+      tdClass: 'text-slate-700 whitespace-nowrap',
+      render: (row) => <>{ledgerText(row.inspectionTeam)}</>,
+    });
+  }
+
+  columns.push(
+    {
+      key: 'completedAt',
+      title: '完成时间',
+      tdClass: 'text-slate-500 whitespace-nowrap',
+      render: (row) => <>{formatLedgerDateTime(row.completedAt)}</>,
+    },
+    {
+      key: 'status',
+      title: '状态',
+      thClass: 'text-center',
+      tdClass: 'text-center whitespace-nowrap',
+      render: (row) => {
+        const statusInfo = formatIpqcStatus(row.status);
+        return <StatusBadge status={statusInfo.label} tone={statusInfo.tone} />;
+      },
+    }
+  );
+
+  // 「检验人」列只在滚丝 / 成品检出现：下料检验的设计图（原型 WPS图片(5)）为 11 列且不含检验人列
+  if (sub !== 'blanking') {
+    columns.push({
+      key: 'inspectorName',
+      title: '检验人',
+      tdClass: 'text-slate-700 whitespace-nowrap',
+      render: (row) => <>{ledgerText(row.inspectorName)}</>,
+    });
+  }
+
+  columns.push(    {
+      key: 'actions',
+      title: '操作',
+      thClass: 'text-center',
+      tdClass: 'text-center whitespace-nowrap',
+      render: (row) => {
+        // 操作列文案按状态分派（逐页对齐设计图）：待检验 -> 检验；成品检「检验中」-> 继续（回到未完成的录入）；
+        // 其余 -> 详情（只读回看，证书打印在详情弹窗内）。
+        const statusInfo = formatIpqcStatus(row.status);
+        const label =
+          statusInfo.label === '待检验'
+            ? '检验'
+            : sub === 'finished' && statusInfo.label === '检验中'
+              ? '继续'
+              : '详情';
+        const onClick = label === '详情' ? () => handlers.onOpenDetail(row) : () => handlers.onOpenInspect(row);
+        return (
+          <div className="flex items-center justify-center gap-3">
+            <button type="button" onClick={onClick} className="text-blue-600 hover:text-blue-800 font-medium">
+              {label}
+            </button>
+            <button
+              type="button"
+              onClick={() => handlers.onOpenCert(row)}
+              title="按本行数据导出证书（未录入的项留白）"
+              className="text-blue-600 hover:text-blue-800 font-medium"
+            >
+              证书
+            </button>
+          </div>
+        );
+      },
+    }
+  );
+
+  return columns;
+}
+
 export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub, onInspect }) => {
   const [overviewData, setOverviewData] = useState<IpqcOverviewData | null>(null);
   const [overviewLoading, setOverviewLoading] = useState(false);
@@ -118,7 +373,10 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub, onInspec
   const [tableLoading, setTableLoading] = useState(false);
   const [tableError, setTableError] = useState<string | null>(null);
 
-  const [filterDoc, setFilterDoc] = useState('');
+  // 过程检验台账筛选：单号拆成两个独立口径（docs/28）
+  // 「检验工单」= 检验单号 order_no，「生产工单」= MES 生产工单号 work_order_no（物理列为空时后端按批次号兜底）
+  const [filterOrderNo, setFilterOrderNo] = useState('');
+  const [filterWorkOrderNo, setFilterWorkOrderNo] = useState('');
   const [filterMaterial, setFilterMaterial] = useState('');
   const [filterStatus, setFilterStatus] = useState('全部');
 
@@ -133,6 +391,33 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub, onInspec
   const [inspectFailQty, setInspectFailQty] = useState<number>(0);
   const [inspectRemark, setInspectRemark] = useState('');
   const [inspectSubmitting, setInspectSubmitting] = useState(false);
+  /** 提交失败文案（docs/35 §4 M3：失败就地红字提示，不再 alert 弹窗打断） */
+  const [inspectError, setInspectError] = useState('');
+
+  // 判定依据来源（口径：docs/17-检验录入界面说明与质检方案匹配口径.md §7）：按物料 + 检验类型匹配当前生效方案
+  const inspectPlanMatch = useMatchedPlan(
+    inspectingOrder?.materialCode ?? null,
+    (inspectingOrder?.inspectionType as InspectionType | undefined) ?? null
+  );
+  const [inspectPlanRows, setInspectPlanRows] = useState<PlanIndicatorRow[]>([]);
+
+  useEffect(() => {
+    setInspectPlanRows(inspectPlanMatch.rows);
+  }, [inspectPlanMatch.rows]);
+
+  const inspectJudgement = summarizeJudgements(inspectPlanRows.map(judgeIndicatorRow));
+
+  /**
+   * 只读回看的数据源（TBD-07）：详情弹窗一律读 `GET /inspections/{id}` 的**本单方案快照**，
+   * 指标 / 标准值 / 实测值 / 单项判定全部取工单落库值，不按当前生效方案重算（口径见 docs/17 §7.8）。
+   * 只用列表行上的 `items` 会漏掉历史基准，也拿不到落库判定。
+   */
+  const detailPlanMatch = useMatchedPlan(
+    selectedOrder?.materialCode ?? null,
+    (selectedOrder?.inspectionType as InspectionType | undefined) ?? null,
+    { orderId: selectedOrder?.id ?? null, readOnly: true }
+  );
+  const detailPlanRows = detailPlanMatch.rows;
 
   const activeType = useMemo(() => {
     if (sub === 'blanking') return 'IPQC_CT';
@@ -165,8 +450,11 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub, onInspec
         pageSize,
       };
 
-      if (filterDoc.trim()) {
-        queryParams.workOrderNo = filterDoc.trim();
+      if (filterOrderNo.trim()) {
+        queryParams.orderNo = filterOrderNo.trim();
+      }
+      if (filterWorkOrderNo.trim()) {
+        queryParams.workOrderNo = filterWorkOrderNo.trim();
       }
       if (filterMaterial.trim()) {
         queryParams.materialCode = filterMaterial.trim();
@@ -195,7 +483,7 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub, onInspec
     } finally {
       setTableLoading(false);
     }
-  }, [activeType, sub, page, pageSize, filterDoc, filterMaterial, filterStatus]);
+  }, [activeType, sub, page, pageSize, filterOrderNo, filterWorkOrderNo, filterMaterial, filterStatus]);
 
   useEffect(() => {
     if (sub === 'overview') {
@@ -219,38 +507,44 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub, onInspec
   };
 
   const handleReset = () => {
-    setFilterDoc('');
+    setFilterOrderNo('');
+    setFilterWorkOrderNo('');
     setFilterMaterial('');
     setFilterStatus('全部');
     setPage(1);
   };
 
+  /**
+   * 行级证书（docs/35 §10 M9）：所有行可点，未录入的项留白。
+   * 企业档案（抬头 / 印章 / 供货单位·产地）取主数据，未维护即留白（不回落硬编码抬头）。
+   */
   const handleOpenCert = (item: InspectionItemData) => {
-    const isFail = ['FAILED', 'FAIL', 'REJECT', 'REJECTED'].includes(item.status);
-    const passQty = item.passQty ?? (isFail ? 0 : item.sampleQty);
-    const failQty = item.failQty ?? (isFail ? item.sampleQty : 0);
-
-    const data = buildIpqcCertificateData({
-      id: item.orderNo,
-      workOrder: item.workOrderNo || item.batchNo || item.orderNo,
+    void (async () => {
+      const companyProfile = await loadCompanyProfile();
+      const data = buildIpqcCertificateData({
+      // 证书编号读 orderNo：旧实现把单号写进 `id` 键，builder 读不到 -> 证书编号与弹窗标题恒空白
+      orderNo: item.orderNo,
+      // 抬头字段一律只下发库中真实值（docs/34 §5.1）。旧实现用一串 `||` 兜底，等于把
+      // 「没有数据」打印成「有数据」：`spec || '标准紧固件'`（编造规格）、`quantity || 100 件`
+      // （编造数量）、`sampleQty || 32`（编造抽检数）、`|| '2026-09-20'`（编造固定日期）、
+      // `conclusion: isFail ? 'FAIL' : 'PASS'`（给未判定单补一个 PASS）—— 全部去掉。
+      workOrder: item.workOrderNo,
       material: item.materialName,
-      spec: item.specification || '标准紧固件',
-      quantity: `${item.totalQty || item.sampleQty || 100} ${item.unit || '件'}`,
-      sampleQty: item.sampleQty || 32,
-      passQty,
-      failQty,
-      inspectDate: (item.completedAt || item.createdAt || '2026-09-20').slice(0, 10),
-      inspector: item.inspectorName || '张强',
-      conclusion: isFail ? 'FAIL' : 'PASS',
-      items: item.items && item.items.length > 0 ? item.items.map(it => ({
-        name: it.name,
-        standard: it.standardRequirement || `${it.nominalValue ?? '--'} ${it.unit || 'mm'}`,
-        measured: it.measuredVal !== undefined ? `${it.measuredVal} ${it.unit || 'mm'}` : '符合',
-        result: it.result === 'FAIL' ? 'NG' : 'OK',
-      })) : undefined,
-    });
-    setCertData(data);
-    setPrintModalOpen(true);
+      spec: item.specification,
+      quantity: item.totalQty === undefined ? '' : `${item.totalQty} ${item.unit ?? ''}`.trim(),
+      sampleQty: item.sampleQty,
+      passQty: item.passQty,
+      failQty: item.failQty,
+      inspector: item.inspectorName,
+      // 实测分区由证书服务从**原始工单实测项**里按 metricCategory 取真实数据（docs/34 §5.1）：
+      // 这里不再预拼「符合」「OK」之类的展示文案 —— 那会把未录入的项说成已检合格。
+        items: item.items,
+        ...(item.approverName !== undefined && item.approverName !== '' ? { approverName: item.approverName } : {}),
+        ...(companyProfile !== null ? { companyProfile } : {}),
+      });
+      setCertData(data);
+      setPrintModalOpen(true);
+    })();
   };
 
   const handleOpenDetail = (item: InspectionItemData) => {
@@ -264,6 +558,7 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub, onInspec
     setInspectPassQty(item.passQty ?? item.sampleQty ?? 32);
     setInspectFailQty(item.failQty ?? 0);
     setInspectRemark(item.inspectionNotes || '');
+    setInspectError('');
     setInspectModalOpen(true);
   };
 
@@ -271,6 +566,25 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub, onInspec
     if (!inspectingOrder) return;
     setInspectSubmitting(true);
     try {
+      // 先落库方案指标实测值：只提交属于本单方案快照的指标编码，避免服务端 400 校验失败。
+      // 未录入任何实测值时跳过，保持"快速终判"轻量流程不变。
+      const knownCodes = new Set((inspectingOrder.items ?? []).map((item) => item.itemCode));
+      const measured = inspectPlanRows.filter(
+        (row) => !row.isExempt && row.actual.trim() !== '' && knownCodes.has(row.itemCode)
+      );
+      if (measured.length > 0) {
+        await api.post(`/inspections/${inspectingOrder.id}/submit-measurements`, {
+          isDraft: false,
+          items: measured.map((row) => {
+            const numeric = row.planItem.dataType === 'NUMERIC' ? parseMeasuredNumber(row.actual) : undefined;
+            return {
+              itemCode: row.itemCode,
+              ...(numeric !== undefined ? { measuredVal: numeric } : {}),
+              measuredText: row.actual,
+            };
+          }),
+        });
+      }
       await api.post(`/inspections/${inspectingOrder.id}/status`, {
         status: inspectVerdict,
         passQty: inspectPassQty,
@@ -285,8 +599,9 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub, onInspec
       if (sub === 'overview') {
         await fetchOverview();
       }
-    } catch (err: any) {
-      alert(`录入检验结果失败: ${err?.message || '网络异常'}`);
+    } catch (err) {
+      // 就地红字提示（ApiError 文案由 errorMessage 统一抽取），不再用 alert 打断录入上下文
+      setInspectError(errorMessage(err));
     } finally {
       setInspectSubmitting(false);
     }
@@ -611,6 +926,13 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub, onInspec
     ? 'MES工序: 手工滚牙 · 螺纹牙型与公差配合 · 人员设备强追溯'
     : 'MES工序: 检测入库 · ★入库关卡必检物理阻断 · 终检组全项合格入库';
 
+  // 台账列表头与数据行共用同一份列定义（列集口径：docs/29 §2 下料 / docs/30 §2 滚丝·成品检）
+  const ledgerColumns = buildIpqcLedgerColumns(sub, {
+    onOpenDetail: handleOpenDetail,
+    onOpenInspect: handleOpenInspect,
+    onOpenCert: handleOpenCert,
+  });
+
   return (
     <div className="space-y-4">
       {/* Top Header Bar */}
@@ -668,12 +990,22 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub, onInspec
       {/* Filter Bar */}
       <form onSubmit={handleSearch} className="bg-white border border-slate-200/80 rounded-lg p-4 shadow-sm flex flex-wrap items-center gap-4 text-xs">
         <div className="flex items-center gap-2">
-          <span className="text-slate-600 font-medium">工单号/单号</span>
+          <span className="text-slate-600 font-medium">检验工单</span>
           <input
             type="text"
-            placeholder="工单号/单号"
-            value={filterDoc}
-            onChange={(e) => setFilterDoc(e.target.value)}
+            placeholder="检验单号"
+            value={filterOrderNo}
+            onChange={(e) => setFilterOrderNo(e.target.value)}
+            className="border border-slate-200 rounded px-2.5 py-1.5 w-36 text-slate-700 focus:outline-none focus:border-blue-500"
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-slate-600 font-medium">生产工单</span>
+          <input
+            type="text"
+            placeholder="MES生产工单号"
+            value={filterWorkOrderNo}
+            onChange={(e) => setFilterWorkOrderNo(e.target.value)}
             className="border border-slate-200 rounded px-2.5 py-1.5 w-36 text-slate-700 focus:outline-none focus:border-blue-500"
           />
         </div>
@@ -733,139 +1065,37 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub, onInspec
           <table className="w-full text-left text-xs border-collapse">
             <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 font-medium select-none">
               <tr>
-                <th className="py-2.5 px-3 whitespace-nowrap">检验单号</th>
-                <th className="py-2.5 px-3 whitespace-nowrap">工序/关卡</th>
-                <th className="py-2.5 px-3 whitespace-nowrap">MES生产工单</th>
-                <th className="py-2.5 px-3 whitespace-nowrap">物料编码与名称</th>
-                <th className="py-2.5 px-3 whitespace-nowrap">规格型号</th>
-                <th className="py-2.5 px-3 whitespace-nowrap text-right">报检/抽样数</th>
-                {isBlanking && <th className="py-2.5 px-3 whitespace-nowrap text-right">断料长(mm)</th>}
-                {isRolling && <th className="py-2.5 px-3 whitespace-nowrap">螺纹规格</th>}
-                <th className="py-2.5 px-3 whitespace-nowrap">操作员</th>
-                <th className="py-2.5 px-3 whitespace-nowrap">设备编号/机台</th>
-                {isFinished && <th className="py-2.5 px-3 whitespace-nowrap">终检班组</th>}
-                <th className="py-2.5 px-3 whitespace-nowrap">报检/完成时间</th>
-                <th className="py-2.5 px-3 whitespace-nowrap text-center">状态</th>
-                <th className="py-2.5 px-3 whitespace-nowrap">检验员</th>
-                <th className="py-2.5 px-3 whitespace-nowrap text-center">操作</th>
+                {ledgerColumns.map((col) => (
+                  <th key={col.key} className={`${LEDGER_TH_CLASS} ${col.thClass ?? ''}`}>
+                    {col.title}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-slate-700">
               {tableLoading ? (
                 <tr>
-                  <td colSpan={15} className="py-12 text-center text-slate-400">
+                  <td colSpan={ledgerColumns.length} className="py-12 text-center text-slate-400">
                     <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2 text-blue-600" />
                     正在连接数据库获取过程检验数据...
                   </td>
                 </tr>
               ) : items.length === 0 ? (
                 <tr>
-                  <td colSpan={15} className="py-12 text-center text-slate-400">
+                  <td colSpan={ledgerColumns.length} className="py-12 text-center text-slate-400">
                     暂无符合条件的过程检验数据
                   </td>
                 </tr>
               ) : (
-                items.map((row) => {
-                  const statusInfo = formatIpqcStatus(row.status);
-                  return (
-                    <tr key={row.id} className="hover:bg-slate-50/70 transition-colors">
-                      <td className="py-2.5 px-3 font-mono font-medium text-blue-600 whitespace-nowrap">
-                        {row.orderNo}
+                items.map((row) => (
+                  <tr key={row.id} className="hover:bg-slate-50/70 transition-colors">
+                    {ledgerColumns.map((col) => (
+                      <td key={col.key} className={`${LEDGER_TD_CLASS} ${col.tdClass ?? ''}`}>
+                        {col.render(row)}
                       </td>
-                      <td className="py-2.5 px-3 whitespace-nowrap">
-                        <div className="flex items-center gap-1">
-                          <span className="text-slate-700 font-medium">
-                            {row.processStep || (isBlanking ? '自动断料' : isRolling ? '手工滚牙' : '检测入库')}
-                          </span>
-                          {row.isMandatoryGate && (
-                            <span className="text-rose-500 font-bold" title="关卡必检物理阻断">★</span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="py-2.5 px-3 font-mono text-slate-600 whitespace-nowrap">
-                        {row.workOrderNo || row.batchNo || '--'}
-                      </td>
-                      <td className="py-2.5 px-3 whitespace-nowrap">
-                        <div className="font-medium text-slate-800">{row.materialName}</div>
-                        <div className="font-mono text-[11px] text-slate-400">{row.materialCode}</div>
-                      </td>
-                      <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap">
-                        {row.specification || '--'}
-                      </td>
-                      <td className="py-2.5 px-3 text-right whitespace-nowrap">
-                        <div className="font-semibold text-slate-800">
-                          {row.sampleQty || 32} <span className="font-normal text-slate-400">抽样</span>
-                        </div>
-                        <div className="text-[11px] text-slate-400">
-                          总量: {row.totalQty || row.sampleQty || 100} {row.unit || '件'}
-                        </div>
-                      </td>
-                      {isBlanking && (
-                        <td className="py-2.5 px-3 text-right font-mono font-medium text-slate-800 whitespace-nowrap">
-                          {row.blankingLength !== undefined && row.blankingLength !== null
-                            ? Number(row.blankingLength).toFixed(2)
-                            : '--'}
-                        </td>
-                      )}
-                      {isRolling && (
-                        <td className="py-2.5 px-3 font-mono text-slate-700 whitespace-nowrap">
-                          {row.threadSpec || '--'}
-                        </td>
-                      )}
-                      <td className="py-2.5 px-3 text-slate-700 whitespace-nowrap">
-                        {row.operatorName || '--'}
-                      </td>
-                      <td className="py-2.5 px-3 whitespace-nowrap">
-                        <div className="text-slate-800 font-medium">{row.equipmentName || row.equipmentCode || '--'}</div>
-                        {row.equipmentCode && row.equipmentName && (
-                          <div className="font-mono text-[11px] text-slate-400">{row.equipmentCode}</div>
-                        )}
-                      </td>
-                      {isFinished && (
-                        <td className="py-2.5 px-3 text-slate-700 whitespace-nowrap">
-                          {row.inspectionTeam || '终检一组'}
-                        </td>
-                      )}
-                      <td className="py-2.5 px-3 text-slate-500 whitespace-nowrap">
-                        {(row.completedAt || row.createdAt || '--').slice(0, 16).replace('T', ' ')}
-                      </td>
-                      <td className="py-2.5 px-3 text-center whitespace-nowrap">
-                        <StatusBadge status={statusInfo.label} tone={statusInfo.tone} />
-                      </td>
-                      <td className="py-2.5 px-3 text-slate-700 whitespace-nowrap">
-                        {row.inspectorName || '张强'}
-                      </td>
-                      <td className="py-2.5 px-3 text-center whitespace-nowrap">
-                        <div className="flex items-center justify-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => handleOpenDetail(row)}
-                            className="p-1 rounded text-slate-600 hover:text-blue-600 hover:bg-slate-100 transition-colors"
-                            title="查看明细"
-                          >
-                            <Eye className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleOpenInspect(row)}
-                            className="px-2 py-0.5 rounded bg-blue-50 text-blue-600 hover:bg-blue-100 font-medium text-[11px] transition-colors"
-                            title="录入/判定检验"
-                          >
-                            检验
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleOpenCert(row)}
-                            className="p-1 rounded text-slate-600 hover:text-emerald-600 hover:bg-slate-100 transition-colors"
-                            title="质检证书"
-                          >
-                            <Printer className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
+                    ))}
+                  </tr>
+                ))
               )}
             </tbody>
           </table>
@@ -1016,7 +1246,7 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub, onInspec
                   </div>
                   <div>
                     <span className="text-slate-400 block">检验员</span>
-                    <span className="font-medium text-slate-800">{selectedOrder.inspectorName || '张强'}</span>
+                    <span className="font-medium text-slate-800">{selectedOrder.inspectorName || '--'}</span>
                   </div>
                   <div>
                     <span className="text-slate-400 block">完成时间</span>
@@ -1029,7 +1259,19 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub, onInspec
                 <h4 className="font-semibold text-slate-700 mb-2.5 flex items-center gap-1.5">
                   <FileText className="w-4 h-4 text-blue-500" /> 检验项目实测明细
                 </h4>
-                {selectedOrder.items && selectedOrder.items.length > 0 ? (
+                {/* 判定依据来源：本单方案快照（只读回看），不是列表行上的临时数据 */}
+                <div className="mb-2.5">
+                  <PlanMatchBanner
+                    state={detailPlanMatch}
+                    materialCode={selectedOrder.materialCode}
+                    inspectionType={selectedOrder.inspectionType as InspectionType}
+                  />
+                </div>
+                {detailPlanMatch.status === 'loading' ? (
+                  <div className="p-3 bg-slate-50 border border-slate-100 rounded-lg text-slate-500 text-center">
+                    正在读取本单方案快照…
+                  </div>
+                ) : detailPlanRows.length > 0 ? (
                   <div className="border border-slate-200 rounded-lg overflow-hidden">
                     <table className="w-full text-left text-xs">
                       <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 font-medium">
@@ -1042,31 +1284,34 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub, onInspec
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {selectedOrder.items.map((it, idx) => (
-                          <tr key={idx} className="hover:bg-slate-50/50">
-                            <td className="py-2 px-3 font-mono text-slate-500">{it.itemCode}</td>
-                            <td className="py-2 px-3 font-medium text-slate-800">{it.name}</td>
-                            <td className="py-2 px-3 text-slate-600">
-                              {it.standardRequirement || (it.nominalValue !== undefined ? `${it.nominalValue} ${it.unit || 'mm'}` : '符合图纸')}
-                            </td>
-                            <td className="py-2 px-3 font-mono font-medium text-slate-800">
-                              {it.measuredVal !== undefined ? `${it.measuredVal} ${it.unit || 'mm'}` : '合格'}
-                            </td>
-                            <td className="py-2 px-3 text-center">
-                              {it.result === 'FAIL' ? (
-                                <span className="px-1.5 py-0.5 rounded bg-rose-50 text-rose-600 font-semibold text-[10px]">NG</span>
-                              ) : (
-                                <span className="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-600 font-semibold text-[10px]">OK</span>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
+                        {detailPlanRows.map((row) => {
+                          const decision = judgeIndicatorRow(row);
+                          return (
+                            <tr key={row.itemCode} className="hover:bg-slate-50/50">
+                              <td className="py-2 px-3 font-mono text-slate-500">{row.itemCode}</td>
+                              <td className="py-2 px-3 font-medium text-slate-800">{row.name}</td>
+                              <td className="py-2 px-3 text-slate-600">{row.standard}</td>
+                              <td className="py-2 px-3 font-mono font-medium text-slate-800">
+                                {row.isExempt
+                                  ? '免检'
+                                  : row.actual.trim() !== ''
+                                  ? `${row.actual}${row.unit ? ` ${row.unit}` : ''}`
+                                  : '未录入'}
+                              </td>
+                              <td className="py-2 px-3 text-center">
+                                <span className={DECISION_BADGE_CLASS[decisionTone(decision)]}>
+                                  {DECISION_LABEL[decision]}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
                 ) : (
                   <div className="p-3 bg-slate-50 border border-slate-100 rounded-lg text-slate-500 text-center">
-                    依据标准工艺规程完成全项尺寸及外观检验合格，未发现超差。
+                    本单方案快照中没有指标项，无法回看判定依据。
                   </div>
                 )}
               </div>
@@ -1104,7 +1349,7 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub, onInspec
       {/* INSPECT MODAL */}
       {inspectModalOpen && inspectingOrder && (
         <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl max-h-[90vh] overflow-y-auto animate-in fade-in zoom-in-95 duration-150">
             <div className="px-5 py-3.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
               <h3 className="font-bold text-sm text-slate-800">
                 录入过程检验结果: {inspectingOrder.orderNo}
@@ -1131,6 +1376,107 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub, onInspec
                   <span className="text-slate-400">抽样基准:</span>
                   <span className="font-semibold text-slate-800">{inspectingOrder.sampleQty || 32} 件</span>
                 </div>
+              </div>
+
+              <PlanMatchBanner
+                state={inspectPlanMatch}
+                materialCode={inspectingOrder.materialCode}
+                inspectionType={inspectingOrder.inspectionType}
+                compact
+              />
+
+              {/* 方案驱动的待检指标清单：需求"显示需要检验的指标清单"的落点 */}
+              <div className="border border-slate-200 rounded-lg overflow-hidden">
+                <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                  <span className="font-semibold text-slate-700">待检指标清单（按方案标准自动判定）</span>
+                  <span className="text-[11px] text-slate-500">
+                    共 {inspectJudgement.total} 项 · 免检 {inspectJudgement.exempt} 项 · 待判定{' '}
+                    {inspectJudgement.pending} 项
+                  </span>
+                </div>
+                <table className="w-full text-left">
+                  <thead className="bg-white text-slate-500 border-b border-slate-100">
+                    <tr>
+                      <th className="py-1.5 px-3 w-40">检验指标</th>
+                      <th className="py-1.5 px-3 w-40">标准要求</th>
+                      <th className="py-1.5 px-3">实测值</th>
+                      <th className="py-1.5 px-2 w-16 text-center">不解检</th>
+                      <th className="py-1.5 px-3 w-20 text-center">单向判定</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {inspectPlanRows.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="py-4 px-3 text-center text-[11px] text-slate-400">
+                          暂无待检指标：该物料未匹配到已启用的质检方案。
+                        </td>
+                      </tr>
+                    )}
+                    {inspectPlanRows.map((row, idx) => {
+                      const decision = judgeIndicatorRow(row);
+                      return (
+                        <tr key={`${row.itemCode}-${idx}`}>
+                          <td className="py-1.5 px-3 font-medium text-slate-800">{row.title}</td>
+                          <td className="py-1.5 px-3 text-slate-600 font-mono">{row.standard}</td>
+                          <td className="py-1.5 px-3">
+                            <input
+                              type="text"
+                              value={row.actual}
+                              disabled={row.isExempt}
+                              placeholder={row.isExempt ? '免检' : `实测值${row.unit !== '' ? ` (${row.unit})` : ''}`}
+                              onChange={(e) => {
+                                const value = e.target.value;
+                                setInspectPlanRows((prev) =>
+                                  prev.map((candidate, position) =>
+                                    position === idx ? { ...candidate, actual: value } : candidate
+                                  )
+                                );
+                              }}
+                              className={`w-36 border rounded px-2 py-0.5 font-mono focus:outline-none ${
+                                row.isExempt
+                                  ? 'bg-slate-100 border-slate-200 text-slate-400 italic'
+                                  : decision === 'FAILED'
+                                  ? 'border-rose-400 text-rose-600 bg-white'
+                                  : 'border-slate-200 bg-white focus:border-blue-500'
+                              }`}
+                            />
+                            {row.unit !== '' && !row.isExempt && (
+                              <span className="ml-1 text-[10px] text-slate-400">{row.unit}</span>
+                            )}
+                          </td>
+                          <td className="py-1.5 px-2 text-center">
+                            <input
+                              type="checkbox"
+                              checked={row.isExempt}
+                              onChange={(e) => {
+                                const checked = e.target.checked;
+                                setInspectPlanRows((prev) =>
+                                  prev.map((candidate, position) =>
+                                    position === idx ? { ...candidate, isExempt: checked } : candidate
+                                  )
+                                );
+                              }}
+                              className="rounded text-blue-600 focus:ring-blue-500"
+                            />
+                          </td>
+                          <td className="py-1.5 px-3 text-center">
+                            <span
+                              className={`px-1.5 py-0.5 rounded font-semibold border ${
+                                decision === 'PASSED'
+                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                  : decision === 'FAILED'
+                                  ? 'bg-rose-50 text-rose-700 border-rose-200'
+                                  : 'bg-slate-100 text-slate-500 border-slate-200'
+                              }`}
+                            >
+                              {DECISION_LABEL[decision]}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
 
               <div>
@@ -1219,6 +1565,11 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub, onInspec
             </div>
 
             <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2">
+              {inspectError !== '' && (
+                <span className="mr-auto text-xs text-rose-600" data-testid="ipqc-submit-error">
+                  {inspectError}
+                </span>
+              )}
               <button
                 type="button"
                 onClick={() => setInspectModalOpen(false)}

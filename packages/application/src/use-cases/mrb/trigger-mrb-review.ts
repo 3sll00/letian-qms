@@ -23,6 +23,14 @@ export interface TriggerMrbReviewCommand extends Partial<CreateMRBReviewRequest>
   failCategory?: string;
   preliminaryDisposition?: string;
   reason?: string;
+  /** 发起时显式选定的评审流程定义 ID（优先于按来源类型自动匹配） */
+  flowId?: string;
+  /** 紧急程度：NORMAL / URGENT / CRITICAL */
+  urgencyLevel?: string;
+  /** 关联的不合格待审核池条目 ID（池发起路径透传，落 mrb_reviews.pending_defect_id） */
+  pendingDefectId?: string;
+  /** 发起说明（落 mrb_reviews.review_notes，不混入不合格描述文本） */
+  reviewNotes?: string;
 }
 
 /**
@@ -73,10 +81,30 @@ export class TriggerMrbReviewUseCase {
       // 锁定批次，防止进入下一工序
       await ctx.locks.acquireXactLock(orderDTO.batchNo);
 
-      // 查询适用的评审流配置
-      const failCategory = cmd.failCategory ?? 'CRITICAL_DIMENSION';
+      // 不合格来源类型：显式指定优先，否则按检验环节映射（此前默认值 'CRITICAL_DIMENSION'
+      // 不在 MRBFailCategoryEnum 内，导致流程匹配恒失效，见 docs/20 §3.2 D5）
+      const sourceType = (
+        cmd.sourceType !== undefined &&
+        ['INCOMING_FAIL', 'PROCESS_FAIL', 'SHIPMENT_FAIL', 'SUBCONTRACT_FAIL'].includes(
+          cmd.sourceType
+        )
+          ? cmd.sourceType
+          : mapOrderStageToSourceType(orderDTO.inspectionType)
+      ) as MRBFailCategory;
+
+      // 评审流配置：优先用发起时选定的流程；未选定时按不合格来源类型自动匹配生效流程
+      const failCategory = cmd.failCategory ?? sourceType;
       const disposition = cmd.preliminaryDisposition ?? 'REWORK';
-      const reviewFlow = await ctx.reviewFlows.findApplicableFlow(failCategory);
+      const reviewFlow =
+        cmd.flowId !== undefined
+          ? await ctx.reviewFlows.findById(cmd.flowId)
+          : await ctx.reviewFlows.findApplicableFlow(failCategory);
+
+      const urgencyLevel: 'NORMAL' | 'URGENT' | 'CRITICAL' =
+        cmd.urgencyLevel !== undefined &&
+        ['NORMAL', 'URGENT', 'CRITICAL'].includes(cmd.urgencyLevel)
+          ? (cmd.urgencyLevel as 'NORMAL' | 'URGENT' | 'CRITICAL')
+          : 'NORMAL';
 
       const reviewNo = `MRB-${Date.now()}-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`;
       const firstStepApproverRole = reviewFlow?.nodes[0]?.roleCode ?? 'QUALITY_MANAGER';
@@ -84,7 +112,7 @@ export class TriggerMrbReviewUseCase {
       const mrbRecord: MRBReviewDTO = {
         id: crypto.randomUUID(),
         mrbNo: reviewNo,
-        sourceType: (cmd.sourceType && ["INCOMING_FAIL", "PROCESS_FAIL", "SHIPMENT_FAIL", "SUBCONTRACT_FAIL"].includes(cmd.sourceType) ? cmd.sourceType : mapOrderStageToSourceType(orderDTO.inspectionType)) as MRBFailCategory,
+        sourceType,
         sourceOrderNo: orderDTO.orderNo,
         batchNo: orderDTO.batchNo,
         materialCode: orderDTO.materialCode,
@@ -96,9 +124,15 @@ export class TriggerMrbReviewUseCase {
         defectQty: cmd.defectQty ?? orderDTO.failQty,
         status: 'PENDING_REVIEW',
         disposition: disposition as MRBDisposition,
+        urgencyLevel,
         approvers: [],
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
+        ...(reviewFlow !== null && reviewFlow.id !== undefined
+          ? { reviewFlowId: reviewFlow.id }
+          : {}),
+        ...(cmd.pendingDefectId !== undefined ? { pendingDefectId: cmd.pendingDefectId } : {}),
+        ...(cmd.reviewNotes !== undefined ? { reviewNotes: cmd.reviewNotes } : {}),
       };
 
       await ctx.mrbReviews.save(mrbRecord);

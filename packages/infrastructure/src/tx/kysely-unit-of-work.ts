@@ -4,6 +4,7 @@ import type { Database } from '../database/schema.js';
 import { KyselyInspectionPlanRepository } from '../repositories/inspection-plan-repository.js';
 import { KyselyInspectionOrderRepository } from '../repositories/inspection-order-repository.js';
 import { KyselyMRBReviewRepository } from '../repositories/mrb-review-repository.js';
+import { KyselyPendingDefectPoolRepository } from '../repositories/pending-defect-pool-repository.js';
 import { KyselyReviewFlowRepository } from '../repositories/review-flow-repository.js';
 import { KyselyBatchTraceRepository } from '../repositories/batch-trace-repository.js';
 import { KyselyOutboxRepository } from '../repositories/outbox-repository.js';
@@ -48,6 +49,7 @@ export class KyselyUnitOfWork implements IUnitOfWork {
         inspectionPlans: new KyselyInspectionPlanRepository(trx),
         inspectionOrders: new KyselyInspectionOrderRepository(trx),
         mrbReviews: new KyselyMRBReviewRepository(trx),
+        pendingDefects: new KyselyPendingDefectPoolRepository(trx),
         reviewFlows: new KyselyReviewFlowRepository(trx),
         traceDags: new KyselyBatchTraceRepository(trx),
         outbox: new KyselyOutboxRepository(trx),
@@ -55,6 +57,7 @@ export class KyselyUnitOfWork implements IUnitOfWork {
         auditLogs: new KyselyAuditLogRepository(trx),
         permissions: new KyselyMaterialPermissionRepository(trx),
         materials: new KyselyMasterDataRepository(trx),
+        suppliers: new KyselyMasterDataRepository(trx),
       };
       return await work(ctx);
     });

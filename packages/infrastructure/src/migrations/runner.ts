@@ -12,6 +12,23 @@ import * as outsourceProcessInspectionMigration from './009_add_outsource_proces
 import * as alignInspectorNameMigration from './010_align_inspector_name_with_employees.js';
 import * as backfillOutsourceVendorNameMigration from './011_backfill_outsource_vendor_name.js';
 import * as inspectionOrderNoSequencesMigration from './012_inspection_order_no_sequences.js';
+import * as permissionManagementHardeningMigration from './013_permission_management_hardening.js';
+import * as planCategoryFallbackMigration from './014_plan_category_fallback_and_effective_period.js';
+import * as mrbPoolAndFlowWiringMigration from './015_mrb_pool_and_flow_wiring.js';
+import * as planFieldAlignmentMigration from './016_inspection_plan_field_alignment.js';
+import * as inspectionPlanCodeSequencesMigration from './017_inspection_plan_code_sequences.js';
+import * as pendingPoolHardeningMigration from './018_pending_pool_hardening.js';
+import * as reviewFlowFieldWiringMigration from './019_review_flow_field_wiring.js';
+import * as traceNodeLineageFieldsMigration from './020_trace_node_lineage_fields.js';
+import * as renameReceiptFieldsToInboundMigration from './021_rename_receipt_fields_to_inbound.js';
+import * as backfillSupplierNameSnapshotMigration from './022_backfill_supplier_name_snapshot.js';
+import * as backfillInspectionOrderSpecSnapshotMigration from './023_backfill_inspection_order_spec_snapshot.js';
+import * as backfillIpqcLedgerFieldsMigration from './024_backfill_ipqc_ledger_fields.js';
+import * as unifyInspectionOrderNumbersMigration from './025_unify_inspection_order_numbers.js';
+import * as unifyMaterialCodesMigration from './026_unify_material_codes.js';
+import * as unifyMachinedMaterialCategoryMigration from './027_unify_machined_material_category.js';
+import * as unifyOutsourceReferencesMigration from './028_unify_outsource_references.js';
+import * as companyProfileAndOrderApprovalMigration from './029_company_profile_and_order_approval.js';
 
 class DynamicMigrationProvider implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -28,6 +45,23 @@ class DynamicMigrationProvider implements MigrationProvider {
       '010_align_inspector_name_with_employees': alignInspectorNameMigration,
       '011_backfill_outsource_vendor_name': backfillOutsourceVendorNameMigration,
       '012_inspection_order_no_sequences': inspectionOrderNoSequencesMigration,
+      '013_permission_management_hardening': permissionManagementHardeningMigration,
+      '014_plan_category_fallback_and_effective_period': planCategoryFallbackMigration,
+      '015_mrb_pool_and_flow_wiring': mrbPoolAndFlowWiringMigration,
+      '016_inspection_plan_field_alignment': planFieldAlignmentMigration,
+      '017_inspection_plan_code_sequences': inspectionPlanCodeSequencesMigration,
+      '018_pending_pool_hardening': pendingPoolHardeningMigration,
+      '019_review_flow_field_wiring': reviewFlowFieldWiringMigration,
+      '020_trace_node_lineage_fields': traceNodeLineageFieldsMigration,
+      '021_rename_receipt_fields_to_inbound': renameReceiptFieldsToInboundMigration,
+      '022_backfill_supplier_name_snapshot': backfillSupplierNameSnapshotMigration,
+      '023_backfill_inspection_order_spec_snapshot': backfillInspectionOrderSpecSnapshotMigration,
+      '024_backfill_ipqc_ledger_fields': backfillIpqcLedgerFieldsMigration,
+      '025_unify_inspection_order_numbers': unifyInspectionOrderNumbersMigration,
+      '026_unify_material_codes': unifyMaterialCodesMigration,
+      '027_unify_machined_material_category': unifyMachinedMaterialCategoryMigration,
+      '028_unify_outsource_references': unifyOutsourceReferencesMigration,
+      '029_company_profile_and_order_approval': companyProfileAndOrderApprovalMigration,
     };
   }
 }

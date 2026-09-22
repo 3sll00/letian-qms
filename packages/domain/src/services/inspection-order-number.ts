@@ -12,6 +12,8 @@
  * 以及种子数据 packages/infrastructure/src/seeds/data.ts 中已落库的历史单号形态。
  */
 
+import { toLocalDayKey } from './day-key.js';
+
 /** 无专属前缀的检验类型统一使用的中性前缀（保留历史 INS- 口径，避免存量单号语义漂移） */
 export const DEFAULT_INSPECTION_ORDER_NO_PREFIX = 'INS';
 
@@ -56,13 +58,12 @@ export function resolveInspectionOrderNoPrefix(inspectionType: string): string {
 
 /**
  * 取建单日期键 (YYYYMMDD)。
- * 使用本地时区自然日：质量单据的“当日”以工厂所在地工作日为准，而非 UTC 日界。
+ *
+ * 实现委托给共用的 `toLocalDayKey`（本地时区自然日），与方案编码取号同口径；
+ * 保留本函数名，既有调用方与文档无需变更。
  */
 export function toInspectionOrderNoDayKey(date: Date): string {
-  const year = String(date.getFullYear()).padStart(4, '0');
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}${month}${day}`;
+  return toLocalDayKey(date);
 }
 
 /** 按 `{PREFIX}-{YYYYMMDD}-{NNNN}` 组装检验单号 */

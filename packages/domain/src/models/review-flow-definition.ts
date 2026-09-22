@@ -89,6 +89,8 @@ export class ReviewFlowDefinition {
    * 导出契约 DTO 视图
    */
   public toDTO(): ReviewFlowDTO {
+    // 终审节点 = 层级序号最大者（构造时已保证 stepNo 从 1 连续递增）
+    const terminalStepNo = this.steps.length;
     return {
       id: this.id,
       flowCode: this.id,
@@ -96,10 +98,16 @@ export class ReviewFlowDefinition {
       applicableType: this.applicableCategory,
       version: 'v1.0.0',
       isActive: this.isActive,
-      nodes: this.steps.map(s => ({
+      nodes: this.steps.map((s) => ({
         nodeLevel: s.stepNo,
         nodeName: s.stepName,
         roleCode: s.approverRole,
+        // 无独立角色显示名时回退角色编码（docs/21 §10.3）
+        roleName: s.approverRole,
+        // 会签链每一步都是必经节点（PRD §3.6 多级会签，无跳签语义）
+        isRequired: true,
+        // 让步接收（特采）裁决权归属终审层级，与迁移 019 回填规则一致
+        allowConcession: s.stepNo === terminalStepNo,
         requireCustomerSign: false,
       })),
     };

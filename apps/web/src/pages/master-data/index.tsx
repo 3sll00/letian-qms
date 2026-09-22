@@ -1,3 +1,4 @@
+import { CompanyProfileView } from "./CompanyProfileView";
 import { WorkshopArchiveView } from "./WorkshopArchiveView";
 import { EmployeeArchiveView } from "./EmployeeArchiveView";
 import { CreateMasterDataModal, type MasterDataTab } from "./CreateMasterDataModal";
@@ -68,6 +69,7 @@ export function MasterDataPage({ initialTab = 'supplier' }: MasterDataProps) {
       case 'inventory': return '新增存货料品';
       case 'workshop': return '新增车间';
       case 'employee': return '新增职员';
+      case 'companyProfile': return '企业档案';
       default: return '新增主数据档案';
     }
   };
@@ -132,8 +134,21 @@ export function MasterDataPage({ initialTab = 'supplier' }: MasterDataProps) {
           >
             职员与检验员
           </button>
+          <button
+            type="button"
+            onClick={() => setTab('companyProfile')}
+            className={`px-3.5 py-1.5 rounded-md text-xs font-medium transition ${
+              tab === 'companyProfile'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-600 hover:bg-slate-100'
+            }`}
+          >
+            企业档案
+          </button>
         </div>
 
+        {/* 企业档案是单行主数据（没有「新增一条」的语义），在该页签下不展示新增入口 */}
+        {tab !== 'companyProfile' && (
         <button
           type="button"
           onClick={() => setIsCreateOpen(true)}
@@ -142,6 +157,7 @@ export function MasterDataPage({ initialTab = 'supplier' }: MasterDataProps) {
           <span>+</span>
           <span>{getAddBtnText()}</span>
         </button>
+        )}
       </div>
 
       {tab === 'customer' && <CustomerArchiveView refreshKey={refreshKey} onOpenCreate={() => setIsCreateOpen(true)} />}
@@ -149,8 +165,9 @@ export function MasterDataPage({ initialTab = 'supplier' }: MasterDataProps) {
       {tab === 'supplier' && <SupplierArchiveView refreshKey={refreshKey} onOpenCreate={() => setIsCreateOpen(true)} />}
       {tab === 'workshop' && <WorkshopArchiveView refreshKey={refreshKey} onOpenCreate={() => setIsCreateOpen(true)} />}
       {tab === 'employee' && <EmployeeArchiveView refreshKey={refreshKey} onOpenCreate={() => setIsCreateOpen(true)} />}
+      {tab === 'companyProfile' && <CompanyProfileView refreshKey={refreshKey} />}
 
-      {isCreateOpen && (
+      {isCreateOpen && tab !== 'companyProfile' && (
         <CreateMasterDataModal
           tab={tab}
           onClose={() => setIsCreateOpen(false)}

@@ -11,6 +11,8 @@ export * from './mrb/customer-sign-off.js';
 export * from './mrb/decide-mrb-disposition.js';
 export * from './release-gates/check-release-gate.js';
 export * from './traceability/penetrate-batch-dag.js';
+export * from './traceability/search-trace-batches.js';
+export * from './traceability/get-order-chain.js';
 export * from './export/export-report.js';
 export * from './export/export-trace-report.js';
 export * from './permissions/check-permission.js';

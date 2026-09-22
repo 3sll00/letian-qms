@@ -23,7 +23,7 @@ D:\乐天\letian-qms/
     ├── letian-qms-prd.md            # 乐天 QMS 产品需求规格说明书 (v2.5.0 对齐 21 项业务)
     ├── letian-qms-architecture.md   # 核心技术架构、表 DDL、并发控制与事务边界规范 (v2.5.0 生产基准级)
     ├── api/
-        └── letian-qms-openapi.yaml  # 乐天 QMS 标准 OpenAPI 3.1 接口契约规范 (v2.5.0)
+        └── letian-qms-openapi.yaml  # 乐天 QMS 标准 OpenAPI 3.1 接口契约规范 (v2.7.0)
     └── tasks/
         └── tasks.json               # 细粒度实施任务矩阵与独立双轨验收标准 (QMS-000 ~ QMS-010)
 ```
@@ -61,6 +61,15 @@ pnpm db:migrate
 # 1.3 注入与 21 张设计原型一致的基础档案与方案种子数据
 pnpm db:seed
 ```
+
+> **本机（开发机）走本地实例，不走容器**：本机 PostgreSQL 实例的唯一启停方式与端口口径见
+> `docs/23-本地数据库运行手册与端口口径.md`（端口固定 `5432`；历史端口 `55432` 已废弃）。
+> 本机 **Docker 守护进程未运行**，`pnpm db:up`（容器路线）不可用，请改用本地实例：
+>
+> ```bash
+> pnpm db:local:doctor   # 体检：端口一致性 / 迁移滞后 / API 连通 / Docker 可用性
+> pnpm db:local:start    # 启动本地实例（端口永远取自 .env 的 DB_PORT）
+> ```
 
 ### 2. 安装依赖与构建全包
 ```bash

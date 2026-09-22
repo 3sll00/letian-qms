@@ -211,8 +211,12 @@ function RuleEditorModal({
     setSaving(true);
     setError(null);
     try {
+      // 用户姓名是 material_permissions.user_name 的展示快照，编辑路径同样回传，
+      // 保证「新增 / 编辑」两条链路的提交字段集合与后端契约完全一致。
+      const userName = rule?.userName ?? employees.find((e) => e.id === userId)?.name;
       const body = {
         userId,
+        ...(userName !== undefined ? { userName } : {}),
         roleCode,
         materialCategories: categories,
         materialCodes: codes,

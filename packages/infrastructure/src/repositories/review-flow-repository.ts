@@ -1,6 +1,6 @@
 import { Kysely } from 'kysely';
 import type { ReviewFlowRepository as IReviewFlowRepository } from '@letian/domain';
-import type { MRBFailCategory, ReviewFlow } from '@letian/contracts';
+import type { MRBFailCategory, ReviewFlow, ReviewFlowNode } from '@letian/contracts';
 import type { Database, ReviewFlowInsert, ReviewFlowRow } from '../database/schema.js';
 
 /** 契约 MRBFailCategoryEnum 的 4 个合法取值 */
@@ -13,6 +13,20 @@ const MRB_FAIL_CATEGORIES: readonly string[] = [
 
 function isMrbFailCategory(value: string): value is MRBFailCategory {
   return MRB_FAIL_CATEGORIES.includes(value);
+}
+
+/**
+ * 节点读侧归一（docs/21 §10.2）：
+ * `nodes` 是 JSONB，历史行可能缺 `roleName` / `isRequired` / `allowConcession`
+ * （迁移 019 已回填，但读侧仍兜底一次，保证任何存量行都不会渲染成空白列）。
+ */
+function normalizeNodes(nodes: readonly ReviewFlowNode[]): ReviewFlowNode[] {
+  return nodes.map((node) => ({
+    ...node,
+    roleName: node.roleName !== undefined && node.roleName !== '' ? node.roleName : node.roleCode,
+    isRequired: node.isRequired ?? true,
+    allowConcession: node.allowConcession ?? false,
+  }));
 }
 
 /**
@@ -47,10 +61,11 @@ export class KyselyReviewFlowRepository implements IReviewFlowRepository {
 
     const writable = {
       flowName: flow.flowName,
+      description: flow.description ?? null,
       applicableType: flow.applicableType,
       version: flow.version,
       isActive: flow.isActive,
-      nodes: JSON.stringify(flow.nodes),
+      nodes: JSON.stringify(normalizeNodes(flow.nodes)),
       updatedAt: now,
     };
 
@@ -91,10 +106,13 @@ export class KyselyReviewFlowRepository implements IReviewFlowRepository {
       id: row.id,
       flowCode: row.flowCode,
       flowName: row.flowName,
+      ...(row.description !== null && row.description !== undefined
+        ? { description: row.description }
+        : {}),
       applicableType: row.applicableType,
       version: row.version,
       isActive: row.isActive,
-      nodes: row.nodes,
+      nodes: normalizeNodes(row.nodes),
     };
   }
 }

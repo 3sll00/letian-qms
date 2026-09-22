@@ -82,13 +82,25 @@ function isInspectionType(value: string): value is InspectionType {
 }
 
 /**
- * receipt_date 在库中是 timestamptz 列，而契约 DTO / 领域模型侧是 'YYYY-MM-DD' 字符串
- * （见 InspectionOrderSchema.receiptDate）。落库前统一转换，非法值直接报错而不是写入 Invalid Date。
+ * inbound_date 在库中是 timestamptz 列，而契约 DTO / 领域模型侧是 'YYYY-MM-DD' 字符串
+ * （见 InspectionOrderSchema.inboundDate）。落库前统一转换，非法值直接报错而不是写入 Invalid Date。
  */
-function toReceiptDate(value: string): Date {
+function toInboundDate(value: string): Date {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) {
-    throw new Error(`RECEIPT_DATE_INVALID: 采购入库日期必须是可解析的日期字符串 [${value}]`);
+    throw new Error(`INBOUND_DATE_INVALID: 入库日期必须是可解析的日期字符串 [${value}]`);
+  }
+  return parsed;
+}
+
+/**
+ * ISO8601 字符串 -> Date：TIMESTAMPTZ 列（如 completed_at）的写入归一。
+ * 非法值直接抛错、不静默写 NULL，避免再出现一条「界面看得到、库里没有」的断链（见 docs/29 §3）。
+ */
+function toTimestamp(value: string): Date {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`TIMESTAMP_INVALID: 时间必须是可解析的日期时间字符串 [${value}]`);
   }
   return parsed;
 }
@@ -131,7 +143,8 @@ export interface OrderListQuery {
   dateFrom?: string;
   dateTo?: string;
   partnerKeyword?: string;
-  receiptNo?: string;
+  /** 入库单号模糊匹配（来料检验台账「入库单号」列，006 字段扩展） */
+  inboundNo?: string;
   permissions?: readonly MaterialPermission[];
   inspectionType?: string;
   /** 鍓嶇椤电鍒嗙粍锛圛QC/IPQC/FQC/OQC锛夊搴旂殑绫诲瀷闆嗗悎锛屼笌 inspectionType 浜掓枼浣跨敤 */
@@ -151,13 +164,37 @@ export interface OrderListQuery {
   /** 鎵规鍙?/ 鐗╂枡缂栫爜 / 鐗╂枡鍚嶇О / 宸ュ崟鍙?鐨勬ā绯婂尮閰?*/
   keyword?: string;
   /**
-   * 「检验单号 / 入库单号」模糊匹配（order_no OR receipt_no）。
+   * 「检验单号 / 入库单号」模糊匹配（order_no OR inbound_no）。
    * 与 keyword（多字段联合检索）刻意区分：本参数只命中单号类字段，
    * 用于台账「单号」筛选框的精确口径，避免把物料名/批次也一并命中。
    */
   docKeyword?: string;
   /** 「物料编号 / 物料名称」模糊匹配（material_code OR material_name），对应台账「物料」筛选框 */
   materialKeyword?: string;
+  /**
+   * 「检验工单」= 检验单号（order_no）模糊匹配，对应过程检验台账「检验工单」筛选框。
+   * 与 docKeyword（order_no OR inbound_no）刻意区分：只命中 order_no，理由见 docs/28 §2.1。
+   */
+  orderNo?: string;
+  /**
+   * 「生产工单」= MES 生产工单号（work_order_no）模糊匹配，对应过程检验台账「生产工单」筛选框。
+   * 与列表列「MES生产工单」显示口径一致：物理列为空时按 batch_no 兜底（见 docs/28 §2.3）。
+   */
+  workOrderNo?: string;
+  /**
+   * 过程检验台账「操作员」列（下料/滚丝机台作业员姓名）模糊匹配。
+   * 控制器 InspectionQuerySchema 早已声明该参数，但此前未在本接口声明、listOrders() 也无条件，
+   * 对象展开传参不触发 excess property 检查 -> 输入即静默丢弃（与 docs/28 §2.2 同型，见 docs/29 §3）。
+   */
+  operatorName?: string;
+  /** 过程检验台账「设备」列（机台设备编号）模糊匹配 */
+  equipmentCode?: string;
+  /** 滚丝检验台账「螺纹规格」列模糊匹配 */
+  threadSpec?: string;
+  /** 成品检台账「终检班组」列模糊匹配 */
+  inspectionTeam?: string;
+  /** 过程检验台账「工序阶段」模糊匹配（自动断料 / 手工滚牙 / 检测入库） */
+  processStep?: string;
   page: number;
   pageSize: number;
 }
@@ -180,6 +217,9 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
   /** 员工 id -> 姓名 的惰性缓存：检验单表的 inspector_name 允许为空，读侧按主数据补齐 */
   private employeeNameCache: Map<string, string> | null = null;
 
+  /** 供应商编码 -> 名称 的惰性缓存：检验单表的 supplier_name 允许为空，读侧按供应商主数据补齐 */
+  private supplierNameCache: Map<string, string> | null = null;
+
   constructor(private readonly db: Kysely<Database>) {}
 
   /** 加载职员主数据姓名映射（整个仓储实例只查一次） */
@@ -189,6 +229,29 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
       this.employeeNameCache = new Map(rows.map((r) => [r.id, r.name]));
     }
     return this.employeeNameCache;
+  }
+
+  /**
+   * 加载供应商主数据名称映射（整个仓储实例只查一次）
+   *
+   * 供应商主数据（suppliers）是「供应商」名称的唯一权威来源：检验单上的 supplier_name 只是
+   * 建单当时的名称快照，历史行可能为空。为空时读侧回落到本映射，保证台账「供应商」列
+   * 永远展示厂商全称，而不是内部编码（如 SUP-001）。
+   */
+  private async getSupplierNameMap(): Promise<Map<string, string>> {
+    if (this.supplierNameCache === null) {
+      const rows = await this.db
+        .selectFrom('suppliers')
+        .select(['supplierCode', 'supplierName'])
+        .execute();
+      this.supplierNameCache = new Map(rows.map((r) => [r.supplierCode, r.supplierName]));
+    }
+    return this.supplierNameCache;
+  }
+
+  /** 读路径公共参照数据：[员工 id -> 姓名, 供应商编码 -> 名称]（并行加载，各自只查一次） */
+  private async getRefNameMaps(): Promise<[Map<string, string>, Map<string, string>]> {
+    return await Promise.all([this.getEmployeeNameMap(), this.getSupplierNameMap()]);
   }
 
   public async findById(id: string): Promise<InspectionOrder | null> {
@@ -202,7 +265,7 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
       .where('id', '=', id)
       .executeTakeFirst();
 
-    return row ? this.mapRow(row, await this.getEmployeeNameMap()) : null;
+    return row ? this.mapRow(row, ...(await this.getRefNameMaps())) : null;
   }
 
   public async findByOrderNo(orderNo: string): Promise<InspectionOrder | null> {
@@ -212,7 +275,7 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
       .where('orderNo', '=', orderNo)
       .executeTakeFirst();
 
-    return row ? this.mapRow(row, await this.getEmployeeNameMap()) : null;
+    return row ? this.mapRow(row, ...(await this.getRefNameMaps())) : null;
   }
 
   public async findByBatchNo(batchNo: string): Promise<readonly InspectionOrder[]> {
@@ -223,12 +286,44 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
       .orderBy('createdAt', 'asc')
       .execute();
 
-    const names = await this.getEmployeeNameMap();
-    return rows.map((row) => this.mapRow(row, names));
+    const [names, supplierNames] = await this.getRefNameMaps();
+    return rows.map((row) => this.mapRow(row, names, supplierNames));
+  }
+
+  /**
+   * 按订单标识取一组检验单：同一个订单号可能落在
+   * 「检验单号 / 工单号 / 销售出库单号 / 客户采购订单号」四个字段中的任意一个上，
+   * 这里四个字段同时等值匹配（任一命中即返回），供订单维度检验环节台账使用。
+   */
+  public async findByOrderKey(orderKey: string): Promise<readonly InspectionOrder[]> {
+    const key = orderKey.trim();
+    if (key === '') {
+      return [];
+    }
+
+    const rows = await this.db
+      .selectFrom('inspectionOrders')
+      .selectAll()
+      .where((eb) =>
+        eb.or([
+          eb('orderNo', '=', key),
+          eb('workOrderNo', '=', key),
+          eb('salesOrderNo', '=', key),
+          eb('salesOrderPoNo', '=', key),
+        ])
+      )
+      .orderBy('createdAt', 'asc')
+      .execute();
+
+    const [names, supplierNames] = await this.getRefNameMaps();
+    return rows.map((row) => this.mapRow(row, names, supplierNames));
   }
 
   public async save(order: InspectionOrder): Promise<void> {
     const now = new Date();
+    // 契约别名归一：规格型号的唯一落库列是 specification，`spec` 只是读侧别名。
+    // 此前这里只认 order.specification，只传别名 spec 的调用方会静默「读得出、写不进」（见 docs/26 §5）。
+    const specificationValue = order.specification ?? order.spec;
 
     // 鎻掑叆鍊煎唴鑱斾功鍐欙紙涓嶉鍏堟爣娉?Insertable 绫诲瀷锛夛紝璁?Kysely 鎸?ValueExpression 閫愬垪鏍￠獙
     await this.db
@@ -244,7 +339,9 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
         supplierCode: order.supplierCode ?? null,
         customerCode: order.customerCode ?? null,
         inspectorId: order.inspectorId ?? null,
-        totalQty: null,
+        // 「数量」列（报检批量）：契约 DTO 的 totalQty 一直存在，此处此前硬编码写 NULL，
+        // 导致过程检验台账「数量」列永远只能显示 --（见 docs/29 §3 断链 ②）
+        totalQty: order.totalQty ?? null,
         // 检验人姓名快照：与 inspector_id 一同落库；缺省时不写入，避免覆盖已有值
         ...(order.inspectorName !== undefined ? { inspectorName: order.inspectorName } : {}),
         workshopCode: null,
@@ -258,12 +355,12 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
         planVersionId: order.planVersionId,
         // 008 出货检验 (OQC) 出库/对账字段：仅当调用方显式传入时才写入，
         // 避免非 OQC 工单或旧调用方把已有值覆盖为 NULL
-        // 006 来料检验 (IQC) 采购入库单号 / 入库日期 / 规格型号 / 计量单位：同一「显式传入才写」口径
-        ...(order.receiptNo !== undefined ? { receiptNo: order.receiptNo } : {}),
-        ...(order.receiptDate !== undefined
-          ? { receiptDate: toReceiptDate(order.receiptDate) }
+        // 006 来料检验 (IQC) 入库单号 / 入库日期 / 规格型号 / 计量单位：同一「显式传入才写」口径
+        ...(order.inboundNo !== undefined ? { inboundNo: order.inboundNo } : {}),
+        ...(order.inboundDate !== undefined
+          ? { inboundDate: toInboundDate(order.inboundDate) }
           : {}),
-        ...(order.specification !== undefined ? { specification: order.specification } : {}),
+        ...(specificationValue !== undefined ? { specification: specificationValue } : {}),
         ...(order.unit !== undefined ? { unit: order.unit } : {}),
         ...(order.salesOrderNo !== undefined ? { salesOrderNo: order.salesOrderNo } : {}),
         ...(order.dispatchDate !== undefined ? { dispatchDate: order.dispatchDate } : {}),
@@ -276,6 +373,19 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
         ...(order.processType !== undefined ? { processType: order.processType } : {}),
         ...(order.returnDate !== undefined ? { returnDate: order.returnDate } : {}),
         ...(order.vendorName !== undefined ? { vendorName: order.vendorName } : {}),
+        // 007 过程检验工序字段：此前 save() 只写入 work_order_no，其余 9 列（断料长度 / 操作员 /
+        // 设备 / 螺纹规格 / 终检组 / 工序阶段 / 完成时间）一列都没写，而读路径 mapRow 一直在读，
+        // 属「读得出、写不进」的断链（见 docs/24 §6 D4、docs/29 §3 断链 ②）。
+        ...(order.workOrderNo !== undefined ? { workOrderNo: order.workOrderNo } : {}),
+        ...(order.blankingLength !== undefined ? { blankingLength: order.blankingLength } : {}),
+        ...(order.operatorName !== undefined ? { operatorName: order.operatorName } : {}),
+        ...(order.operatorId !== undefined ? { operatorId: order.operatorId } : {}),
+        ...(order.equipmentCode !== undefined ? { equipmentCode: order.equipmentCode } : {}),
+        ...(order.equipmentName !== undefined ? { equipmentName: order.equipmentName } : {}),
+        ...(order.threadSpec !== undefined ? { threadSpec: order.threadSpec } : {}),
+        ...(order.inspectionTeam !== undefined ? { inspectionTeam: order.inspectionTeam } : {}),
+        ...(order.processStep !== undefined ? { processStep: order.processStep } : {}),
+        ...(order.completedAt !== undefined ? { completedAt: toTimestamp(order.completedAt) } : {}),
         planSnapshot: JSON.stringify(order.planSnapshot),
         items: JSON.stringify(order.items),
         updatedAt: now,
@@ -301,11 +411,11 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
           judgment: order.overallDecision ?? null,
           inspectionNotes: order.inspectionNotes ?? null,
           planVersionId: order.planVersionId,
-          ...(order.receiptNo !== undefined ? { receiptNo: order.receiptNo } : {}),
-          ...(order.receiptDate !== undefined
-            ? { receiptDate: toReceiptDate(order.receiptDate) }
+          ...(order.inboundNo !== undefined ? { inboundNo: order.inboundNo } : {}),
+          ...(order.inboundDate !== undefined
+            ? { inboundDate: toInboundDate(order.inboundDate) }
             : {}),
-          ...(order.specification !== undefined ? { specification: order.specification } : {}),
+          ...(specificationValue !== undefined ? { specification: specificationValue } : {}),
           ...(order.unit !== undefined ? { unit: order.unit } : {}),
           ...(order.salesOrderNo !== undefined ? { salesOrderNo: order.salesOrderNo } : {}),
           ...(order.dispatchDate !== undefined ? { dispatchDate: order.dispatchDate } : {}),
@@ -317,6 +427,20 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
         ...(order.processType !== undefined ? { processType: order.processType } : {}),
         ...(order.returnDate !== undefined ? { returnDate: order.returnDate } : {}),
         ...(order.vendorName !== undefined ? { vendorName: order.vendorName } : {}),
+        // 007 过程检验工序字段：与 insert 同一「显式传入才写」口径。
+        // 这些值来自仓储读侧的 DTO 回吐（见 mapRow），因此重建型用例（暂存草稿 / 录入实测值 /
+        // 复检）不会把已有值抹成 NULL。
+        ...(order.workOrderNo !== undefined ? { workOrderNo: order.workOrderNo } : {}),
+        ...(order.totalQty !== undefined ? { totalQty: order.totalQty } : {}),
+        ...(order.blankingLength !== undefined ? { blankingLength: order.blankingLength } : {}),
+        ...(order.operatorName !== undefined ? { operatorName: order.operatorName } : {}),
+        ...(order.operatorId !== undefined ? { operatorId: order.operatorId } : {}),
+        ...(order.equipmentCode !== undefined ? { equipmentCode: order.equipmentCode } : {}),
+        ...(order.equipmentName !== undefined ? { equipmentName: order.equipmentName } : {}),
+        ...(order.threadSpec !== undefined ? { threadSpec: order.threadSpec } : {}),
+        ...(order.inspectionTeam !== undefined ? { inspectionTeam: order.inspectionTeam } : {}),
+        ...(order.processStep !== undefined ? { processStep: order.processStep } : {}),
+        ...(order.completedAt !== undefined ? { completedAt: toTimestamp(order.completedAt) } : {}),
         planSnapshot: JSON.stringify(order.planSnapshot),
           items: JSON.stringify(order.items),
           updatedAt: now,
@@ -375,8 +499,8 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
         }
         list.push(eb('createdAt', '<=', to));
       }
-      if (query.receiptNo !== undefined && query.receiptNo !== '') {
-        list.push(eb('receiptNo', 'ilike', `%${escapeLike(query.receiptNo)}%`));
+      if (query.inboundNo !== undefined && query.inboundNo !== '') {
+        list.push(eb('inboundNo', 'ilike', `%${escapeLike(query.inboundNo)}%`));
       }
       // 008 出货检验 (OQC) 台账筛选：销售出库单号 / 客户 / 客户订单号 支持模糊匹配，
       // 出库日期与 ERP 状态为精确匹配（与前端筛选控件语义一致）
@@ -406,11 +530,48 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
       }
       if (query.docKeyword !== undefined && query.docKeyword !== '') {
         const dPat = `%${escapeLike(query.docKeyword)}%`;
-        list.push(eb.or([eb('orderNo', 'ilike', dPat), eb('receiptNo', 'ilike', dPat)]));
+        list.push(eb.or([eb('orderNo', 'ilike', dPat), eb('inboundNo', 'ilike', dPat)]));
+      }
+      // 过程检验台账「检验工单」筛选框：只查检验单号，不掺 inbound_no（过程检验无入库单概念）
+      if (query.orderNo !== undefined && query.orderNo !== '') {
+        list.push(eb('orderNo', 'ilike', `%${escapeLike(query.orderNo)}%`));
+      }
+      // 过程检验台账「生产工单」筛选框：与列表列「MES生产工单」显示口径一致 ——
+      // mapRow 在 work_order_no 为空时用 batch_no 兜底，筛选必须同样兜底，
+      // 否则会出现「列上显示 batch_no、输入该值却查不到」的筛选/显示不一致。
+      if (query.workOrderNo !== undefined && query.workOrderNo !== '') {
+        const wPat = `%${escapeLike(query.workOrderNo)}%`;
+        list.push(
+          eb.or([
+            eb('workOrderNo', 'ilike', wPat),
+            eb.and([
+              eb.or([eb('workOrderNo', 'is', null), eb('workOrderNo', '=', '')]),
+              eb('batchNo', 'ilike', wPat),
+            ]),
+          ])
+        );
       }
       if (query.materialKeyword !== undefined && query.materialKeyword !== '') {
         const mPat = `%${escapeLike(query.materialKeyword)}%`;
         list.push(eb.or([eb('materialCode', 'ilike', mPat), eb('materialName', 'ilike', mPat)]));
+      }
+      // 过程检验（下料 / 滚丝 / 成品检）台账列级筛选：操作员 / 设备 / 螺纹规格 / 终检班组 / 工序阶段。
+      // 这五个参数此前只存在于控制器 InspectionQuerySchema（以及下推对象里），仓储接口未声明、
+      // 查询无条件，属「声明了但空转」的筛选黑洞 —— 本轮真正落到 SQL（见 docs/29 §3 断链 ①）。
+      if (query.operatorName !== undefined && query.operatorName !== '') {
+        list.push(eb('operatorName', 'ilike', `%${escapeLike(query.operatorName)}%`));
+      }
+      if (query.equipmentCode !== undefined && query.equipmentCode !== '') {
+        list.push(eb('equipmentCode', 'ilike', `%${escapeLike(query.equipmentCode)}%`));
+      }
+      if (query.threadSpec !== undefined && query.threadSpec !== '') {
+        list.push(eb('threadSpec', 'ilike', `%${escapeLike(query.threadSpec)}%`));
+      }
+      if (query.inspectionTeam !== undefined && query.inspectionTeam !== '') {
+        list.push(eb('inspectionTeam', 'ilike', `%${escapeLike(query.inspectionTeam)}%`));
+      }
+      if (query.processStep !== undefined && query.processStep !== '') {
+        list.push(eb('processStep', 'ilike', `%${escapeLike(query.processStep)}%`));
       }
       if (query.permissions && query.permissions.length > 0) {
         const permClause = buildMaterialPermissionWhere(query.permissions);
@@ -426,7 +587,7 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
             eb('materialCode', 'ilike', pattern),
             eb('materialName', 'ilike', pattern),
             eb('orderNo', 'ilike', pattern),
-            eb('receiptNo', 'ilike', pattern),
+            eb('inboundNo', 'ilike', pattern),
             eb('workOrderNo', 'ilike', pattern),
             eb('operatorName', 'ilike', pattern),
             eb('equipmentCode', 'ilike', pattern),
@@ -469,8 +630,8 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
       statusCounts[row.status] = Number(row.count);
     }
 
-    const names = await this.getEmployeeNameMap();
-    return { total, list: rows.map((row) => this.mapRow(row, names)), statusCounts };
+    const [names, supplierNames] = await this.getRefNameMaps();
+    return { total, list: rows.map((row) => this.mapRow(row, names, supplierNames)), statusCounts };
   }
 
   public async getIpqcOverviewStats(): Promise<{
@@ -553,8 +714,8 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
 
   public async findAll(): Promise<InspectionOrder[]> {
     const rows = await this.db.selectFrom('inspectionOrders').selectAll().execute();
-    const names = await this.getEmployeeNameMap();
-    return rows.map((r) => this.mapRow(r, names));
+    const [names, supplierNames] = await this.getRefNameMaps();
+    return rows.map((r) => this.mapRow(r, names, supplierNames));
   }
 
   public async updateStatsAndVerdict(
@@ -571,6 +732,31 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
     await this.db.updateTable("inspectionOrders").set(values).where("id", "=", id).execute();
   }
 
+  /**
+   * 质量负责人签核（docs/35 §5）：写入**真实签核动作**的产物 —— 签核人 id / 姓名 / 时间。
+   *
+   * - 签核人由调用方从会话取（`operatorOf(request)`），不接受请求体自称的签核人；
+   * - 重复签核覆盖为最后一次（同一动作的更正），但 `approved_at` 始终是最新一次；
+   * - 签核意见**不写这里**：检验单备注记的是检验过程，签核意见进审计日志（append-only），
+   *   两个渠道互不覆盖（见 controllers/inspections.controller.ts 的 approve 路由）。
+   */
+  public async recordApproval(
+    id: string,
+    approval: { approverId?: string; approverName?: string }
+  ): Promise<void> {
+    const now = new Date();
+
+    await this.db
+      .updateTable('inspectionOrders')
+      .set({
+        ...(approval.approverId !== undefined ? { approverId: approval.approverId } : {}),
+        ...(approval.approverName !== undefined ? { approverName: approval.approverName } : {}),
+        approvedAt: now,
+        updatedAt: now,
+      })
+      .where('id', '=', id)
+      .execute();
+  }
   public async updateStatus(id: string, status: string, remark?: string): Promise<void> {
     const targetStatus = toInspectionStatus(status);
 
@@ -631,7 +817,17 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
     return seq;
   }
 
-  private mapRow(row: InspectionOrderRow, employeeNames?: Map<string, string>): InspectionOrder {
+  private mapRow(
+    row: InspectionOrderRow,
+    employeeNames?: Map<string, string>,
+    supplierNames?: Map<string, string>
+  ): InspectionOrder {
+    // 「供应商」口径：优先取检验单上的名称快照（建单当时的权威值），
+    // 快照为空（历史行 / 只传了编码）时按 supplier_code 回查供应商主数据，
+    // 让台账永远展示厂商全称而不是内部编码（SUP-001）。
+    const resolvedSupplierName =
+      (row as any).supplierName ||
+      (row.supplierCode !== null ? supplierNames?.get(row.supplierCode) : undefined);
     return {
       id: row.id,
       orderNo: row.orderNo,
@@ -657,11 +853,11 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
       ...(row.judgment !== null ? { overallDecision: row.judgment } : {}),
       ...(row.inspectionNotes !== null ? { inspectionNotes: row.inspectionNotes } : {}),
       ...(row.totalQty !== null && row.totalQty !== undefined ? { totalQty: Number(row.totalQty) } : {}),
-      ...((row as any).receiptNo ? { receiptNo: (row as any).receiptNo } : {}),
-      ...((row as any).receiptDate ? { receiptDate: ((row as any).receiptDate instanceof Date ? (row as any).receiptDate.toISOString().slice(0, 10) : String((row as any).receiptDate).slice(0, 10)) } : {}),
+      ...((row as any).inboundNo ? { inboundNo: (row as any).inboundNo } : {}),
+      ...((row as any).inboundDate ? { inboundDate: ((row as any).inboundDate instanceof Date ? (row as any).inboundDate.toISOString().slice(0, 10) : String((row as any).inboundDate).slice(0, 10)) } : {}),
       ...((row as any).specification || (row as any).spec ? { specification: (row as any).specification || (row as any).spec, spec: (row as any).specification || (row as any).spec } : {}),
       ...((row as any).unit ? { unit: (row as any).unit } : {}),
-      ...((row as any).supplierName ? { supplierName: (row as any).supplierName } : {}),
+      ...(resolvedSupplierName ? { supplierName: resolvedSupplierName } : {}),
       // inspector_name 为冗余快照列，历史上可能为空：按员工主数据（id -> 姓名）补齐
       ...((row as any).inspectorName
         ? { inspectorName: (row as any).inspectorName }
@@ -683,22 +879,31 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
       ...((row as any).customerName ? { customerName: (row as any).customerName } : {}),
       ...((row as any).salesOrderPoNo ? { salesOrderPoNo: (row as any).salesOrderPoNo } : {}),
       ...((row as any).erpStatus ? { erpStatus: (row as any).erpStatus } : {}),
-      // 009 委外检验 (OQC 七分类) 台账字段；委外单号缺失时以批次号兜底，
-      // 回厂日期缺失时回落到建单日期，保证前端「委外加工单号 / 回厂日期」两列永不为空。
-      ...((row as any).outsourceNo
-        ? { outsourceNo: (row as any).outsourceNo }
-        : row.batchNo
-          ? { outsourceNo: row.batchNo }
-          : {}),
+      // 009 委外检验 (OQC 七分类) 台账字段。委外加工单号 / 回厂日期**只取物理列**：
+      // 列为空即不输出该键，界面按 `-` 渲染。历史上这里用 batch_no 顶替委外加工单号、
+      // 用 created_at 顶替回厂日期，属「推导值冒充真实字段」——已被 docs/09 §2.4 与
+      // scripts/testing/README.md 的断言口径明令禁止（见 docs/32 §2）。
+      ...((row as any).outsourceNo ? { outsourceNo: (row as any).outsourceNo } : {}),
       ...((row as any).processType ? { processType: (row as any).processType } : {}),
       ...((row as any).returnDate
         ? { returnDate: String((row as any).returnDate).slice(0, 10) }
-        : { returnDate: row.createdAt.toISOString().slice(0, 10) }),
+        : {}),
       ...((row as any).vendorName
         ? { vendorName: (row as any).vendorName }
-        : (row as any).supplierName
-          ? { vendorName: (row as any).supplierName }
+        : resolvedSupplierName
+          ? { vendorName: resolvedSupplierName }
           : {}),
-    };
+      // 029 质量负责人签核（docs/35 §5）：只输出物理列的真实值；未签核即不输出该键，
+      // 制造证书 / 质量证书据此留白，绝不用「签核人」这类键冒充已发生的签核动作。
+      ...((row as any).approverId ? { approverId: (row as any).approverId } : {}),
+      ...((row as any).approverName ? { approverName: (row as any).approverName } : {}),
+      ...((row as any).approvedAt
+        ? {
+            approvedAt:
+              (row as any).approvedAt instanceof Date
+                ? (row as any).approvedAt.toISOString()
+                : String((row as any).approvedAt),
+          }
+        : {}),    };
   }
 }

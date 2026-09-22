@@ -18,6 +18,7 @@ import {
   PermissionLogListResponseSchema,
   MaterialPermissionListResponseSchema,
   CreatePermissionRequestSchema,
+  UpdateMaterialPermissionRequestSchema,
   ApplyRolePermissionRequestSchema,
   PermissionCheckRequestSchema,
   PermissionCheckResponseSchema,
@@ -32,6 +33,7 @@ import {
   MRBStatusEnum,
   MRBDispositionEnum,
   MRBFailCategoryEnum,
+  MRBUrgencyLevelEnum,
   MRBReviewSchema,
   ReviewFlowSchema,
   InspectionTypeEnum,
@@ -40,7 +42,11 @@ import {
   MetricCategoryEnum,
   InspectionItemSchema,
   InspectionPlanItemSchema,
+  InspectionPlanSchema,
   InspectionPlanVersionSchema,
+  PlanStatusEnum,
+  PlanStatsSchema,
+  UpgradePlanVersionRequestSchema,
   InspectionPlanSnapshotSchema,
   InspectionOrderSchema,
   SystemTypeEnum,
@@ -75,6 +81,7 @@ export function createLetianQmsOpenApiRegistry(): OpenAPIRegistry {
   registry.register('MRBStatus', MRBStatusEnum);
   registry.register('MRBDisposition', MRBDispositionEnum);
   registry.register('MRBFailCategory', MRBFailCategoryEnum);
+  registry.register('MRBUrgencyLevel', MRBUrgencyLevelEnum);
   registry.register('MRBReview', MRBReviewSchema);
   registry.register('ReviewFlow', ReviewFlowSchema);
   registry.register('InspectionType', InspectionTypeEnum);
@@ -83,7 +90,11 @@ export function createLetianQmsOpenApiRegistry(): OpenAPIRegistry {
   registry.register('MetricCategory', MetricCategoryEnum);
   registry.register('InspectionItem', InspectionItemSchema);
   registry.register('InspectionPlanItem', InspectionPlanItemSchema);
+  registry.register('InspectionPlan', InspectionPlanSchema);
   registry.register('InspectionPlanVersion', InspectionPlanVersionSchema);
+  registry.register('PlanStatus', PlanStatusEnum);
+  registry.register('PlanStats', PlanStatsSchema);
+  registry.register('UpgradePlanVersionRequest', UpgradePlanVersionRequestSchema);
   registry.register('InspectionPlanSnapshot', InspectionPlanSnapshotSchema);
   registry.register('InspectionOrder', InspectionOrderSchema);
   registry.register('IntegrationSystemType', SystemTypeEnum);
@@ -369,7 +380,7 @@ export function createLetianQmsOpenApiRegistry(): OpenAPIRegistry {
   // 权限规则分页列表（含停用规则）
   registry.registerPath({
     method: 'get',
-    path: '/api/v1/permissions',
+    path: '/api/v1/permissions/materials',
     summary: '查询物料权限规则分页列表（含停用）',
     tags: ['Permission'],
     request: {
@@ -396,7 +407,7 @@ export function createLetianQmsOpenApiRegistry(): OpenAPIRegistry {
   // 创建权限规则
   registry.registerPath({
     method: 'post',
-    path: '/api/v1/permissions',
+    path: '/api/v1/permissions/materials',
     summary: '创建物料权限规则',
     tags: ['Permission'],
     request: {
@@ -431,7 +442,7 @@ export function createLetianQmsOpenApiRegistry(): OpenAPIRegistry {
   // 编辑权限规则
   registry.registerPath({
     method: 'put',
-    path: '/api/v1/permissions/{id}',
+    path: '/api/v1/permissions/materials/{id}',
     summary: '编辑物料权限规则（三维维度 / 启停）',
     tags: ['Permission'],
     request: {
@@ -439,7 +450,7 @@ export function createLetianQmsOpenApiRegistry(): OpenAPIRegistry {
       body: {
         content: {
           'application/json': {
-            schema: CreatePermissionRequestSchema,
+            schema: UpdateMaterialPermissionRequestSchema,
           },
         },
       },
@@ -459,7 +470,7 @@ export function createLetianQmsOpenApiRegistry(): OpenAPIRegistry {
   // 删除权限规则
   registry.registerPath({
     method: 'delete',
-    path: '/api/v1/permissions/{id}',
+    path: '/api/v1/permissions/materials/{id}',
     summary: '删除物料权限规则',
     tags: ['Permission'],
     request: {

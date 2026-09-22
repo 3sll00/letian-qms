@@ -12,6 +12,7 @@ import {
   DeliveryOrderRef,
   IReportTemplatePort,
   RenderedReportFile,
+  resolveOutsourceNoFromErp,
 } from '@letian/domain';
 import {
   QualityReportTemplate,
@@ -137,17 +138,31 @@ export class OutsourceSevenCategoryAdapter implements IOutsourcePort {
         return this.getFallbackDispatches(category);
       }
 
-      return res.recordset.map((row: any) => ({
-        dispatchNo: row.dispatchNo || ('WWJG-' + row.vchCode),
-        category,
-        materialCode: row.materialCode || 'UNKNOWN',
-        materialName: row.materialName || '未命名外协件',
-        furnaceHeatBatchNo: 'FURNACE-' + String(row.dispatchDate).replace(/-/g, '') + '-' + row.dlyOrder,
-        quantity: Number(row.quantity) || 0,
-        vendorCode: row.vendorCode || 'VND-OUT',
-        vendorName: row.vendorName || '外协加工合作单位',
-        processRequirements: '按乐天企业技术规范及图纸标准执行' + category + '工序质检',
-      }));
+      // 委外加工单号 = ERP DlyndxSC.Number 原样镜像（前缀 / 形态口径单点定义在 domain 的
+      // outsource-reference，见 docs/35 §2）。ERP 未给单号的行走 WWJG-{VchCode} 兜底；
+      // 两者都没有的**跳过该行** —— 没有 ERP 单号的委外行无法与 ERP 对账，宁可不返回也不编造单号。
+      const dispatches = res.recordset
+        .map((row: any): OutsourceInspectionDispatch | null => {
+          const dispatchNo = resolveOutsourceNoFromErp({
+            dispatchNo: row.dispatchNo,
+            vchCode: row.vchCode,
+          });
+          if (dispatchNo === null) return null;
+          return {
+            dispatchNo,
+            category,
+            materialCode: row.materialCode || 'UNKNOWN',
+            materialName: row.materialName || '未命名外协件',
+            furnaceHeatBatchNo: 'FURNACE-' + String(row.dispatchDate).replace(/-/g, '') + '-' + row.dlyOrder,
+            quantity: Number(row.quantity) || 0,
+            vendorCode: row.vendorCode || 'VND-OUT',
+            vendorName: row.vendorName || '外协加工合作单位',
+            processRequirements: '按乐天企业技术规范及图纸标准执行' + category + '工序质检',
+          };
+        })
+        .filter((row): row is OutsourceInspectionDispatch => row !== null);
+
+      return dispatches.length > 0 ? dispatches : this.getFallbackDispatches(category);
     } catch (err) {
       return this.getFallbackDispatches(category);
     }

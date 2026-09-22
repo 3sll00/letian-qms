@@ -1,15 +1,16 @@
-﻿import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { RefreshCw, Printer, Search, RotateCcw, GitFork, X } from 'lucide-react';
 import { CertificatePrintModal } from '../../../components/certificate/CertificatePrintModal';
 import { buildIqcCertificateData } from '../../../lib/certificateDataService';
+import { loadCompanyProfile } from '../../../lib/companyProfile';
 import type { QualityCertificateData } from '../../../lib/inspectionTypes';
 import { api } from '../../../lib/api';
 
 export interface IqcItem {
   id: string;
   docNo: string;
-  receiptNo: string;
-  receiptDate: string;
+  inboundNo: string;
+  inboundDate: string;
   materialCode: string;
   materialName: string;
   spec: string;
@@ -24,6 +25,12 @@ export interface IqcItem {
   steelGrade?: string;
   furnaceNo?: string;
   date?: string;
+  /** 工单实测项（inspection_orders.items）：质量证书「化学成分 / 力学性能 / 尺寸」三段的唯一真实来源 */
+  items?: InspectionItemRow[];
+  /** 质量负责人签核人姓名（inspection_orders.approver_name，docs/35 §5）：未签核即空 */
+  approverName?: string;
+  /** 签核时间（inspection_orders.approved_at） */
+  approvedAt?: string;
 }
 
 /**
@@ -41,8 +48,8 @@ interface InspectionOrderListResponse {
 interface InspectionOrderRow {
   id?: string;
   orderNo?: string;
-  receiptNo?: string | null;
-  receiptDate?: string | null;
+  inboundNo?: string | null;
+  inboundDate?: string | null;
   materialCode?: string;
   materialName?: string;
   spec?: string;
@@ -59,6 +66,24 @@ interface InspectionOrderRow {
   steelGrade?: string;
   furnaceHeatNo?: string;
   furnaceNo?: string;
+  items?: InspectionItemRow[];
+  approverName?: string | null;
+  approvedAt?: string | null;
+}
+
+/** 工单实测项：只声明证书组装会读取的字段，避免 any 泛滥（值域见 @letian/contracts InspectionItemSchema） */
+interface InspectionItemRow {
+  itemCode?: string;
+  name?: string;
+  metricCategory?: string;
+  standardText?: string;
+  nominalValue?: number;
+  upperTolerance?: number;
+  lowerTolerance?: number;
+  unit?: string;
+  measuredVal?: number;
+  measuredText?: string;
+  result?: string;
 }
 
 /** 已提交的筛选条件 */
@@ -68,6 +93,12 @@ interface IqcFilters {
   supplier: string;
   status: string;
   date: string;
+}
+
+/** 供应商下拉项（供应商主数据）：保证「供应商」维度的筛选口径与台账展示口径同源 */
+interface SupplierOption {
+  supplierCode: string;
+  supplierName: string;
 }
 
 const EMPTY_IQC_FILTERS: IqcFilters = {
@@ -102,6 +133,13 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
   const [status, setStatus] = useState('全部');
   const [date, setDate] = useState('');
 
+  /**
+   * 供应商下拉选项：来自供应商主数据 (GET /master-data/suppliers)。
+   * 历史上这里是硬编码的演示厂商名（宝钢/鞍钢/…），与库中真实供应商编码完全对不上，
+   * 选中任一选项都会查空——属于「界面看着有筛选、实际没接数据库」的死筛选，故改为真实主数据。
+   */
+  const [supplierOptions, setSupplierOptions] = useState<SupplierOption[]>([]);
+
   /** 已提交的筛选条件（点「查询」才生效）；loadOrders 只读这一份，保证「界面条件 == 接口条件」 */
   const [appliedFilters, setAppliedFilters] = useState<IqcFilters>(EMPTY_IQC_FILTERS);
 
@@ -124,19 +162,34 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
   const [traceBatchItem, setTraceBatchItem] = useState<IqcItem | null>(null);
   const [traceLoading, setTraceLoading] = useState(false);
 
+  /**
+   * 行级证书（docs/35 §10 M9）：所有行可点，未录入的项留白。
+   * 企业档案（抬头 / 印章 / 供货单位·产地）取主数据，未维护即留白（不回落硬编码抬头）；
+   * 批准人取本单真实签核人（未签核即空，不打印编造人名）。
+   */
   const handleOpenCert = (item: IqcItem) => {
-    const certData = buildIqcCertificateData({
-      id: item.docNo,
-      material: item.materialName,
-      spec: item.spec,
-      quantity: item.qty,
-      supplier: item.supplier,
-      inspectDate: item.receiptDate,
-      batchNo: item.batchNo,
-      furnaceNo: item.furnaceNo || item.batchNo,
-    });
-    setCurrentCertData(certData);
-    setPrintModalOpen(true);
+    void (async () => {
+      const companyProfile = await loadCompanyProfile();
+      const certData = buildIqcCertificateData({
+        // 证书编号读 orderNo：旧实现把单号写进 `id` 键，builder 读不到 -> 证书编号与弹窗标题恒空白
+        orderNo: item.docNo,
+        material: item.materialName,
+        spec: item.spec,
+        quantity: item.qty,
+        supplier: item.supplier,
+        // 炉号只认库中真实列 furnace_heat_batch_no；旧实现 `|| item.batchNo` 回落，等于把批号当炉号打印
+        furnaceNo: item.furnaceNo,
+        batchNo: item.batchNo,
+        // 签发日期不取入库日期：`inspectDate` 会把入库日期打印成证书签发日期（2023 年的单看起来是 2023 年签发），
+        // 不传即由 certificateDataService.certIssueDate 取「今天」（生成本证书的动作真实发生在今天）
+        // 实测分区只认工单真实实测项；没有 items 即空数组，模板对应分区整体不渲染
+        items: item.items,
+        ...(item.approverName !== undefined && item.approverName !== '' ? { approverName: item.approverName } : {}),
+        ...(companyProfile !== null ? { companyProfile } : {}),
+      });
+      setCurrentCertData(certData);
+      setPrintModalOpen(true);
+    })();
   };
 
   const handleOpenTrace = (item: IqcItem) => {
@@ -146,6 +199,23 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
       setTraceLoading(false);
     }, 250);
   };
+
+  // 供应商下拉取自供应商主数据；主数据不可用时保持空列表（退化为「全部供应商」），
+  // 绝不回落到硬编码厂商名，避免出现「选了却查不到」的死筛选。
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const rows = await api.get<SupplierOption[]>('/master-data/suppliers');
+        if (!cancelled) setSupplierOptions(Array.isArray(rows) ? rows : []);
+      } catch {
+        if (!cancelled) setSupplierOptions([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const loadOrders = useCallback(async () => {
     setLoading(true);
@@ -192,13 +262,14 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
         return {
           id: o.id || `iqc-row-${(page - 1) * pageSize + idx + 1}`,
           docNo: o.orderNo || '-',
-          // 入库单号与入库日期一律取库中真实列，缺失显示 '-'：
+          // 入库单号与入库日期一律取库中真实列（inbound_no / inbound_date），缺失显示 '-'：
           // 不再用 `RK-` + 检验单号推导单号，也不再用 createdAt 近似入库日期（两者都会让链路真伪无法判断）
-          receiptNo: o.receiptNo || '-',
-          receiptDate: o.receiptDate ? String(o.receiptDate).slice(0, 10) : '-',
+          inboundNo: o.inboundNo || '-',
+          inboundDate: o.inboundDate ? String(o.inboundDate).slice(0, 10) : '-',
           materialCode: o.materialCode || '-',
           materialName: o.materialName || '-',
-          spec: o.spec || o.specification || '',
+          // 规格型号只认库中真实列 specification（契约 spec 是它的只读别名），缺失时不做任何推导
+          spec: (o.specification || o.spec || '').trim(),
           qty: Number(o.sampleQty ?? o.totalQty ?? 0),
           unit: o.unit || '',
           supplier: o.supplierName || o.supplierCode || '-',
@@ -210,6 +281,9 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
           judgment: o.overallDecision,
           steelGrade: o.steelGrade,
           furnaceNo: o.furnaceHeatNo || o.furnaceNo,
+          items: Array.isArray(o.items) ? o.items : undefined,
+          approverName: o.approverName !== undefined && o.approverName !== null ? String(o.approverName) : '',
+          approvedAt: o.approvedAt !== undefined && o.approvedAt !== null ? String(o.approvedAt) : '',
         };
       });
       setItems(mapped);
@@ -330,13 +404,11 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
               className="w-full px-3 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500 bg-white"
             >
               <option value="全部">全部供应商</option>
-              <option value="宝钢">宝钢</option>
-              <option value="鞍钢">鞍钢</option>
-              <option value="武钢">武钢</option>
-              <option value="江西铜业">江西铜业</option>
-              <option value="标准件厂A">标准件厂A</option>
-              <option value="标准件厂B">标准件厂B</option>
-              <option value="南山铝业">南山铝业</option>
+              {supplierOptions.map((opt) => (
+                <option key={opt.supplierCode} value={opt.supplierCode}>
+                  {opt.supplierCode} · {opt.supplierName}
+                </option>
+              ))}
             </select>
           </div>
 
@@ -417,7 +489,7 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
                   />
                 </th>
                 <th className="py-3 px-4 font-normal">检验单号</th>
-                <th className="py-3 px-4 font-normal">采购入库单号</th>
+                <th className="py-3 px-4 font-normal">入库单号</th>
                 <th className="py-3 px-4 font-normal">入库日期</th>
                 <th className="py-3 px-4 font-normal">物料编号</th>
                 <th className="py-3 px-4 font-normal">物料名称</th>
@@ -457,13 +529,13 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
                       {item.docNo}
                     </span>
                   </td>
-                  {/* 2. 采购入库单号 */}
+                  {/* 2. 入库单号 */}
                   <td className="py-3 px-4 text-slate-600 font-mono">
-                    {item.receiptNo}
+                    {item.inboundNo}
                   </td>
                   {/* 3. 入库日期 */}
                   <td className="py-3 px-4 text-slate-500">
-                    {item.receiptDate}
+                    {item.inboundDate}
                   </td>
                   {/* 4. 物料编号 */}
                   <td className="py-3 px-4 font-bold text-slate-900 font-mono">
@@ -530,15 +602,14 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
                           追溯
                         </button>
                       )}
-                      {item.status === '已合格' && (
-                        <button
-                          title="打印/预览质保书"
-                          onClick={() => handleOpenCert(item)}
-                          className="text-slate-400 hover:text-slate-600 p-0.5 rounded"
-                        >
-                          <Printer className="w-3.5 h-3.5" />
-                        </button>
-                      )}
+                      {/* 行级证书入口：所有行可点，数据缺失由证书留白体现（不用「按钮消失」表达，docs/35 §10） */}
+                      <button
+                        title="按本行数据导出证书（未录入的项留白）"
+                        onClick={() => handleOpenCert(item)}
+                        className="text-blue-600 hover:text-blue-700 hover:underline"
+                      >
+                        证书
+                      </button>
                     </div>
                   </td>
                 </tr>
@@ -633,10 +704,10 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
                       <div className="flex-1">
                         <div className="flex items-center justify-between">
                           <span className="font-bold text-slate-800">采购到货入库</span>
-                          <span className="text-slate-400 text-[11px]">{traceBatchItem.receiptDate}</span>
+                          <span className="text-slate-400 text-[11px]">{traceBatchItem.inboundDate}</span>
                         </div>
                         <p className="text-slate-500 text-[11px] mt-0.5">
-                          ERP采购入库单号: <span className="font-mono text-slate-700">{traceBatchItem.receiptNo}</span> | 供应商: {traceBatchItem.supplier} | 数量: {traceBatchItem.qty} {traceBatchItem.unit}
+                          ERP入库单号: <span className="font-mono text-slate-700">{traceBatchItem.inboundNo}</span> | 供应商: {traceBatchItem.supplier} | 数量: {traceBatchItem.qty} {traceBatchItem.unit}
                         </p>
                       </div>
                     </div>
@@ -648,7 +719,7 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
                       <div className="flex-1">
                         <div className="flex items-center justify-between">
                           <span className="font-bold text-slate-800">来料质量检验 (IQC)</span>
-                          <span className="text-slate-400 text-[11px]">{traceBatchItem.receiptDate}</span>
+                          <span className="text-slate-400 text-[11px]">{traceBatchItem.inboundDate}</span>
                         </div>
                         <p className="text-slate-500 text-[11px] mt-0.5">
                           检验单号: <span className="font-mono text-slate-700">{traceBatchItem.docNo}</span> | 检验人: {traceBatchItem.inspectorName} | 检验状态: <span className="font-semibold text-emerald-600">{traceBatchItem.status}</span>

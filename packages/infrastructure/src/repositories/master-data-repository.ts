@@ -2,6 +2,7 @@ import { Kysely } from 'kysely';
 import type { ErpPort } from '@letian/domain';
 import type {
   Customer,
+  CompanyProfile,
   Employee,
   InventoryCategory,
   Material,
@@ -10,6 +11,7 @@ import type {
 } from '@letian/contracts';
 import type {
   CustomerRow,
+  CompanyProfileRow,
   Database,
   EmployeeRow,
   InventoryCategoryRow,
@@ -186,6 +188,10 @@ export class KyselyMasterDataRepository implements ErpPort {
       name: row.name,
       isActive: row.isActive,
       createdAt: row.createdAt.toISOString(),
+      // 主角色（employees.role_code，迁移 003 新增列）关联角色字典 roles.role_code。
+      // 必须显式映射：物料权限管理页的用户下拉、登录签发的 JWT role、权限校验日志的
+      // role_code 全部依赖它，遗漏会静默退化为 'GUEST'（详见 docs/18 §3.2 D2）。
+      ...(row.roleCode !== null ? { roleCode: row.roleCode } : {}),
       ...(row.department !== null ? { department: row.department } : {}),
       ...(row.phone !== null ? { phone: row.phone } : {}),
       ...(row.email !== null ? { email: row.email } : {}),
@@ -203,6 +209,74 @@ export class KyselyMasterDataRepository implements ErpPort {
     };
   }
 
+  // --------------------------------------------------------------------------
+  // 企业档案（迁移 029，docs/35 §6）：证书抬头「签发主体 / 供货单位 / 产地」的唯一真实来源。
+  // 与其它主数据不同，本表是**单行表**且允许人工维护（ERP 侧没有对应档案）。
+  // --------------------------------------------------------------------------
+
+  /** 读取企业档案；表内无行即返回 null（调用方按「未维护」处理，绝不用硬编码常量顶替） */
+  public async getCompanyProfile(): Promise<CompanyProfile | null> {
+    const row = await this.db.selectFrom('companyProfile').selectAll().executeTakeFirst();
+    return row === undefined ? null : this.mapCompanyProfile(row);
+  }
+
+  /**
+   * 写入企业档案（单行 upsert）。
+   *
+   * 语义：**显式传入的字段才更新**，传空串表示清空该字段，未传入的字段保持原值；
+   * `updatedBy` = 当前登录用户（服务端注入）。单行表由 `profile_id BOOLEAN PRIMARY KEY` 保证，
+   * 冲突分支固定按 `profile_id` 更新，结构上不可能写出第二行。
+   */
+  public async saveCompanyProfile(
+    data: {
+      legalName?: string;
+      legalNameEn?: string;
+      shortName?: string;
+      address?: string;
+      originPlace?: string;
+      phone?: string;
+      email?: string;
+      qualityStamp?: string;
+    },
+    updatedBy?: string
+  ): Promise<CompanyProfile> {
+    const patch = {
+      ...(data.legalName !== undefined ? { legalName: data.legalName } : {}),
+      ...(data.legalNameEn !== undefined ? { legalNameEn: data.legalNameEn } : {}),
+      ...(data.shortName !== undefined ? { shortName: data.shortName } : {}),
+      ...(data.address !== undefined ? { address: data.address } : {}),
+      ...(data.originPlace !== undefined ? { originPlace: data.originPlace } : {}),
+      ...(data.phone !== undefined ? { phone: data.phone } : {}),
+      ...(data.email !== undefined ? { email: data.email } : {}),
+      ...(data.qualityStamp !== undefined ? { qualityStamp: data.qualityStamp } : {}),
+      ...(updatedBy !== undefined ? { updatedBy } : {}),
+      updatedAt: new Date(),
+    };
+
+    const row = await this.db
+      .insertInto('companyProfile')
+      .values({ profileId: true, ...patch })
+      .onConflict((oc) => oc.column('profileId').doUpdateSet(patch))
+      .returningAll()
+      .executeTakeFirstOrThrow();
+
+    return this.mapCompanyProfile(row);
+  }
+
+  private mapCompanyProfile(row: CompanyProfileRow): CompanyProfile {
+    return {
+      ...(row.legalName !== null ? { legalName: row.legalName } : {}),
+      ...(row.legalNameEn !== null ? { legalNameEn: row.legalNameEn } : {}),
+      ...(row.shortName !== null ? { shortName: row.shortName } : {}),
+      ...(row.address !== null ? { address: row.address } : {}),
+      ...(row.originPlace !== null ? { originPlace: row.originPlace } : {}),
+      ...(row.phone !== null ? { phone: row.phone } : {}),
+      ...(row.email !== null ? { email: row.email } : {}),
+      ...(row.qualityStamp !== null ? { qualityStamp: row.qualityStamp } : {}),
+      ...(row.updatedBy !== null ? { updatedBy: row.updatedBy } : {}),
+      updatedAt: row.updatedAt.toISOString(),
+    };
+  }
   public async saveSupplier(data: { supplierCode: string; supplierName: string; contactPerson?: string; phone?: string }): Promise<Supplier> {
     const row = await this.db.insertInto('suppliers').values({
       id: crypto.randomUUID(),
@@ -250,11 +324,12 @@ export class KyselyMasterDataRepository implements ErpPort {
     return this.mapWorkshop(row);
   }
 
-  public async saveEmployee(data: { employeeCode: string; name: string; department?: string; phone?: string; email?: string }): Promise<Employee> {
+  public async saveEmployee(data: { employeeCode: string; name: string; department?: string; phone?: string; email?: string; roleCode?: string }): Promise<Employee> {
     const row = await this.db.insertInto('employees').values({
       id: crypto.randomUUID(),
       employeeCode: data.employeeCode,
       name: data.name,
+      roleCode: data.roleCode ?? null,
       department: data.department ?? null,
       phone: data.phone ?? null,
       email: data.email ?? null,

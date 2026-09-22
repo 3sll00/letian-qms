@@ -76,6 +76,11 @@ export class DecideMrbDispositionUseCase {
         disposition: cmd.disposition,
         status: 'DISPOSED',
         concessionAttachmentUrl: effectiveConcessionUrl,
+        // 本次共同签署人凭证与会签历史合并落库（契约 approvers 可选，省略时沿用历史）
+        approvers: [...review.approvers, ...(cmd.approvers ?? [])],
+        // 处置闭环时间与最终裁决人（KPI 与追溯使用，见 docs/20 §4.2）
+        disposedAt: new Date().toISOString(),
+        disposedBy: cmd.operatorName ?? cmd.operatorId,
         ...(cmd.dispositionReason !== undefined ? { dispositionNotes: cmd.dispositionReason } : {}),
         updatedAt: new Date().toISOString(),
       };

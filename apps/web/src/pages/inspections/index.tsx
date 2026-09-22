@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { IqcList } from './components/IqcList';
 import { IqcRecordForm } from './components/IqcRecordForm';
 import { IpqcViews } from './components/IpqcViews';
@@ -20,7 +20,11 @@ export function InspectionsPage({ initialStage, activeTab }: InspectionsPageProp
   const [activeIqcRecord, setActiveIqcRecord] = useState<any | null>(null);
   const [isIqcReadOnly, setIsIqcReadOnly] = useState<boolean>(false);
   const [activeOqcRecord, setActiveOqcRecord] = useState<any | null>(null);
+  // 出货检验回看标记：列表行状态已是「已合格 / 不合格」时打开的是历史单据，必须走本单方案快照
+  const [isOqcReadOnly, setIsOqcReadOnly] = useState<boolean>(false);
   const [activeOutsourceRecord, setActiveOutsourceRecord] = useState<any | null>(null);
+  // 委外检验回看标记：已判定的委外单打开的是历史单据，必须走本单方案快照（TBD-07）
+  const [isOutsourceReadOnly, setIsOutsourceReadOnly] = useState<boolean>(false);
 
   useEffect(() => {
     const next = activeTab || initialStage || 'iqc';
@@ -28,7 +32,9 @@ export function InspectionsPage({ initialStage, activeTab }: InspectionsPageProp
     if (next === 'ipqc') setIpqcSub('overview');
     setActiveIqcRecord(null);
     setActiveOqcRecord(null);
+    setIsOqcReadOnly(false);
     setActiveOutsourceRecord(null);
+    setIsOutsourceReadOnly(false);
   }, [initialStage, activeTab]);
 
   // If in IQC recording mode (对应 质量保证证书.pdf 样式)
@@ -41,8 +47,9 @@ export function InspectionsPage({ initialStage, activeTab }: InspectionsPageProp
           setActiveIqcRecord(null);
           setIsIqcReadOnly(false);
         }}
-        onSubmit={(res) => {
-          alert('来料检验单已保存提交！');
+        // 写路径已由来料表单自身落实并回执服务端单号（docs/35 §4 M3），此处只做「返回列表」的状态复位：
+        // 不再用 alert 重复一次系统没有校验过的「已保存提交」
+        onSubmit={() => {
           setActiveIqcRecord(null);
           setIsIqcReadOnly(false);
         }}
@@ -55,10 +62,16 @@ export function InspectionsPage({ initialStage, activeTab }: InspectionsPageProp
     return (
       <OutsourceInspectionForm
         initialItem={activeOutsourceRecord}
-        onBack={() => setActiveOutsourceRecord(null)}
-        onSubmit={(res) => {
-          alert('委外检验单已保存提交！');
+        readOnly={isOutsourceReadOnly}
+        onBack={() => {
           setActiveOutsourceRecord(null);
+          setIsOutsourceReadOnly(false);
+        }}
+        // 写路径已由委外表单自身落实并回执服务端单号（docs/34 §6.2），此处只做「返回列表」的状态复位：
+        // 不再用 alert 重复一次系统没有校验过的「已保存提交」
+        onSubmit={() => {
+          setActiveOutsourceRecord(null);
+          setIsOutsourceReadOnly(false);
         }}
       />
     );
@@ -69,10 +82,15 @@ export function InspectionsPage({ initialStage, activeTab }: InspectionsPageProp
     return (
       <OqcRecordForm
         initialItem={activeOqcRecord}
-        onBack={() => setActiveOqcRecord(null)}
-        onSubmit={(res) => {
-          alert('出货检验单已提交完成！');
+        readOnly={isOqcReadOnly}
+        onBack={() => {
           setActiveOqcRecord(null);
+          setIsOqcReadOnly(false);
+        }}
+        // 写路径已由出货表单自身落实并回执服务端单号（docs/35 §4 M3），此处只做状态复位，不再 alert
+        onSubmit={() => {
+          setActiveOqcRecord(null);
+          setIsOqcReadOnly(false);
         }}
       />
     );
@@ -93,7 +111,10 @@ export function InspectionsPage({ initialStage, activeTab }: InspectionsPageProp
   if (stage === 'outsource') {
     return (
       <OutsourceList
-        onInspect={(item) => setActiveOutsourceRecord(item)}
+        onInspect={(item, readOnly) => {
+          setActiveOutsourceRecord(item);
+          setIsOutsourceReadOnly(readOnly === true);
+        }}
       />
     );
   }
@@ -102,8 +123,16 @@ export function InspectionsPage({ initialStage, activeTab }: InspectionsPageProp
   if (stage === 'oqc') {
     return (
       <OqcList
-        onInspect={(item) => setActiveOqcRecord(item)}
-        onNew={() => setActiveOqcRecord({ docNo: 'OQC-XS-2022-03-05-00002' })}
+        onInspect={(item) => {
+          setActiveOqcRecord(item);
+          // OqcList 已在行上给出 isReadOnly（已合格 / 不合格 → 只读回看）
+          setIsOqcReadOnly(item?.isReadOnly === true);
+        }}
+        onNew={() => {
+          // 新建出货检验单：不带任何演示单号 —— 检验单号由服务端按规则取号（docs/33 §2.1 口径）
+          setActiveOqcRecord({});
+          setIsOqcReadOnly(false);
+        }}
       />
     );
   }
@@ -111,7 +140,11 @@ export function InspectionsPage({ initialStage, activeTab }: InspectionsPageProp
   // Default: IQC 来料检验列表 (WPS图片(2))
   return (
     <IqcList
-      onInspect={(item) => setActiveIqcRecord(item)}
+      onInspect={(item, readOnly) => {
+        // 列表「详情」按钮 = 只读回看（走本单方案快照）；「检验 / 继续」= 按当前方案录入
+        setActiveIqcRecord(item);
+        setIsIqcReadOnly(readOnly === true);
+      }}
     />
   );
 }

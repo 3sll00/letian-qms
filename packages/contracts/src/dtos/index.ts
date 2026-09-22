@@ -10,6 +10,8 @@ export type Supplier = z.infer<typeof schemas.SupplierSchema>;
 export type Customer = z.infer<typeof schemas.CustomerSchema>;
 export type Workshop = z.infer<typeof schemas.WorkshopSchema>;
 export type Employee = z.infer<typeof schemas.EmployeeSchema>;
+export type CompanyProfile = z.infer<typeof schemas.CompanyProfileSchema>;
+export type UpsertCompanyProfileRequest = z.infer<typeof schemas.UpsertCompanyProfileRequestSchema>;
 
 export type SystemType = z.infer<typeof schemas.SystemTypeEnum>;
 export type IntegrationConfig = z.infer<typeof schemas.IntegrationConfigSchema>;
@@ -33,6 +35,8 @@ export type InspectionPlanItem = z.infer<typeof schemas.InspectionPlanItemSchema
 export type PlanVersionStatus = z.infer<typeof schemas.PlanVersionStatusEnum>;
 export type InspectionPlanVersion = z.infer<typeof schemas.InspectionPlanVersionSchema>;
 export type InspectionPlan = z.infer<typeof schemas.InspectionPlanSchema>;
+export type PlanStatus = z.infer<typeof schemas.PlanStatusEnum>;
+export type PlanStats = z.infer<typeof schemas.PlanStatsSchema>;
 export type BatchCreateCategoryPlanRequest = z.infer<typeof schemas.BatchCreateCategoryPlanRequestSchema>;
 
 export type InspectionItem = z.infer<typeof schemas.InspectionItemSchema>;
@@ -57,6 +61,7 @@ export type InitiateReviewRequest = z.infer<typeof schemas.InitiateReviewRequest
 export type MRBStatus = z.infer<typeof schemas.MRBStatusEnum>;
 export type MRBDisposition = z.infer<typeof schemas.MRBDispositionEnum>;
 export type MRBFailCategory = z.infer<typeof schemas.MRBFailCategoryEnum>;
+export type MRBUrgencyLevel = z.infer<typeof schemas.MRBUrgencyLevelEnum>;
 export type ReviewNodeStatus = z.infer<typeof schemas.ReviewNodeStatusEnum>;
 
 export type ReviewStepConfig = z.infer<typeof schemas.ReviewStepConfigSchema>;
@@ -66,6 +71,7 @@ export type MRBReviewNode = z.infer<typeof schemas.MRBReviewNodeSchema>;
 export type MRBApproverAction = z.infer<typeof schemas.MRBApproverActionSchema>;
 export type ConcessionSignOff = z.infer<typeof schemas.ConcessionSignOffSchema>;
 export type MRBReview = z.infer<typeof schemas.MRBReviewSchema>;
+export type DisposeMRBResponse = z.infer<typeof schemas.DisposeMRBResponseSchema>;
 
 export type CreateMRBReviewRequest = z.infer<typeof schemas.CreateMRBReviewRequestSchema>;
 export type SubmitNodeReviewRequest = z.infer<typeof schemas.SubmitNodeReviewRequestSchema>;
@@ -80,6 +86,11 @@ export type TraceNodeStatus = z.infer<typeof schemas.TraceNodeStatusEnum>;
 export type TraceNode = z.infer<typeof schemas.TraceNodeSchema>;
 export type TraceEdge = z.infer<typeof schemas.TraceEdgeSchema>;
 export type TraceabilityGraphResponse = z.infer<typeof schemas.TraceabilityGraphResponseSchema>;
+export type TraceImpactSummary = z.infer<typeof schemas.TraceImpactSummarySchema>;
+export type TraceBatchSummary = z.infer<typeof schemas.TraceBatchSummarySchema>;
+export type TraceBatchSearchResponse = z.infer<typeof schemas.TraceBatchSearchResponseSchema>;
+export type TraceOrderChainStage = z.infer<typeof schemas.TraceOrderChainStageSchema>;
+export type TraceOrderChainResponse = z.infer<typeof schemas.TraceOrderChainResponseSchema>;
 
 // ============================================================================
 // 5. 基于属性的数据权限控制 (PBAC) DTOs

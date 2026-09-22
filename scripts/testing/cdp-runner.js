@@ -226,7 +226,7 @@ async function main() {
     const heads = await evalInPage(`[...document.querySelectorAll('th')].map((t) => t.innerText.trim())`);
     const rows = await evalInPage('document.querySelectorAll("tbody tr").length');
     await takeScreenshot('screenshot_02_iqc');
-    record('来料检验台账模块', nav !== null && heads.includes('检验单号') && heads.includes('采购入库单号') && rows > 0,
+    record('来料检验台账模块', nav !== null && heads.includes('检验单号') && heads.includes('入库单号') && rows > 0,
       { nav, rows, headSample: heads.slice(0, 4) });
   } catch (err) { record('来料检验台账模块', false, err.message); }
 

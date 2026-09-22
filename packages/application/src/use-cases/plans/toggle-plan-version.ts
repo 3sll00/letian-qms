@@ -24,7 +24,8 @@ export class TogglePlanVersionUseCase {
     return await this.uow.execute(async (ctx) => {
       const planDto = await ctx.inspectionPlans.findById(cmd.planId);
       if (!planDto) {
-        throw new ApplicationError('PLAN_NOT_FOUND', `未找到质检方案 [${cmd.planId}]`, 404);
+        // 错误码一律小写短横线（契约约定：code 用于拼装合法的 RFC 7807 type URI）
+        throw new ApplicationError('plan-not-found', `未找到质检方案 [${cmd.planId}]`, 404);
       }
 
       // 从物料主数据解析真实分类；查不到时 UNKNOWN 不命中任何白名单（fail-closed）
@@ -57,7 +58,7 @@ export class TogglePlanVersionUseCase {
         }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
-        throw new ApplicationError('PLAN_TOGGLE_FAILED', msg, 400);
+        throw new ApplicationError('plan-toggle-failed', msg, 400);
       }
 
       await ctx.inspectionPlans.save(plan.toDTO());

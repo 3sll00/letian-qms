@@ -6,6 +6,7 @@ import { InspectionOrder } from '@letian/domain';
 import { ApplicationError } from '../../errors/application-error.js';
 import type { ISecurityContext } from '../../security/security-context.js';
 import type { IUnitOfWork } from '../../tx/unit-of-work.js';
+import { collectPendingDefect } from '../mrb/collect-pending-defect.js';
 
 export interface RecordMeasurementsAndJudgeCommand
   extends Partial<BatchRecordInspectionItemsRequest> {
@@ -96,7 +97,12 @@ export class RecordMeasurementsAndJudgeUseCase {
       const status = order.getStatus();
       const decision = order.getOverallDecision();
 
-      // 4. 发送领域事件到 Outbox
+      // 4. 判定不合格 -> 汇入不合格待审核池（与工单状态同事务提交，见 docs/20 §5 D3）
+      if (decision === 'FAILED') {
+        await collectPendingDefect(ctx, order.toDTO());
+      }
+
+      // 5. 发送领域事件到 Outbox
       await ctx.outbox.append({
         id: crypto.randomUUID(),
         aggregateType: 'InspectionOrder',
@@ -123,7 +129,7 @@ export class RecordMeasurementsAndJudgeUseCase {
         retryCount: 0,
       });
 
-      // 5. 不可变审计日志
+      // 6. 不可变审计日志
       await ctx.auditLogs.insert({
         id: crypto.randomUUID(),
         traceId: securityCtx?.traceId ?? crypto.randomUUID(),

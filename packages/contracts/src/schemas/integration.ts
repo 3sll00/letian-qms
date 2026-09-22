@@ -64,6 +64,29 @@ export const EmployeeSchema = z.object({
   createdAt: z.string().optional(),
 });
 
+/**
+ * 企业档案（迁移 029）：证书抬头「签发主体 / 供货单位 / 产地」的唯一真实来源（单行主数据）。
+ * 未维护的字段一律为空 —— 证书按空白渲染，绝不用推测值或模板硬编码常量填充（docs/35 §6）。
+ */
+export const CompanyProfileSchema = z.object({
+  legalName: z.string().optional().openapi({ description: '企业法定名称（证书抬头中文）', example: '宁波乐天紧固件制造有限公司' }),
+  legalNameEn: z.string().optional().openapi({ description: '企业英文名称（证书抬头英文）' }),
+  shortName: z.string().optional().openapi({ description: '企业简称' }),
+  address: z.string().optional().openapi({ description: '企业地址' }),
+  originPlace: z.string().optional().openapi({ description: '产地（质量证书「供货单位/产地」格）' }),
+  phone: z.string().optional(),
+  email: z.string().email().optional(),
+  qualityStamp: z.string().optional().openapi({ description: '证书印章文字', example: '宁波乐天质检' }),
+  updatedBy: z.string().optional().openapi({ description: '最后维护人（服务端按当前登录用户写入）' }),
+  updatedAt: z.string().optional().openapi({ description: '最后维护时间 (ISO 8601)' }),
+}).openapi('CompanyProfile');
+
+/** 企业档案写入请求：`updatedBy` / `updatedAt` 由服务端填写，客户端不得传入 */
+export const UpsertCompanyProfileRequestSchema = CompanyProfileSchema.omit({
+  updatedBy: true,
+  updatedAt: true,
+}).openapi('UpsertCompanyProfileRequest');
+
 // ============================================================================
 // 2. MES/ERP 系统集成配置与同步日志模型
 // ============================================================================

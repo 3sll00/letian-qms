@@ -1,7 +1,8 @@
-import type { 
-  PendingDefectItem, 
+import type {
   InitiateReviewRequest,
-  MRBReview
+  MaterialPermission,
+  MRBReview,
+  PendingDefectItem,
 } from '@letian/contracts';
 import type { IUnitOfWork } from '../../tx/unit-of-work.js';
 import type { ISecurityContext } from '../../security/security-context.js';
@@ -26,126 +27,50 @@ export interface InitiateReviewResult extends MRBReview {
   message: string;
 }
 
+/**
+ * 不合格待审核池用例（docs/21-MRB不合格品处置数据字段与接口打通设计.md §5）
+ *
+ * 读源单一化：池数据只读 `pending_mrb_items`（迁移 015 已回填存量，运行期由
+ * `collectPendingDefect` 在判定不合格时同事务入池），不再回退扫描检验单，
+ * 避免"池表 / 检验单"双读源导致同一条不合格品出现两种口径。
+ */
 export class PendingMRBPoolUseCase {
   constructor(private readonly uow: IUnitOfWork) {}
 
+  /**
+   * 池查询：过滤条件、三维 PBAC 行级权限与分页**全部下推 SQL**，
+   * `total` 与当页数据同口径（此前是"先扫 500 条再在内存里过滤/分页"，
+   * 数据量一旦超过扫描上限就会漏数据，见 docs/21 §9 遗留 1）。
+   *
+   * 状态只接受契约三态 `PendingDefectStatusEnum`：004 建表时的历史词表
+   * （`PENDING_REVIEW` / `REVIEWING` / `RESOLVED`）已由迁移 015 归一，
+   * 旧值不再被静默映射，由契约校验直接拒绝（400），避免"旧口径悄悄生效"（§9 遗留 3）。
+   */
   public async getPendingList(
     query: PendingPoolQuery,
-    security?: ISecurityContext
+    permissions?: readonly MaterialPermission[]
   ): Promise<{ items: PendingDefectItem[]; total: number }> {
-    return await this.uow.execute(async (ctx) => {
-      let pendingItems: PendingDefectItem[] = [];
+    const stage = query.inspectionType ?? query.sourceStage ?? query.stage;
+    const page = query.page ?? 1;
+    const pageSize = query.pageSize ?? 20;
 
-      // 1. 若底层存在专门的 pendingMrbItems 扩展表，优先读取
-      if ((ctx as any).db) {
-        try {
-          let qb = (ctx as any).db.selectFrom('pendingMrbItems').selectAll();
-          const targetStage = query.inspectionType ?? query.sourceStage ?? query.stage;
-          if (targetStage) {
-            qb = qb.where('sourceStage', '=', targetStage);
-          }
-          if (query.status) {
-            qb = qb.where('status', '=', query.status);
-          }
-          if (query.materialCode) {
-            qb = qb.where('materialCode', 'like', `%${query.materialCode}%`);
-          }
-          if (query.batchNo) {
-            qb = qb.where('batchNo', 'like', `%${query.batchNo}%`);
-          }
-          const rows = await qb.execute();
-          if (rows && rows.length > 0) {
-            pendingItems = rows.map((r: any) => ({
-              id: r.id,
-              inspectionOrderId: r.sourceOrderId,
-              orderNo: r.sourceOrderNo,
-              inspectionType: r.sourceStage,
-              batchNo: r.batchNo,
-              materialCode: r.materialCode,
-              materialName: r.materialName,
-              defectQty: Number(r.defectQty ?? 1),
-              totalQty: Number(r.totalQty ?? r.defectQty ?? 1),
-              defectDescription: r.failReason ?? '实测超出公差判定不合格',
-              status: (r.status === 'REVIEWING' || r.status === 'INITIATED' ? 'INITIATED' : 'PENDING_INITIATE') as any,
-              mrbId: r.mrbReviewId ?? undefined,
-              createdAt: r.createdAt ? new Date(r.createdAt).toISOString() : new Date().toISOString(),
-            }));
-          }
-        } catch {
-          // ignore if table doesn't exist
-        }
-      }
-
-      // 2. 汇集各环节未发起评审的不合格检验工单 (status = 'FAILED')
-      if (pendingItems.length === 0) {
-        let orderList: any[] = [];
-        if (typeof (ctx.inspectionOrders as any).listOrders === 'function') {
-          const res = await (ctx.inspectionOrders as any).listOrders({
-            inspectionType: query.inspectionType ?? query.sourceStage ?? query.stage,
-            materialCode: query.materialCode,
-            batchNo: query.batchNo,
-            status: query.status === 'INITIATED' ? 'IN_MRB_REVIEW' : 'FAILED',
-            page: 1,
-            pageSize: 100,
-          });
-          orderList = res.list ?? res.items ?? [];
-        }
-
-        pendingItems = orderList
-          .filter((order: any) => {
-            if (query.status === 'INITIATED') return order.status === 'IN_MRB_REVIEW';
-            if (query.status === 'PENDING_INITIATE') return order.status === 'FAILED';
-            return order.status === 'FAILED';
-          })
-          .map((order: any) => {
-            const items = order.items ?? [];
-            const failedItem = items.find((i: any) => i.judgment === 'FAILED' || i.verdict === 'FAILED');
-            const defectQty = Number(order.failQty ?? 1);
-            const totalQty = Number(order.totalQty ?? order.sampleQty ?? defectQty);
-
-            return {
-              id: order.id,
-              inspectionOrderId: order.id,
-              orderNo: order.orderNo,
-              inspectionType: order.inspectionType ?? 'IQC',
-              batchNo: order.batchNo,
-              materialCode: order.materialCode,
-              materialName: order.materialName,
-              defectQty,
-              totalQty,
-              defectDescription: order.inspectionNotes || (failedItem ? `${failedItem.name ?? failedItem.itemCode} 超差判定不合格` : '实测超出公差判定不合格'),
-              defectItemCode: failedItem?.itemCode,
-              status: order.status === 'IN_MRB_REVIEW' ? ('INITIATED' as const) : ('PENDING_INITIATE' as const),
-              inspectorId: order.inspectorId,
-              inspectorName: order.inspectorName,
-              createdAt: order.createdAt instanceof Date ? order.createdAt.toISOString() : String(order.createdAt),
-            };
-          });
-      }
-
-      // 3. PBAC 权限过滤
-      if (security) {
-        pendingItems = pendingItems.filter((item) => {
-          try {
-            security.assertAccess({
-              targetCategory: 'MATERIAL',
-              targetMaterialCode: item.materialCode,
-              operationName: '查看不合格待审核池',
-            });
-            return true;
-          } catch {
-            return false;
-          }
-        });
-      }
-
-      const total = pendingItems.length;
-      const page = query.page ?? 1;
-      const pageSize = query.pageSize ?? 20;
-      const paginated = pendingItems.slice((page - 1) * pageSize, page * pageSize);
-
-      return { items: paginated, total };
-    });
+    return await this.uow.execute(async (ctx) =>
+      ctx.pendingDefects.list({
+        ...(stage !== undefined && stage !== '' ? { stage } : {}),
+        ...(query.materialCode !== undefined && query.materialCode !== ''
+          ? { materialCode: query.materialCode }
+          : {}),
+        ...(query.batchNo !== undefined && query.batchNo !== ''
+          ? { batchNo: query.batchNo }
+          : {}),
+        ...(query.status !== undefined && query.status !== ''
+          ? { status: query.status }
+          : {}),
+        ...(permissions !== undefined ? { permissions } : {}),
+        page,
+        pageSize,
+      })
+    );
   }
 
   public async initiateReview(
@@ -154,70 +79,54 @@ export class PendingMRBPoolUseCase {
     security?: ISecurityContext
   ): Promise<InitiateReviewResult> {
     return await this.uow.execute(async (ctx) => {
-      // 1. 定位源检验单
-      let order = await ctx.inspectionOrders.findById(input.pendingDefectId);
-      if (!order && (ctx as any).db) {
-        try {
-          const pendingRow = await (ctx as any).db
-            .selectFrom('pendingMrbItems')
-            .where('id', '=', input.pendingDefectId)
-            .selectAll()
-            .executeTakeFirst();
-          if (pendingRow) {
-            order = await ctx.inspectionOrders.findById(pendingRow.sourceOrderId);
-          }
-        } catch {
-          // ignore
-        }
+      // 1. 定位池条目：pendingDefectId 可能是池条目 UUID，也可能是源检验单 UUID/单号
+      const poolItem =
+        (await ctx.pendingDefects.findById(input.pendingDefectId)) ??
+        (await ctx.pendingDefects.findBySourceOrderId(input.pendingDefectId));
+
+      // 2. 定位源检验单
+      let order =
+        poolItem !== null ? await ctx.inspectionOrders.findById(poolItem.inspectionOrderId) : null;
+      if (order === null) {
+        order = await ctx.inspectionOrders.findById(input.pendingDefectId);
       }
-      if (!order) {
+      if (order === null) {
         order = await ctx.inspectionOrders.findByOrderNo(input.pendingDefectId);
       }
-      if (!order) {
+      if (order === null) {
         throw new NotFoundError(`待审核条目或源检验单未找到: ${input.pendingDefectId}`);
       }
-
-      const orderDTO = order;
-      if (orderDTO.status === 'IN_MRB_REVIEW') {
-        throw new ConflictError(`检验单 ${orderDTO.orderNo} 已处于 MRB 评审中，不可重复发起`);
+      if (order.status === 'IN_MRB_REVIEW') {
+        throw new ConflictError(`检验单 ${order.orderNo} 已处于 MRB 评审中，不可重复发起`);
       }
 
-      // 2. 委托 TriggerMrbReviewUseCase 完成强校验与工单生成
+      // 3. 委托 TriggerMrbReviewUseCase 完成强校验与工单生成
       const opId = operator?.userId ?? 'system';
       const opName = operator?.userName ?? operator?.name ?? '质量工程师';
       const trigger = new TriggerMrbReviewUseCase(this.uow);
       const mrb = await trigger.execute(
         {
-          inspectionOrderId: orderDTO.id ?? input.pendingDefectId,
+          inspectionOrderId: order.id ?? input.pendingDefectId,
           applicantId: opId,
           applicantName: opName,
-          reason: input.reviewNotes ?? `从待审核池发起评审: 检验单 ${orderDTO.orderNo} 判定不合格`,
+          reason:
+            input.reviewNotes ?? `从待审核池发起评审: 检验单 ${order.orderNo} 判定不合格`,
+          // 发起弹窗的三个参数全部透传落库（docs/20 §4.2）
+          ...(input.flowId !== undefined ? { flowId: input.flowId } : {}),
+          ...(input.urgencyLevel !== undefined ? { urgencyLevel: input.urgencyLevel } : {}),
+          ...(input.reviewNotes !== undefined ? { reviewNotes: input.reviewNotes } : {}),
+          // 仅当确认是池条目时才回填外键，避免把检验单 ID 写进 pending_defect_id
+          ...(poolItem !== null ? { pendingDefectId: poolItem.id } : {}),
         },
         security
       );
 
-      // 3. 若有 pendingMrbItems 记录，同步更新状态
-      if ((ctx as any).db) {
-        try {
-          await (ctx as any).db
-            .updateTable('pendingMrbItems')
-            .set({
-              status: 'INITIATED',
-              mrbReviewId: mrb.id,
-              reviewStartedAt: new Date(),
-              reviewStartedBy: opName,
-            })
-            .where((eb: any) =>
-              eb.or([
-                eb('id', '=', input.pendingDefectId),
-                eb('sourceOrderId', '=', orderDTO.id ?? input.pendingDefectId),
-              ])
-            )
-            .execute();
-        } catch {
-          // ignore
-        }
-      }
+      // 4. 池条目转「已入评审」并回填 MRB 单号（按池条目 ID 或源检验单 ID 定位）
+      await ctx.pendingDefects.markInitiated(
+        poolItem !== null ? poolItem.id : order.id ?? input.pendingDefectId,
+        mrb.id,
+        opName
+      );
 
       return {
         ...mrb,

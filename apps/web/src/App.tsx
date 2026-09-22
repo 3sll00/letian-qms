@@ -6,7 +6,7 @@ import { TraceabilityPage } from './pages/traceability';
 import { InspectionsPage } from './pages/inspections';
 import { PlansPage } from './pages/plans';
 import { MrbPage } from './pages/mrb';
-import { PendingMRBPoolPage } from './pages/mrb/PendingMRBPoolPage';
+import { ReviewWorkflowView } from './pages/mrb/ReviewWorkflowView';
 import { MaterialCategoriesPage } from './pages/master-data/categories';
 import { MasterDataPage } from './pages/master-data';
 import { IntegrationPage } from './pages/integration';
@@ -67,18 +67,11 @@ export function App() {
         return <InspectionsPage key={`oqc-${sessionEpoch}`} initialStage="oqc" />;
       case 'plans':
         return <PlansPage />;
-      case 'mrb-pending':
-        return (
-          <PendingMRBPoolPage
-            key={`mrb-pending-${sessionEpoch}`}
-            onNavigateToMrb={() => setCurrentNav('mrb')}
-            onInitiateSuccess={() => setCurrentNav('mrb')}
-          />
-        );
       case 'mrb':
-        return <MrbPage key={`mrb-${sessionEpoch}`} initialSub="records" />;
+        // MRB 不合格品处置整合单页：待审核池（阶段 1）与评审处置（阶段 2）都在页内抽屉完成
+        return <MrbPage key={`mrb-${sessionEpoch}`} />;
       case 'review-workflow':
-        return <MrbPage initialSub="workflows" />;
+        return <ReviewWorkflowView />;
       case 'permissions':
         return <IntegrationPage key={`perm-${sessionEpoch}`} initialTab="permissions" />;
       case 'categories':

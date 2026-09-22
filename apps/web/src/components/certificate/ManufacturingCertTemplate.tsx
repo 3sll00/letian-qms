@@ -13,6 +13,20 @@ interface ManufacturingCertTemplateProps {
 export const ManufacturingCertTemplate: React.FC<ManufacturingCertTemplateProps> = ({ data }) => {
   const testResults = data.testResults || {};
 
+  /**
+   * 单项判定单元格（docs/34 §5.2）：只打印表单写入的结论（Pass / Fail），未判定即空白。
+   * 模板绝不自行打印 `PASS` —— 那等于替检验员下一个他从未做过的结论。
+   */
+  const decisionCell = (decision: string | undefined) => (
+    <td
+      className={`p-1.5 text-center font-bold ${
+        decision === 'Fail' ? 'text-red-600' : 'text-green-700'
+      }`}
+    >
+      {decision ?? ''}
+    </td>
+  );
+
 
   return (
     <div className="bg-white text-black p-8 font-sans w-full max-w-[800px] mx-auto text-xs leading-tight print:p-0 print:max-w-none print:w-full print:text-[11px] select-text">
@@ -21,8 +35,8 @@ export const ManufacturingCertTemplate: React.FC<ManufacturingCertTemplateProps>
         <div className="text-[10px] tracking-widest text-gray-500 uppercase font-mono">
           LETIAN QUALITY MANAGEMENT SYSTEM &bull; SUBCONTRACTING DIVISION
         </div>
-        <h1 className="text-xl font-bold tracking-wider mt-1">NINGBO LETIAN FASTENERS CO., LTD.</h1>
-        <h2 className="text-sm font-semibold text-gray-800">宁波乐天紧固件制造有限公司</h2>
+        <h1 className="text-xl font-bold tracking-wider mt-1">{data.companyProfile?.legalNameEn ?? ''}</h1>
+        <h2 className="text-sm font-semibold text-gray-800">{data.companyProfile?.legalName ?? ''}</h2>
         <div className="mt-2 inline-block border border-black px-4 py-1 font-bold text-sm bg-gray-100 tracking-wider">
           MANUFACTURING &amp; OUTSOURCE INSPECTION CERTIFICATE (EN 10204 3.1)
         </div>
@@ -103,7 +117,7 @@ export const ManufacturingCertTemplate: React.FC<ManufacturingCertTemplateProps>
                     </div>
                   )}
                 </td>
-                <td className="p-1.5 text-center font-bold text-green-700">PASS</td>
+                {decisionCell(testResults.coatingThickness.decision)}
               </tr>
             )}
 
@@ -116,7 +130,7 @@ export const ManufacturingCertTemplate: React.FC<ManufacturingCertTemplateProps>
                 <td className="border-r border-black p-1.5 font-mono font-bold text-blue-900">
                   {testResults.saltSprayHours.actual}
                 </td>
-                <td className="p-1.5 text-center font-bold text-green-700">PASS</td>
+                {decisionCell(testResults.saltSprayHours.decision)}
               </tr>
             )}
 
@@ -129,7 +143,7 @@ export const ManufacturingCertTemplate: React.FC<ManufacturingCertTemplateProps>
                 <td className="border-r border-black p-1.5 font-mono font-bold text-blue-900">
                   {testResults.adhesion.actual}
                 </td>
-                <td className="p-1.5 text-center font-bold text-green-700">PASS</td>
+                {decisionCell(testResults.adhesion.decision)}
               </tr>
             )}
 
@@ -142,7 +156,7 @@ export const ManufacturingCertTemplate: React.FC<ManufacturingCertTemplateProps>
                 <td className="border-r border-black p-1.5 font-mono font-bold text-blue-900">
                   {testResults.deEmbrittlement.actual}
                 </td>
-                <td className="p-1.5 text-center font-bold text-green-700">PASS</td>
+                {decisionCell(testResults.deEmbrittlement.decision)}
               </tr>
             )}
 
@@ -155,7 +169,7 @@ export const ManufacturingCertTemplate: React.FC<ManufacturingCertTemplateProps>
                 <td className="border-r border-black p-1.5 font-mono font-bold text-blue-900">
                   {testResults.surfaceHardness.actual}
                 </td>
-                <td className="p-1.5 text-center font-bold text-green-700">PASS</td>
+                {decisionCell(testResults.surfaceHardness.decision)}
               </tr>
             )}
 
@@ -168,7 +182,7 @@ export const ManufacturingCertTemplate: React.FC<ManufacturingCertTemplateProps>
                 <td className="border-r border-black p-1.5 font-mono font-bold text-blue-900">
                   {testResults.coreHardness.actual}
                 </td>
-                <td className="p-1.5 text-center font-bold text-green-700">PASS</td>
+                {decisionCell(testResults.coreHardness.decision)}
               </tr>
             )}
 
@@ -181,7 +195,7 @@ export const ManufacturingCertTemplate: React.FC<ManufacturingCertTemplateProps>
                 <td className="border-r border-black p-1.5 font-mono font-bold text-blue-900">
                   {testResults.caseDepth.actual}
                 </td>
-                <td className="p-1.5 text-center font-bold text-green-700">PASS</td>
+                {decisionCell(testResults.caseDepth.decision)}
               </tr>
             )}
 
@@ -194,7 +208,7 @@ export const ManufacturingCertTemplate: React.FC<ManufacturingCertTemplateProps>
                 <td className="border-r border-black p-1.5 font-mono font-bold text-blue-900">
                   {testResults.torqueStrength.actual}
                 </td>
-                <td className="p-1.5 text-center font-bold text-green-700">PASS</td>
+                {decisionCell(testResults.torqueStrength.decision)}
               </tr>
             )}
 
@@ -202,8 +216,8 @@ export const ManufacturingCertTemplate: React.FC<ManufacturingCertTemplateProps>
               <td className="border-r border-black p-1.5 font-medium bg-gray-50">
                 Visual &amp; Workmanship (外观与做工)
               </td>
-              <td className="border-r border-black p-1.5 font-mono">No blister, uniform color, clean thread</td>
-              <td className="border-r border-black p-1.5 font-mono font-bold text-blue-900">Conformed (良好无缺陷)</td>
+              <td className="border-r border-black p-1.5 font-mono">{data.visualStandard}</td>
+              <td className="border-r border-black p-1.5 font-mono font-bold text-blue-900">{data.visualActual}</td>
               <td className="p-1.5 text-center font-bold text-green-700">{data.visualInspection}</td>
             </tr>
           </tbody>
@@ -231,7 +245,9 @@ export const ManufacturingCertTemplate: React.FC<ManufacturingCertTemplateProps>
           <div className="text-[9px] border-b border-blue-700 pb-0.5 uppercase tracking-wide">LETIAN QA</div>
           <div>SUBCONTRACT</div>
           <div className="text-[8px] font-mono mt-0.5">{data.dateOfIssue}</div>
-          <div className="text-[8px] font-bold text-green-700">PASSED 3.1</div>
+          {data.overallDecision !== undefined && data.overallDecision !== '' && (
+            <div className="text-[8px] font-bold text-green-700">{data.overallDecision}</div>
+          )}
         </div>
       </div>
 
@@ -250,7 +266,10 @@ export const ManufacturingCertTemplate: React.FC<ManufacturingCertTemplateProps>
       </div>
 
       <div className="text-center text-[9px] text-gray-400 mt-2">
-        Ningbo Letian Fasteners Co., Ltd. &bull; Quality Department &bull; EN 10204 Type 3.1 Certified Document
+        {data.companyProfile?.legalNameEn
+          ? data.companyProfile.legalNameEn + ' · Quality Department'
+          : 'Quality Department'}{' '}
+        &bull; EN 10204 Type 3.1 Certified Document
       </div>
     </div>
   );

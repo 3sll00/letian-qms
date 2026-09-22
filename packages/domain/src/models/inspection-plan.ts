@@ -2,7 +2,8 @@ import {
   InspectionPlan as InspectionPlanDTO, 
   InspectionPlanVersion as InspectionPlanVersionDTO, 
   InspectionPlanItem as InspectionPlanItemDTO,
-  InspectionType
+  InspectionType,
+  PlanStatus
 } from '@letian/contracts';
 
 /**
@@ -15,7 +16,8 @@ export class InspectionPlan {
   private planName: string;
   private materialCode?: string | undefined;
   private materialCategory?: string | undefined;
-    categoryName?: string | undefined;
+  private categoryCode?: string | undefined;
+  private categoryName?: string | undefined;
   private inspectionType: InspectionType;
   private versions: InspectionPlanVersionDTO[];
 
@@ -25,6 +27,7 @@ export class InspectionPlan {
     planName: string;
     materialCode?: string | undefined;
     materialCategory?: string | undefined;
+    categoryCode?: string | undefined;
     categoryName?: string | undefined;
     inspectionType: InspectionType;
     versions?: InspectionPlanVersionDTO[];
@@ -34,6 +37,8 @@ export class InspectionPlan {
     this.planName = params.planName;
     this.materialCode = params.materialCode;
     this.materialCategory = params.materialCategory ?? params.categoryName;
+    this.categoryCode = params.categoryCode;
+    this.categoryName = params.categoryName;
     this.inspectionType = params.inspectionType;
     this.versions = params.versions ? [...params.versions] : [];
   }
@@ -58,8 +63,27 @@ export class InspectionPlan {
     return this.materialCategory;
   }
 
+  /** 方案归属的存货分类编码（分类级兜底匹配依据；material_code 为空时表示该分类的通用方案） */
+  public getCategoryCode(): string | undefined {
+    return this.categoryCode;
+  }
+
   public getInspectionType(): InspectionType {
     return this.inspectionType;
+  }
+
+  public getCategoryName(): string | undefined {
+    return this.categoryName;
+  }
+
+  /**
+   * 方案级状态（口径与契约 PlanStatusEnum 一致，是"已启用/待审批/已停用"的唯一判定源）：
+   * 存在 ACTIVE 版本 = 已启用；无 ACTIVE 但有 DRAFT 版本 = 待审批；其余（仅剩 INACTIVE）= 已停用。
+   */
+  public getStatus(): PlanStatus {
+    if (this.versions.some(v => v.status === 'ACTIVE')) return 'ENABLED';
+    if (this.versions.some(v => v.status === 'DRAFT')) return 'PENDING_APPROVAL';
+    return 'DISABLED';
   }
 
   public getVersions(): readonly InspectionPlanVersionDTO[] {
@@ -84,6 +108,8 @@ export class InspectionPlan {
     samplingScheme?: string;
     aqlLevel?: string;
     strictness?: string;
+    effectiveStartDate?: string;
+    effectiveEndDate?: string;
     createdBy: string;
   }): InspectionPlanVersionDTO {
     const existingDraft = this.versions.find(v => v.status === 'DRAFT');
@@ -103,6 +129,10 @@ export class InspectionPlan {
       samplingScheme: params.samplingScheme ?? 'GB_T_2828',
       aqlLevel: params.aqlLevel ?? 'II',
       strictness: params.strictness ?? 'NORMAL',
+      ...(params.effectiveStartDate !== undefined
+        ? { effectiveStartDate: params.effectiveStartDate }
+        : {}),
+      ...(params.effectiveEndDate !== undefined ? { effectiveEndDate: params.effectiveEndDate } : {}),
       createdBy: params.createdBy,
       createdAt: new Date().toISOString(),
       items: params.items.map(item => ({ ...item })),
@@ -172,6 +202,11 @@ export class InspectionPlan {
       planCode: this.planCode,
       planName: this.planName,
       materialCode: this.materialCode,
+      categoryCode: this.categoryCode,
+      ...(this.categoryName !== undefined ? { categoryName: this.categoryName } : {}),
+      // 分类通用方案口径（014 迁移）：material_code 为空串 + category_code 非空
+      isCategoryDefault: (this.materialCode ?? '') === '' && this.categoryCode !== undefined,
+      status: this.getStatus(),
       inspectionType: this.inspectionType,
       versions: this.versions.map(v => ({
         ...v,

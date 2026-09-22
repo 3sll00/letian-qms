@@ -6,7 +6,7 @@
  *   包目录内：   pnpm run seed
  *
  * 行为：
- *   1. 用一条 TRUNCATE 清空全部 20 张业务表（有外键引用的表全部列入同一条语句，
+ *   1. 用一条 TRUNCATE 清空全部 26 张业务表（有外键引用的表全部列入同一条语句，
  *      PostgreSQL 允许直接清空而无需 CASCADE；主键是 UUID 而非自增序列）；
  *      audit_logs 只有 BEFORE UPDATE/DELETE 触发器，
  *      TRUNCATE 是允许的，且本脚本绝不对它做 UPDATE / DELETE。
@@ -32,6 +32,7 @@ import { createDatabaseConnection } from '../database/connection.js';
 import { KyselyInspectionPlanRepository } from '../repositories/inspection-plan-repository.js';
 import { KyselyInspectionOrderRepository } from '../repositories/inspection-order-repository.js';
 import { KyselyMRBReviewRepository } from '../repositories/mrb-review-repository.js';
+import { KyselyPendingDefectPoolRepository } from '../repositories/pending-defect-pool-repository.js';
 import { KyselyReviewFlowRepository } from '../repositories/review-flow-repository.js';
 import { KyselyBatchTraceRepository } from '../repositories/batch-trace-repository.js';
 import { KyselyMaterialPermissionRepository } from '../repositories/material-permission-repository.js';
@@ -58,19 +59,26 @@ import {
   seedTraceNodes,
   seedWorkshops,
   employeeNameOf,
+  supplierNameOf,
+  customerNameOf,
+  pendingDefectIdOfOrder,
   materialNameOf,
+  materialSpecOf,
+  materialUnitOf,
+  materialCategoryOf,
   planVersionOf,
   type ItemResultKind,
   type SeedMetric,
   type SeedPlan,
   type SeedPlanVersion,
+  seedCompanyProfile,
 } from './data.js';
 
 // ============================================================================
-// 0. 需要清空 / 统计的 18 张业务表（CamelCasePlugin 运行时名 -> snake_case 物理名）
+// 0. 需要清空 / 统计的 26 张业务表（CamelCasePlugin 运行时名 -> snake_case 物理名）
 // ============================================================================
 
-/** 20 张业务表（与 001/002/003 迁移 + contract 表清单一致） */
+/** 26 张业务表（与 001/002/003 迁移 + contract 表清单一致，含 025/026/028 改号留痕表、027 分类归位留痕表与 029 企业档案主数据） */
 const BUSINESS_TABLES: readonly (keyof Database)[] = [
   'materials',
   'inventoryCategories',
@@ -78,9 +86,11 @@ const BUSINESS_TABLES: readonly (keyof Database)[] = [
   'customers',
   'workshops',
   'employees',
+  'companyProfile',
   'inspectionPlans',
   'inspectionOrders',
   'reviewFlows',
+  'pendingMrbItems',
   'mrbReviews',
   'batchTraceRelations',
   'batchTraceNodes',
@@ -92,6 +102,14 @@ const BUSINESS_TABLES: readonly (keyof Database)[] = [
   'materialPermissions',
   'roles',
   'authorizationLogs',
+  // 025 改号留痕：全新库「生来统一」，留痕为空（历史库的留痕由迁移 025 写入，见 docs/31）
+  'inspectionOrderNoRenumberings',
+  // 026 物料编码改号留痕：同上，全新库「生来统一」，留痕为空（见 docs/32）
+  'materialCodeRenumberings',
+  // 027 物料分类归位留痕：同上，全新库「生来就是新分类」，留痕为空（见 docs/33）
+  'materialCategoryReassignments',
+  // 028 委外单号 / 批次号改号留痕：同上，全新库「生来就是新口径」，留痕为空（见 docs/34）
+  'outsourceReferenceRenumberings',
 ];
 
 /** 物理表名（用于打印汇总，便于与 psql 输出对照） */
@@ -102,9 +120,11 @@ const TABLE_PHYSICAL_NAMES: Readonly<Record<string, string>> = {
   customers: 'customers',
   workshops: 'workshops',
   employees: 'employees',
+  companyProfile: 'company_profile',
   inspectionPlans: 'inspection_plans',
   inspectionOrders: 'inspection_orders',
   reviewFlows: 'review_flows',
+  pendingMrbItems: 'pending_mrb_items',
   mrbReviews: 'mrb_reviews',
   batchTraceRelations: 'batch_trace_relations',
   batchTraceNodes: 'batch_trace_nodes',
@@ -116,6 +136,10 @@ const TABLE_PHYSICAL_NAMES: Readonly<Record<string, string>> = {
   materialPermissions: 'material_permissions',
   roles: 'roles',
   authorizationLogs: 'authorization_logs',
+  inspectionOrderNoRenumberings: 'inspection_order_no_renumberings',
+  materialCodeRenumberings: 'material_code_renumberings',
+  materialCategoryReassignments: 'material_category_reassignments',
+  outsourceReferenceRenumberings: 'outsource_reference_renumberings',
 };
 
 // ============================================================================
@@ -243,7 +267,7 @@ function deriveQty(sampleQty: number, kind: ItemResultKind): { passQty: number; 
 // ============================================================================
 
 /**
- * 幂等播种：先 TRUNCATE 20 张业务表，再按依赖顺序写入演示数据。
+ * 幂等播种：先 TRUNCATE 26 张业务表，再按依赖顺序写入演示数据。
  *
  * 依赖顺序：roles 必须先于 material_permissions（后者有 role_code 外键），
  * employees 先于 material_permissions（后者有 user_id 外键）。
@@ -252,7 +276,7 @@ function deriveQty(sampleQty: number, kind: ItemResultKind): { passQty: number; 
  */
 export async function seed(db: Kysely<Database>): Promise<void> {
   // ------------------------------------------------------------------
-  // 2.1 清空 20 张业务表（单条 TRUNCATE；UUID 主键无需 RESTART IDENTITY）
+  // 2.1 清空 26 张业务表（单条 TRUNCATE；UUID 主键无需 RESTART IDENTITY）
   // ------------------------------------------------------------------
   await sql`
     TRUNCATE TABLE
@@ -262,9 +286,12 @@ export async function seed(db: Kysely<Database>): Promise<void> {
       customers,
       workshops,
       employees,
+
+      company_profile,
       inspection_plans,
       inspection_orders,
       review_flows,
+      pending_mrb_items,
       mrb_reviews,
       batch_trace_relations,
       batch_trace_nodes,
@@ -275,7 +302,15 @@ export async function seed(db: Kysely<Database>): Promise<void> {
       integration_sync_logs,
       material_permissions,
       roles,
-      authorization_logs
+      authorization_logs,
+      -- 025 改号留痕：全新库「生来统一」，留痕为空（docs/31）
+      inspection_order_no_renumberings,
+      -- 026 物料编码改号留痕：同上，全新库「生来统一」（docs/32）
+      material_code_renumberings,
+      -- 027 物料分类归位留痕：同上，全新库「生来就是新分类」（docs/33）
+      material_category_reassignments,
+      -- 028 委外单号 / 批次号改号留痕：同上，全新库「生来就是新口径」（docs/34）
+      outsource_reference_renumberings
   `.execute(db);
 
   // ------------------------------------------------------------------
@@ -286,8 +321,12 @@ export async function seed(db: Kysely<Database>): Promise<void> {
   await db.insertInto('suppliers').values(seedSuppliers).execute();
   await db.insertInto('customers').values(seedCustomers).execute();
   await db.insertInto('workshops').values(seedWorkshops).execute();
-  await db.insertInto('employees').values(seedEmployees).execute();
+  // 角色字典必须先于员工写入：迁移 013 起 employees.role_code 带 fk_employee_role 外键，
+  // 顺序颠倒会在空库（TRUNCATE 后）播种时直接违反外键，导致整轮播种中断
   await db.insertInto('roles').values(seedRoles).execute();
+  await db.insertInto('employees').values(seedEmployees).execute();
+  // 企业档案（迁移 029）：证书抬头主数据（单行表），值取自模板原有硬编码常量
+  await db.insertInto('companyProfile').values(seedCompanyProfile).execute();
 
   // ------------------------------------------------------------------
   // 2.3 质检方案（走仓储，保证 items / sampling_config 的 JSONB 映射一致）
@@ -299,6 +338,8 @@ export async function seed(db: Kysely<Database>): Promise<void> {
       planName: plan.planName,
       inspectionType: plan.inspectionType,
       materialCode: plan.materialCode,
+      // 方案分类归属：与物料主数据保持一致，供分类级兜底匹配使用
+      categoryCode: materialCategoryOf(plan.materialCode),
       versions: plan.versions.map((version) => ({
         id: version.id,
         planId: version.id,
@@ -331,6 +372,17 @@ export async function seed(db: Kysely<Database>): Promise<void> {
     const { passQty, failQty } = deriveQty(spec.sampleQty, spec.itemKind);
     // 检验人姓名：显式指定优先，否则由员工档案反查，避免落库后 inspector_name 为空
     const inspectorName = spec.inspectorName ?? employeeNameOf(spec.inspectorId);
+    // 供应商姓名快照：委外工序取加工商，来料取供应商档案（池/台账展示口径同源）
+    const specSupplierName =
+      spec.vendorName ??
+      (spec.supplierCode !== undefined ? supplierNameOf(spec.supplierCode) : undefined);
+    const specCustomerName =
+      spec.customerName ??
+      (spec.customerCode !== undefined ? customerNameOf(spec.customerCode) : undefined);
+    // 规格型号 / 计量单位快照：一律回查物料主数据（ERP Ptype.Standard / Unit1），
+    // 主数据缺该字段时保持省略（落列为 NULL），绝不用物料名称顶替。
+    const specificationSnapshot = materialSpecOf(spec.materialCode);
+    const unitSnapshot = materialUnitOf(spec.materialCode);
 
     const order = {
       id: spec.id,
@@ -340,6 +392,9 @@ export async function seed(db: Kysely<Database>): Promise<void> {
       materialName: materialNameOf(spec.materialCode),
       batchNo: spec.batchNo,
       sampleQty: spec.sampleQty,
+      // 「数量」列 = 报检批量（物理列 total_qty）：spec.totalQty 早已在种子清单里声明，
+      // 但此处从未写入 -> 库中恒为 NULL、台账只能显示 --（见 docs/29 §3 断链 ④）
+      totalQty: spec.totalQty,
       passQty,
       failQty,
       isMandatoryGate: spec.isMandatoryGate,
@@ -351,11 +406,20 @@ export async function seed(db: Kysely<Database>): Promise<void> {
       // items 原样传数组：JSON 序列化由仓储 save() 统一负责（见文件顶部双编码说明）
       items: buildOrderItems(version, spec.itemKind),
       ...(spec.supplierCode !== undefined ? { supplierCode: spec.supplierCode } : {}),
+      ...(specSupplierName !== undefined ? { supplierName: specSupplierName } : {}),
       ...(spec.customerCode !== undefined ? { customerCode: spec.customerCode } : {}),
+      ...(specCustomerName !== undefined ? { customerName: specCustomerName } : {}),
       ...(spec.judgment !== null ? { overallDecision: spec.judgment } : {}),
+      // 006 来料检验 (IQC) 入库单号 / 入库日期：台账第 2、3 列
+      ...(spec.inboundNo !== undefined ? { inboundNo: spec.inboundNo } : {}),
+      ...(spec.inboundDate !== undefined ? { inboundDate: spec.inboundDate } : {}),
+      // 006 来料检验 (IQC) 规格型号 / 计量单位：台账第 6/7 列，只从物料主数据取快照。
+      // 此前建单只写了 materialName，specification / unit 从未落列 -> 「规格型号」列整列为空
+      // （读得出、写不进，见 docs/26）。这里与迁移 023 构成双保险。
+      ...(specificationSnapshot !== undefined ? { specification: specificationSnapshot } : {}),
+      ...(unitSnapshot !== undefined ? { unit: unitSnapshot } : {}),
       ...(spec.salesOrderNo !== undefined ? { salesOrderNo: spec.salesOrderNo } : {}),
       ...(spec.dispatchDate !== undefined ? { dispatchDate: spec.dispatchDate } : {}),
-      ...(spec.customerName !== undefined ? { customerName: spec.customerName } : {}),
       ...(spec.salesOrderPoNo !== undefined ? { salesOrderPoNo: spec.salesOrderPoNo } : {}),
       ...(spec.erpStatus !== undefined ? { erpStatus: spec.erpStatus } : {}),
       ...(inspectorName !== undefined ? { inspectorName } : {}),
@@ -364,6 +428,19 @@ export async function seed(db: Kysely<Database>): Promise<void> {
       ...(spec.processType !== undefined ? { processType: spec.processType } : {}),
       ...(spec.returnDate !== undefined ? { returnDate: spec.returnDate } : {}),
       ...(spec.vendorName !== undefined ? { vendorName: spec.vendorName } : {}),
+      // 007 过程检验「来源单据」：页面时间线要展示真实 MES 工单号，而不是拿批次号顶替
+      ...(spec.workOrderNo !== undefined ? { workOrderNo: spec.workOrderNo } : {}),
+      // 007 过程检验台账其余列（断料长度 / 操作员 / 设备 / 螺纹规格 / 终检组 / 工序阶段 / 完成时间）：
+      // 种子此前只写 work_order_no，这 9 列入库即 NULL，下料检验台账对应列只能是 --（见 docs/29 §3 断链 ④）
+      ...(spec.blankingLength !== undefined ? { blankingLength: spec.blankingLength } : {}),
+      ...(spec.operatorName !== undefined ? { operatorName: spec.operatorName } : {}),
+      ...(spec.operatorId !== undefined ? { operatorId: spec.operatorId } : {}),
+      ...(spec.equipmentCode !== undefined ? { equipmentCode: spec.equipmentCode } : {}),
+      ...(spec.equipmentName !== undefined ? { equipmentName: spec.equipmentName } : {}),
+      ...(spec.threadSpec !== undefined ? { threadSpec: spec.threadSpec } : {}),
+      ...(spec.inspectionTeam !== undefined ? { inspectionTeam: spec.inspectionTeam } : {}),
+      ...(spec.processStep !== undefined ? { processStep: spec.processStep } : {}),
+      ...(spec.completedAt !== undefined ? { completedAt: spec.completedAt } : {}),
     };
 
     await orderRepo.save(order);
@@ -378,15 +455,87 @@ export async function seed(db: Kysely<Database>): Promise<void> {
   }
 
   // ------------------------------------------------------------------
-  // 2.6 MRB 评审单（source_order_no 均命中已播种工单号）
+  // 2.6 不合格待审核池（015 起池表是唯一读源）
+  //     口径：一张检验单一条；已开 MRB 或工单已进入评审 -> 已入评审，否则 -> 待发起评审。
+  //     必须先于 MRB 播种：mrb_reviews.pending_defect_id 有指向本表的外键。
   // ------------------------------------------------------------------
-  const mrbRepo = new KyselyMRBReviewRepository(db);
-  for (const review of seedMrbReviews) {
-    await mrbRepo.save(review);
+  const poolRepo = new KyselyPendingDefectPoolRepository(db);
+  /** 已入池的检验单 ID，供 MRB 播种回填 pending_defect_id 外键 */
+  const pooledOrderIds = new Set<string>();
+
+  for (const spec of seedOrders) {
+    if (spec.status !== 'FAILED' && spec.status !== 'IN_MRB_REVIEW') continue;
+
+    const plan = seedPlans.find((candidate) => candidate.planCode === spec.planCode);
+    const version = planVersionOf(spec.planCode, spec.versionNo);
+    const { failQty } = deriveQty(spec.sampleQty, spec.itemKind);
+    const orderItems = plan !== undefined ? buildOrderItems(version, spec.itemKind) : [];
+    const failedItems = orderItems.filter((item) => item.result === 'FAILED');
+    const inspectorName = spec.inspectorName ?? employeeNameOf(spec.inspectorId);
+    const supplierName =
+      spec.vendorName ?? (spec.supplierCode !== undefined ? supplierNameOf(spec.supplierCode) : undefined);
+    const customerName =
+      spec.customerName ?? (spec.customerCode !== undefined ? customerNameOf(spec.customerCode) : undefined);
+    const linkedMrb = seedMrbReviews.find((review) => review.sourceOrderNo === spec.orderNo);
+    // 已开 MRB 或工单已在评审中：池状态收敛为「已入评审」，不再出现在「待发起评审」页签
+    const initiated = spec.status === 'IN_MRB_REVIEW' || linkedMrb !== undefined;
+    const poolId = pendingDefectIdOfOrder(spec.id);
+
+    await poolRepo.save({
+      id: poolId,
+      inspectionOrderId: spec.id,
+      orderNo: spec.orderNo,
+      inspectionType: spec.orderType,
+      batchNo: spec.batchNo,
+      materialCode: spec.materialCode,
+      materialName: materialNameOf(spec.materialCode),
+      defectQty: failQty,
+      // 受检数量 = 抽样数量：不良率分母口径与运行时入池完全一致（docs/20 §6.3）
+      totalQty: spec.sampleQty,
+      defectDescription: spec.inspectionNotes ?? '实测超出公差判定不合格',
+      status: initiated ? 'INITIATED' : 'PENDING_INITIATE',
+      ...(failedItems[0]?.itemCode !== undefined ? { defectItemCode: failedItems[0].itemCode } : {}),
+      ...(supplierName !== undefined ? { supplierName } : {}),
+      ...(customerName !== undefined ? { customerName } : {}),
+      ...(spec.inspectorId !== undefined ? { inspectorId: spec.inspectorId } : {}),
+      ...(inspectorName !== undefined ? { inspectorName } : {}),
+      failedItems: failedItems.map((item) => ({ itemCode: item.itemCode, name: item.name })),
+    });
+
+    if (initiated && linkedMrb?.id !== undefined) {
+      await poolRepo.markInitiated(poolId, linkedMrb.id, '张强');
+    }
+    pooledOrderIds.add(spec.id);
   }
 
   // ------------------------------------------------------------------
-  // 2.7 批次追溯图（主链路 DAG + 独立环分量）
+  // 2.7 MRB 评审单（source_order_no 均命中已播种工单号；池来源单据回填 pending_defect_id）
+  // ------------------------------------------------------------------
+  const mrbRepo = new KyselyMRBReviewRepository(db);
+  for (const review of seedMrbReviews) {
+    const sourceOrder = seedOrders.find((spec) => spec.orderNo === review.sourceOrderNo);
+    // 生效流程与处置闭环时间：与迁移 015 的回填口径一致，保证种子库与"真实跑过一遍"的库同形
+    const applicableFlow = seedReviewFlows.find(
+      (flow) => flow.applicableType === review.sourceType && flow.isActive
+    );
+    const lastApprover = review.approvers[review.approvers.length - 1];
+    await mrbRepo.save({
+      ...review,
+      ...(sourceOrder !== undefined && pooledOrderIds.has(sourceOrder.id)
+        ? { pendingDefectId: pendingDefectIdOfOrder(sourceOrder.id) }
+        : {}),
+      ...(applicableFlow?.id !== undefined ? { reviewFlowId: applicableFlow.id } : {}),
+      ...(review.status === 'DISPOSED'
+        ? {
+            disposedAt: review.updatedAt,
+            ...(lastApprover !== undefined ? { disposedBy: lastApprover.userName } : {}),
+          }
+        : {}),
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // 2.8 批次追溯图（主链路 DAG + 独立环分量）
   // ------------------------------------------------------------------
   const traceRepo = new KyselyBatchTraceRepository(db);
   for (const node of seedTraceNodes) {
@@ -397,7 +546,7 @@ export async function seed(db: Kysely<Database>): Promise<void> {
   }
 
   // ------------------------------------------------------------------
-  // 2.8 PBAC 物料行级权限（三个 jsonb 数组列原样传数组，序列化由仓储负责）
+  // 2.9 PBAC 物料行级权限（三个 jsonb 数组列原样传数组，序列化由仓储负责）
   // ------------------------------------------------------------------
   const permissionRepo = new KyselyMaterialPermissionRepository(db);
   for (const permission of seedMaterialPermissions) {
@@ -405,7 +554,7 @@ export async function seed(db: Kysely<Database>): Promise<void> {
   }
 
   // ------------------------------------------------------------------
-  // 2.9 MES / ERP 集成配置与同步日志（订阅车间/工序为 jsonb 数组列）
+  // 2.10 MES / ERP 集成配置与同步日志（订阅车间/工序为 jsonb 数组列）
   // ------------------------------------------------------------------
   await db
     .insertInto('integrationConfigs')
@@ -461,7 +610,7 @@ export async function printRowCountSummary(db: Kysely<Database>): Promise<void> 
     console.log(`[Seeder]   ${item.table.padEnd(width)} | ${String(item.count).padStart(4)}`);
   }
   console.log(`[Seeder]   ${'-'.repeat(width)}-+------`);
-  console.log(`[Seeder]   ${'TOTAL (20 tables)'.padEnd(width)} | ${String(total).padStart(4)}`);
+  console.log(`[Seeder]   ${('TOTAL (' + rows.length + ' tables)').padEnd(width)} | ${String(total).padStart(4)}`);
   console.log('[Seeder] ==============================================');
   console.log('');
 }

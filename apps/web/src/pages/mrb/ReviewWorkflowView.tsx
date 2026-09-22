@@ -1,25 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { GitMerge, Plus, ShieldCheck, CheckCircle2, ArrowRight, UserCheck, Settings2, RefreshCw } from 'lucide-react';
-import { api } from '../../lib/api';
+import type { ReviewFlow, ReviewFlowNode } from '@letian/contracts';
+import { api, errorMessage } from '../../lib/api';
 
-interface ReviewNode {
-  nodeSeq: number;
-  nodeName: string;
-  roleName: string;
-  isRequired: boolean;
-  allowConcession?: boolean;
-}
-
-interface ReviewFlow {
-  id: string;
-  flowCode: string;
-  flowName: string;
-  applicableType: 'INCOMING_FAIL' | 'PROCESS_FAIL' | 'SHIPMENT_FAIL' | 'SUBCONTRACT_FAIL';
-  nodes: ReviewNode[];
-  isActive: boolean;
-  description?: string;
-  updatedAt?: string;
-}
+/**
+ * 节点展示口径（docs/21 §10.2 / §10.3）：
+ * - 顺序读契约 `nodeLevel`（PRD §3.6「1~3 级审批节点」），不再自建 `nodeSeq`；
+ * - 授权签署角色优先取 `roleName`，未配置时回退 `roleCode`（历史数据里 roleCode 存的是中文角色名）。
+ */
+const nodeSeqOf = (node: ReviewFlowNode): number => node.nodeLevel;
+const roleLabelOf = (node: ReviewFlowNode): string =>
+  node.roleName !== undefined && node.roleName !== '' ? node.roleName : node.roleCode;
 
 const TYPE_NAME_MAP: Record<string, string> = {
   INCOMING_FAIL: '来料检验不合格 (IQC)',
@@ -32,62 +23,27 @@ export function ReviewWorkflowView() {
   const [flows, setFlows] = useState<ReviewFlow[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedFlow, setSelectedFlow] = useState<ReviewFlow | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const loadFlows = async () => {
     setLoading(true);
     try {
-      const res = await api.get<ReviewFlow[]>('/review-flows');
-      const data = Array.isArray(res) ? res : (res as any)?.items || [];
+      const res = await api.get<{ total: number; items: ReviewFlow[] }>('/review-flows');
+      const data = res.items ?? [];
       setFlows(data);
-      if (data.length > 0 && !selectedFlow) {
-        setSelectedFlow(data[0]);
-      }
+      // 选中项必须换成**本次取回的新对象**（按 id 重挂）：若沿用旧引用，
+      // 右侧详情的状态标签与启停按钮会停在切换前的值——左侧卡片角标已变、
+      // 右侧按钮文案未变，用户会以为「点了没反应」（docs/21 §10.1 E3 的同类根因）。
+      setSelectedFlow((prev) =>
+        data.length === 0 ? null : (data.find((flow) => flow.id === prev?.id) ?? data[0] ?? null)
+      );
+      setLoadError(null);
     } catch (err) {
-      console.warn('Load review flows fallback to defaults', err);
-      const defaults: ReviewFlow[] = [
-        {
-          id: '1',
-          flowCode: 'FLOW-IQC-DEFAULT',
-          flowName: '来料不合格多方会签标准流程',
-          applicableType: 'INCOMING_FAIL',
-          isActive: true,
-          description: '用于供应商供料尺寸、性能或外观不合格时的评审处置流转',
-          nodes: [
-            { nodeSeq: 1, nodeName: '质检员初审', roleName: '质检员', isRequired: true, allowConcession: false },
-            { nodeSeq: 2, nodeName: '采购工程师协同', roleName: '采购专员', isRequired: true, allowConcession: false },
-            { nodeSeq: 3, nodeName: '质量部长审批', roleName: '质量主管/部长', isRequired: true, allowConcession: true },
-            { nodeSeq: 4, nodeName: '客户让步确认', roleName: '客户代表/销售', isRequired: false, allowConcession: true },
-          ],
-        },
-        {
-          id: '2',
-          flowCode: 'FLOW-IPQC-DEFAULT',
-          flowName: '下料与滚丝工序不合格评审流程',
-          applicableType: 'PROCESS_FAIL',
-          isActive: true,
-          description: '用于车间内部在制加工异常的分流与返工判定',
-          nodes: [
-            { nodeSeq: 1, nodeName: '车间巡检初判', roleName: '巡检员', isRequired: true, allowConcession: false },
-            { nodeSeq: 2, nodeName: '车间技术主任会签', roleName: '生产主管', isRequired: true, allowConcession: false },
-            { nodeSeq: 3, nodeName: '工艺工程部决议', roleName: '工艺工程师', isRequired: true, allowConcession: true },
-          ],
-        },
-        {
-          id: '3',
-          flowCode: 'FLOW-SUBCONTRACT-DEFAULT',
-          flowName: '委外热处理与表面处理不合格流程',
-          applicableType: 'SUBCONTRACT_FAIL',
-          isActive: true,
-          description: '管控委外加工商硬度、达克罗镀层等关键指标异常',
-          nodes: [
-            { nodeSeq: 1, nodeName: '委外检验录入', roleName: '委外质检员', isRequired: true, allowConcession: false },
-            { nodeSeq: 2, nodeName: '外协供应商确认', roleName: '外协专员', isRequired: true, allowConcession: false },
-            { nodeSeq: 3, nodeName: '总工程师终审', roleName: '总工程师', isRequired: true, allowConcession: true },
-          ],
-        },
-      ];
-      setFlows(defaults);
-      if (!selectedFlow) setSelectedFlow(defaults[0]);
+      // 不再回退到本地写死的流程模板：那会把「接口 404 / 字段没打通」伪装成正常页面
+      // （正是 docs/21 §10.1 E1~E3 长期未被发现的原因），这里改为可见错误态。
+      setFlows([]);
+      setSelectedFlow(null);
+      setLoadError(errorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -99,16 +55,14 @@ export function ReviewWorkflowView() {
 
   const handleToggleFlow = async (flow: ReviewFlow) => {
     try {
-      await api.post(`/review-flows/${flow.id}/toggle`, {});
-      alert(`流程 ${flow.flowName} 状态已更新！`);
+      // 后端只注册了 /:id/toggle-active（docs/04 §3.5）；此前打的 /toggle 恒 404，
+      // 又被 catch 当成"网络异常"本地翻转并弹成功文案，属假成功。
+      await api.post(`/review-flows/${flow.id}/toggle-active`, {});
+      alert(`流程「${flow.flowName}」状态已更新并落库`);
       loadFlows();
-    } catch {
-      // Toggle local fallback
-      const updated = flows.map((f) => (f.id === flow.id ? { ...f, isActive: !f.isActive } : f));
-      setFlows(updated);
-      if (selectedFlow?.id === flow.id) {
-        setSelectedFlow({ ...selectedFlow, isActive: !selectedFlow.isActive });
-      }
+    } catch (err) {
+      // 失败必须可见：不做本地翻转，避免刷新后回退造成的"改了又没改"
+      alert(`流程「${flow.flowName}」状态更新失败：${errorMessage(err)}`);
     }
   };
 
@@ -135,6 +89,12 @@ export function ReviewWorkflowView() {
           </button>
         </div>
       </div>
+
+      {loadError !== null && (
+        <div className="bg-rose-50 border border-rose-200 text-rose-700 text-xs rounded-xl px-4 py-3">
+          评审流程定义加载失败：{loadError}
+        </div>
+      )}
 
       {/* Main Grid: Left Flow List, Right Visual Pipeline */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -209,11 +169,11 @@ export function ReviewWorkflowView() {
                 <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">评审路由节点链</h4>
                 <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 overflow-x-auto pb-3">
                   {selectedFlow.nodes.map((node, idx) => (
-                    <React.Fragment key={node.nodeSeq}>
+                    <React.Fragment key={node.nodeLevel}>
                       <div className="flex-1 min-w-[160px] bg-slate-50 border border-slate-200 rounded-xl p-3.5 hover:shadow-sm transition-shadow">
                         <div className="flex items-center justify-between mb-2">
                           <span className="w-5 h-5 rounded-full bg-blue-600 text-white flex items-center justify-center text-[10px] font-bold">
-                            {node.nodeSeq}
+                            {nodeSeqOf(node)}
                           </span>
                           {node.isRequired && (
                             <span className="text-[10px] px-1.5 py-0.2 bg-rose-50 text-rose-600 rounded font-medium border border-rose-200">
@@ -224,7 +184,7 @@ export function ReviewWorkflowView() {
                         <h5 className="text-xs font-bold text-slate-800 mb-1">{node.nodeName}</h5>
                         <div className="flex items-center gap-1 text-[11px] text-slate-500 mb-2">
                           <UserCheck className="w-3 h-3 text-slate-400" />
-                          <span>{node.roleName}</span>
+                          <span>{roleLabelOf(node)}</span>
                         </div>
                         <div className="text-[10px] text-slate-400 pt-1.5 border-t border-slate-200/80">
                           {node.allowConcession ? '具有让步特采建议权' : '仅限返工/报废判定'}
@@ -256,10 +216,10 @@ export function ReviewWorkflowView() {
                     </thead>
                     <tbody className="divide-y divide-slate-200">
                       {selectedFlow.nodes.map((node) => (
-                        <tr key={node.nodeSeq} className="hover:bg-slate-50">
-                          <td className="py-2.5 px-3 text-center font-bold text-slate-400">{node.nodeSeq}</td>
+                        <tr key={node.nodeLevel} className="hover:bg-slate-50">
+                          <td className="py-2.5 px-3 text-center font-bold text-slate-400">{nodeSeqOf(node)}</td>
                           <td className="py-2.5 px-3 font-medium text-slate-800">{node.nodeName}</td>
-                          <td className="py-2.5 px-3 text-slate-600">{node.roleName}</td>
+                          <td className="py-2.5 px-3 text-slate-600">{roleLabelOf(node)}</td>
                           <td className="py-2.5 px-3 text-center">
                             <span className={node.isRequired ? 'text-rose-600 font-semibold' : 'text-slate-400'}>
                               {node.isRequired ? '是' : '否'}

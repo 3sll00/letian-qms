@@ -201,6 +201,10 @@ export class PenetrateBatchDagUseCase {
         }
       }
 
+      // 4.5 影响面统计：沿 parent_batch → child_batch（生产流向）递归闭包，
+      //     与查询方向解耦 —— 反向查客诉时同样要能看到「本批原料流向哪里」（docs/24 §5.3）。
+      const impact = await ctx.traceDags.countImpact(cmd.batchNo, maxDepth);
+
       // 5. 记录审计日志 (查询穿透)
       if (cmd.operatorId) {
         await ctx.auditLogs.insert({
@@ -227,6 +231,14 @@ export class PenetrateBatchDagUseCase {
         hasCycle: graphHasCycle,
         nodes: Array.from(nodeMap.values()),
         edges: Array.from(edgeMap.values()),
+        impact: {
+          downstreamBatchCount: impact.downstreamBatchCount,
+          upstreamBatchCount: impact.upstreamBatchCount,
+          downstreamOrderCount: impact.downstreamOrderNos.length,
+          downstreamPartyCount: impact.downstreamParties.length,
+          downstreamOrderNos: impact.downstreamOrderNos,
+          downstreamParties: impact.downstreamParties,
+        },
       };
     });
   }

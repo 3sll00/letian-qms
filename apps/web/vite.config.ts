@@ -14,6 +14,9 @@ export default defineConfig({
     alias: {
       '@': path.resolve(__dirname, './src'),
       '@letian/contracts': path.resolve(__dirname, '../../packages/contracts/src'),
+      // 领域层源码直连：录入页复用 evaluateInspectionItem 做客户端实时判标，
+      // 与后端落库复判共用同一份判定口径（见 docs/17-检验录入界面说明与质检方案匹配口径.md §7）
+      '@letian/domain': path.resolve(__dirname, '../../packages/domain/src'),
     },
   },
   server: {

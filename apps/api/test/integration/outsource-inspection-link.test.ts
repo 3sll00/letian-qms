@@ -97,11 +97,12 @@ async function runOutsourceInspectionLinkTests() {
         const dbRow = expected.find((r) => r.orderNo === item.orderNo);
         assert.ok(dbRow, `${type} 返回项 ${String(item.orderNo)} 必须存在于库中`);
 
-        // 委外单号与回厂日期允许库列为空时的兜底：委外单号回落批次号、回厂日期回落建单日期
+        // 委外加工单号 / 回厂日期**只取物理列**：库列为空时接口不得回退
+        //（批次号 ≠ 委外加工单号、建单时间 ≠ 回厂时间），见 docs/09 §2.4 与 docs/32 §2.2
         assert.equal(
           item.outsourceNo,
-          dbRow.outsourceNo ?? dbRow.batchNo,
-          '委外加工单号必须取库中列（为空时回落批次号）'
+          dbRow.outsourceNo ?? undefined,
+          '委外加工单号必须只取库中列（为空即不得回落批次号）'
         );
         assert.equal(item.processType, dbRow.processType ?? undefined, '加工类型必须取库中列');
         assert.equal(item.vendorName, dbRow.vendorName ?? undefined, '加工商必须取库中列');
@@ -132,8 +133,8 @@ async function runOutsourceInspectionLinkTests() {
         }
         assert.equal(
           item.returnDate,
-          dbRow.returnDate ?? dbRow.createdAt.toISOString().slice(0, 10),
-          '回厂日期必须取库中列（为空时回落建单日期）'
+          dbRow.returnDate ?? undefined,
+          '回厂日期必须只取库中列（为空即不得回落建单日期）'
         );
 
         // 检验人：库快照优先，其次按员工主数据补齐

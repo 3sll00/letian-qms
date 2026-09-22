@@ -14,11 +14,11 @@ export const MaterialPermissionSchema = z.object({
   roleCode: z.string().openapi({ description: '角色编码', example: 'IQC_INSPECTOR' }),
   materialCategories: z.array(z.string()).default([]).openapi({
     description: '授权物料分类列表（维度一：物料分类）',
-    example: ['原材料', '紧固件五金'],
+    example: ['CAT-RAW', 'CAT-FINISH'],
   }),
   materialCodes: z.array(z.string()).default([]).openapi({
     description: '授权特定物料编码白名单（维度二：特定编码）',
-    example: ['CL-001', 'CL-002'],
+    example: ['MAT-304SS-05', 'MAT-BLT-88-M10'],
   }),
   supplierCodes: z.array(z.string()).default([]).openapi({
     description: '授权供应商编码白名单（维度三：供应商范围）',
@@ -28,6 +28,7 @@ export const MaterialPermissionSchema = z.object({
 }).openapi('MaterialPermission');
 
 /**
- * PBAC 规则配置更新请求 Schema
+ * 说明：PBAC 规则的**创建 / 更新请求体**统一收敛在 `./permission.ts`
+ * （`CreatePermissionRequestSchema` / `UpdateMaterialPermissionRequestSchema`），
+ * 本文件只保留规则实体本身的 Schema，避免同一契约出现两处定义导致口径漂移。
  */
-export const UpdateMaterialPermissionRequestSchema = MaterialPermissionSchema.omit({ id: true });

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Letian QMS API Specification
-  version: 2.5.0
+  version: 2.12.0
   description: 乐天紧固件质量管理系统契约规范，完全对齐 21 项业务能力、DDD 四层架构与 PostgreSQL 14+ 数据实体。
 servers:
   - url: /api/v1
@@ -44,6 +44,241 @@ paths:
               schema:
                 $ref: '#/components/schemas/ReleaseGateBlockedResponse'
 
+  /plans/match:
+    get:
+      summary: 质检方案自动匹配（按物料编码 + 检验类型两级匹配已启用方案，返回待检指标清单）
+      description: >-
+        两级兜底匹配：第一级物料专属方案（material_code = materialCode），
+        第二级存货分类通用方案（material_code = '' 且 category_code = 该物料所属分类）。
+        两级共同要求 inspection_stage = inspectionType、version_status = 'ACTIVE'
+        且版本生效周期覆盖当天；多命中取最新创建的一行。
+        口径唯一真相见 docs/17-检验录入界面说明与质检方案匹配口径.md §7.3。
+      operationId: matchInspectionPlan
+      parameters:
+        - name: materialCode
+          in: query
+          required: true
+          description: 物料编码（精确匹配）
+          schema:
+            type: string
+        - name: inspectionType
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH, OQC_HEAT, OQC_BLACK, OQC_ZINC, OQC_NICKEL, OQC_PHOSPH, OQC_DACRO, OQC_MACH]
+      responses:
+        '200':
+          description: 命中已启用 (ACTIVE) 方案版本，返回版本行 UUID、命中来源与待检指标清单
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MatchedInspectionPlan'
+        '404':
+          description: 两级匹配均未找到该物料 + 检验类型下的已启用质检方案（inspection-plan-not-found）
+
+  /plans:
+    get:
+      summary: 获取质检方案列表（一行 = 一个 plan_code 聚合，按最新版本更新时间倒序）
+      description: >-
+        质检方案设计页台账的唯一数据来源（字段口径见 docs/20-质检方案设计页数据字段与接口打通设计.md）。
+        materialName / categoryName / categoryId / createdByName 为读时 JOIN 派生字段（方案表不落冗余快照列：
+        物料改名应即时反映），status 为方案级派生状态；前端不得再自行映射主数据名称或推导状态。
+        total 为去重后的方案编码命中总数（不是版本行数），items 与兼容别名 list 指向同一份当页数据。
+      operationId: listInspectionPlans
+      parameters:
+        - name: inspectionType
+          in: query
+          description: 契约检验类型枚举（13 值，含委外七分类），精确匹配 inspection_stage
+          schema:
+            type: string
+            enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH, OQC_HEAT, OQC_BLACK, OQC_ZINC, OQC_NICKEL, OQC_PHOSPH, OQC_DACRO, OQC_MACH]
+        - name: materialCode
+          in: query
+          description: 专属物料编码，模糊匹配
+          schema:
+            type: string
+        - name: categoryCode
+          in: query
+          description: 存货分类编码；命中方案自身 category_code，或经主数据 materials 反查的物料所属分类（两者取 OR）
+          schema:
+            type: string
+        - name: keyword
+          in: query
+          description: 方案编码 / 方案名称模糊匹配
+          schema:
+            type: string
+        - name: isActive
+          in: query
+          description: true 时只返回存在 ACTIVE 版本的方案
+          schema:
+            type: boolean
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        '200':
+          description: 质检方案分页列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedInspectionPlans'
+    post:
+      summary: 新建质检方案（含首个草稿版本）
+      description: >-
+        契约正文 versions[0] 即首个草稿版本，一律以 DRAFT 落库（待质量主管审批后启用）；
+        categoryCode 缺省时回落到绑定物料的真实存货分类。
+        planCode 可省略：留空（不传该字段）由服务端按 QP-{YYYYMMDD}-{NNN} 取号；显式传入按原值使用，传空串会被 400 拒绝。
+      operationId: createInspectionPlan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInspectionPlanRequest'
+      responses:
+        '201':
+          description: 创建成功，返回含首个草稿版本的方案
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionPlan'
+
+  /plans/stats:
+    get:
+      summary: 质检方案 KPI 聚合（方案总数 / 已启用 / 待审批 / 覆盖产品数）
+      description: >-
+        质检方案设计页 4 张 KPI 卡的唯一数据来源：由服务端全量聚合，只施加 PBAC 物料权限过滤，
+        不受列表筛选条件与分页影响；严禁用当页列表数据推算全局 KPI（方案数超过一页时数字必然失真）。
+      operationId: getInspectionPlanStats
+      responses:
+        '200':
+          description: KPI 聚合结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanStats'
+
+  /plans/{id}:
+    get:
+      summary: 获取质检方案详情（按版本行 UUID 查询，自动聚合该 plan_code 的全部版本）
+      operationId: getInspectionPlan
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 方案版本行 UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 方案详情（含全部版本与指标项）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionPlan'
+        '404':
+          description: 方案不存在（not-found）
+
+  /plans/versions/{versionId}/status:
+    post:
+      summary: 方案版本启停（审批）—— 启用 / 停用指定版本行
+      description: >-
+        目标版本由 URL 的 versionId（版本行 UUID）唯一确定，服务端不做任何「按方案编码回退」，
+        避免审批动作落到非预期版本上。状态机由 @letian/domain 的 InspectionPlan 保证：
+        ACTIVATE 后该版本为 ACTIVE 且同方案其它 ACTIVE 版本自动转 INACTIVE（单激活态），
+        已 ACTIVE 的版本重复启用幂等放行，指标项为空的版本拒绝启用（400）；
+        DEACTIVATE 只接受当前为 ACTIVE 的版本，已 INACTIVE 的版本幂等放行。
+        角色门禁：仅 QA_MANAGER / ADMIN / SYSTEM 可执行，其余 403 forbidden
+        （按角色判定而非权限位 —— 登录签发的 JWT 只带 role、不带 permissions）。
+        POST /api/v1/plans 一律落 DRAFT，而 GET /plans/match 只认 ACTIVE，
+        本接口是草稿版本进入自动匹配的唯一入口。
+        口径唯一真相见 docs/17-检验录入界面说明与质检方案匹配口径.md §7.5.6。
+      operationId: togglePlanVersionStatus
+      parameters:
+        - name: versionId
+          in: path
+          required: true
+          description: 目标方案版本行 UUID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TogglePlanVersionStatusRequest'
+      responses:
+        '200':
+          description: 启停成功，返回该方案的最新读模型（含派生 status：全部版本停用后为 DISABLED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionPlan'
+        '400':
+          description: >-
+            非契约 action（validation-failed）；
+            或空指标项版本不可启用 / 非 ACTIVE 版本不可停用（plan-toggle-failed）
+        '403':
+          description: 角色不足（forbidden）：仅质量主管 / 系统管理员可启停方案版本
+        '404':
+          description: 目标版本行不存在（plan-not-found）
+
+  /plans/versions/{versionId}/upgrade:
+    post:
+      summary: 方案版本升版 —— 以指定版本行为模板产出新的草稿版本
+      description: >-
+        模板版本行由 URL 的 versionId（版本行 UUID）唯一确定，服务端不做「按方案编码回退」。
+        省略字段的派生口径：versionNo 省略则由服务端在现有最大版本号上自动升位
+        （v2.4/v2.5 → v2.6，保留原前缀写法与段数，撞号继续递增），显式传入按原值使用，
+        与 plan_code 的服务端取号（TBD-11）完全对称；items / samplingScheme / aqlLevel /
+        strictness 省略则沿用模板版本行；effectiveStartDate / effectiveEndDate 不继承
+        （省略即长期有效 —— 照抄旧周期会让新草稿「出生即过期」）。
+        新版本一律落 DRAFT，既有版本行的状态与指标项原样不动（历史检验单的 plan_snapshot
+        不会被追溯改写），仍需经 …/status 的 ACTIVATE 审批才参与自动匹配。
+        同一方案已有 DRAFT 版本时拒绝（400，保证连点不会造出多份待审批版本）。
+        门禁：只做 PBAC 物料权限校验，不做角色门禁 —— 升版只产草稿、不改变生效状态，
+        与「新建方案」POST /plans 同级；改变生效状态的 …/status 才需质量主管。
+        口径唯一真相见 docs/17-检验录入界面说明与质检方案匹配口径.md §7.5.8。
+      operationId: upgradePlanVersion
+      parameters:
+        - name: versionId
+          in: path
+          required: true
+          description: 模板版本行 UUID（省略的指标项与抽样参数一律取自该版本行）
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpgradePlanVersionRequest'
+      responses:
+        '201':
+          description: 升版成功，返回该方案的最新读模型（versions 中含新建的 DRAFT 版本）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionPlan'
+        '400':
+          description: >-
+            空版本号 / 空指标项被契约拒绝（validation-failed）；
+            或该方案已有草稿版本（PLAN_DRAFT_ALREADY_EXISTS）、模板版本行不属于该方案
+        '404':
+          description: 目标版本行不存在（plan-not-found）
+
   /inspections:
     get:
       summary: 获取检验单列表（支持多维度组合筛选与 PBAC 行级数据隔离）
@@ -77,6 +312,11 @@ paths:
             enum: [PENDING, INSPECTING, PASSED, FAILED]
         - name: batchNo
           in: query
+          schema:
+            type: string
+        - name: inboundNo
+          in: query
+          description: 入库单号模糊匹配（来料检验台账「入库单号」列；006 字段扩展，物理列 `inbound_no`，迁移 021 起取代 `receipt_no`）
           schema:
             type: string
         - name: materialCode
@@ -119,12 +359,29 @@ paths:
             type: string
         - name: docKeyword
           in: query
-          description: 单号模糊匹配，同时命中 `order_no` 与 `receipt_no`（来料检验台账「检验单号 / 入库单号」检索口径）
+          description: 单号模糊匹配，同时命中 `order_no` 与 `inbound_no`（来料检验台账「检验单号 / 入库单号」检索口径）
           schema:
             type: string
         - name: materialKeyword
           in: query
           description: 物料模糊匹配，同时命中 `material_code` 与 `material_name`
+          schema:
+            type: string
+        - name: orderNo
+          in: query
+          description: >-
+            检验单号模糊匹配，只命中 `order_no`（过程检验台账「检验工单」筛选口径）。
+            与 `docKeyword`（`order_no` OR `inbound_no`，来料检验台账）刻意区分：
+            过程检验无入库单概念，故不复用含 `inbound_no` 分支的联合检索。
+            口径见 docs/28-过程检验台账工单号双筛选项数据字段与接口打通设计.md §2.1。
+          schema:
+            type: string
+        - name: workOrderNo
+          in: query
+          description: >-
+            MES 生产工单号模糊匹配（过程检验台账「生产工单」筛选口径）。
+            与台账「MES生产工单」列显示口径一致：`work_order_no` 为空时以 `batch_no` 兜底匹配，
+            避免「列上显示批次号、输入该值却查不到」。见 docs/28 §2.3。
           schema:
             type: string
         - name: outsourceNo
@@ -179,6 +436,11 @@ paths:
   /inspections/{id}:
     get:
       summary: 获取检验单详情（含快照元数据、公差基准与明细指标实测）
+      description: |
+        检验录入页「只读回看」的唯一数据来源（口径：docs/17-检验录入界面说明与质检方案匹配口径.md §7.3 / §7.8）。
+        返回体自带本单 `planSnapshot`（方案编码 / 版本 / 指标基准）与 `items`（实测值 + 单项判定 result + 免检标记），
+        因此回看历史工单无需再按物料调 `GET /plans/match` 取"当前生效方案"，方案后续改版也不改写本单历史结论。
+        注意：`items[].result` 是建单当时固化的落库判定，前端回看必须直接展示该值，不得按当前标准重算。
       operationId: getInspectionOrder
       parameters:
         - name: id
@@ -220,9 +482,90 @@ paths:
               schema:
                 $ref: '#/components/schemas/InspectionOrder'
 
+  /mrb/pending-pool:
+    get:
+      summary: 查询不合格待审核池（各检验环节判定不合格、尚未发起评审的记录，支持环节/状态/物料/批次筛选）
+      description: MRB 不合格品处置页「发起评审」抽屉的数据来源，见 docs/19-MRB不合格品处置页整合设计.md §7.1
+      operationId: listPendingMRBPool
+      parameters:
+        - name: stage
+          in: query
+          description: 检验环节（别名 sourceStage / inspectionType，三者取其一）
+          schema:
+            type: string
+            enum: [IQC, IPQC, FQC, OQC]
+        - name: status
+          in: query
+          description: >-
+            池状态，只接受契约三态。004 建表时的历史词表（PENDING_REVIEW / REVIEWING / RESOLVED）
+            已由迁移 015 归一，传入旧值返回 400，不做静默映射。
+          schema:
+            type: string
+            enum: [PENDING_INITIATE, INITIATED, DISMISSED]
+        - name: materialCode
+          in: query
+          schema:
+            type: string
+        - name: batchNo
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: 待审核池分页清单（items 与 list 指向同一份当页数据，list 为兼容别名）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PendingDefectItem'
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  pageSize:
+                    type: integer
+
+  /mrb/pending-pool/initiate:
+    post:
+      summary: 待审核池逐条发起独立 MRB 评审（生成 MRB 工单并把池条目置为 INITIATED）
+      operationId: initiateMRBReview
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InitiateReviewRequest'
+      responses:
+        '201':
+          description: MRB 评审工单已生成
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MRBRecord'
+        '409':
+          description: 该不合格记录已发起过评审
+
   /mrb/records:
     get:
-      summary: 查询 MRB 不合格评审记录列表（支持四大分类 Tab 与 5 项统计指标）
+      summary: 查询 MRB 不合格评审记录列表（支持分类 Tab、多状态页签、单号模糊检索与 5 项统计指标）
       operationId: listMRBRecords
       parameters:
         - name: categoryTab
@@ -233,20 +576,106 @@ paths:
             default: ALL
         - name: status
           in: query
+          description: 评审状态过滤，支持逗号分隔多值（「已评审」页签 = DISPOSED,REJECTED）；非法值返回 400
           schema:
             type: string
-            enum: [PENDING_REVIEW, UNDER_REVIEW, DISPOSED, REJECTED]
+            example: DISPOSED,REJECTED
+        - name: mrbNo
+          in: query
+          description: MRB 单号模糊检索
+          schema:
+            type: string
+            example: MRB-20260706-001
+        - name: sourceOrderNo
+          in: query
+          description: 来源检验单号模糊检索
+          schema:
+            type: string
+        - name: disposition
+          in: query
+          schema:
+            type: string
+            enum: [RETURN_TO_VENDOR, REWORK, CONCESSION, SCRAP]
+        - name: dateFrom
+          in: query
+          description: 发现日期（createdAt）下界，含当日，本地日界
+          schema:
+            type: string
+            format: date
+            example: '2026-07-06'
+        - name: dateTo
+          in: query
+          description: 发现日期（createdAt）上界，含当日，本地日界
+          schema:
+            type: string
+            format: date
+            example: '2026-07-06'
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
       responses:
         '200':
-          description: MRB 列表与统计数据
+          description: MRB 列表与统计数据（KPI 为 PBAC 过滤后的全量口径，非当页推算）
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/PaginatedMRBRecords'
 
-  /mrb/records/{id}/dispose:
+  /mrb/records/{id}/sign:
     post:
-      summary: 执行 MRB 评审处置决策（退货/返工/让步接收特采/报废，支持多方联合签核与客户凭证）
+      summary: 提交节点会签意见（携带会签席位 roleCode 与签署人，写入 approvers 凭据）
+      operationId: signMRBRecordNode
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [APPROVE, REJECT, APPROVED, REJECTED]
+                  description: 会签动作（APPROVE/APPROVED 通过并进入评审中，REJECT/REJECTED 置为已驳回）
+                comment:
+                  type: string
+                roleCode:
+                  type: string
+                  description: 会签席位角色编码（QA_MGR / TECH_DIR / PROD_SUP / MGMT_DIR）
+                approverName:
+                  type: string
+                signatureUrl:
+                  type: string
+      responses:
+        '200':
+          description: 会签成功，返回更新后的 MRB 单据
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MRBRecord'
+        '409':
+          description: 单据已完成处置，不能再发起会签
+
+  /mrb/records/{id}/disposition:
+    post:
+      summary: 提交 MRB 最终处置结论（退货/返工/让步接收特采/报废；特采必须附客户书面签核凭证）
       operationId: disposeMRBRecord
       parameters:
         - name: id
@@ -267,7 +696,156 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/MRBRecord'
+                $ref: '#/components/schemas/DisposeMRBResponse'
+
+  /review-flows:
+    get:
+      summary: 获取全部 MRB 评审流程定义（供「发起评审」抽屉选择流程与「评审流程设置」页维护）
+      operationId: listReviewFlows
+      responses:
+        '200':
+          description: 流程定义清单（每个不合格来源维度一条，节点支持 requireCustomerSign 客户书面签核闸门）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total]
+                properties:
+                  total:
+                    type: integer
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ReviewFlow'
+    post:
+      summary: 新建或整体保存评审流程定义（按 flow_code + version upsert 整份 nodes）
+      operationId: saveReviewFlow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewFlow'
+      responses:
+        '200':
+          description: 保存成功；返回落库后的流程定义
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, message, flow]
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+                  flow:
+                    $ref: '#/components/schemas/ReviewFlow'
+
+  /review-flows/{id}/toggle-active:
+    post:
+      summary: 启用 / 停用指定的评审流程定义（真实写回 review_flows.is_active）
+      operationId: toggleReviewFlowActive
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 状态已落库并回吐翻转后的 isActive。**请求须带 JSON 体（`{}` 即可）**：Fastify 对 content-type application/json 的空体直接拒绝，前端 api.post(path, {}) 即此形态
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, id, isActive]
+                properties:
+                  success:
+                    type: boolean
+                  id:
+                    type: string
+                    format: uuid
+                  isActive:
+                    type: boolean
+        '404':
+          description: 流程定义不存在（注意：路径为 /toggle-active，不存在 /toggle 别名）
+
+  /traceability/batches:
+    get:
+      summary: 批次检索 —— 按批次号/炉批号、订单号、物料编码、成品名命中批次清单（追溯主键是批次号）
+      operationId: searchTraceBatches
+      parameters:
+        - name: batchNo
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 批次号或炉批号，模糊匹配
+        - name: orderNo
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 订单号，同时匹配检验单号 / 工单号 / 销售出库单号 / 客户采购订单号
+        - name: materialCode
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 物料编码，模糊匹配
+        - name: productName
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 成品 / 物料名称，模糊匹配
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: 命中批次清单。数据来源为两路并集（已建血缘的 batch_trace_nodes + 仅有检验台账的 inspection_orders），过滤全部下沉 SQL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TraceBatchSearchResponse'
+
+  /traceability/orders/{orderNo}:
+    get:
+      summary: 本订单检验环节 —— 订单维度的检验台账视图（同一订单下各环节并列，不是血缘链路）
+      operationId: getOrderTraceChain
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 检验单号 / MES 工单号 / 销售出库单号 / 客户采购订单号
+      responses:
+        '200':
+          description: 本订单检验环节。stages 按工艺序位升序；无终检时间时 durationMinutes 缺省（界面显示 —）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TraceOrderChainResponse'
+        '403':
+          description: PBAC 未授权。订单维度是详情视图，fail-closed
+        '404':
+          description: 未找到该订单号对应的检验单（TRACE_ORDER_NOT_FOUND）
 
   /traceability/{batchNo}:
     get:
@@ -279,13 +857,31 @@ paths:
           required: true
           schema:
             type: string
+        - name: direction
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [FORWARD, BACKWARD, BOTH]
+            default: BOTH
+          description: 正向（沿生产流向追到出货）/ 反向（倒查上游炉批号与来料）/ 双向
+        - name: maxDepth
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10
+            default: 5
       responses:
         '200':
-          description: 批次溯源 DAG 图结构数据（包含节点、边及环路预警）
+          description: 批次溯源 DAG 图结构数据（节点、边、影响面统计与成环预警）。节点缺值一律缺省或 null，不得用空串占位
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/TraceabilityGraphResponse'
+        '403':
+          description: PBAC 命中物料行级权限拦截（fail-closed）；界面必须提示「权限拦截」而不是「无数据」
 
   /integration/sync:
     post:
@@ -501,24 +1097,24 @@ components:
           type: string
         inspectionNotes:
           type: string
-        receiptNo:
+        inboundNo:
           type: string
-          description: 采购入库单号（006 来料检验扩展）
-        receiptDate:
+          description: 入库单号（006 来料检验扩展，物理列 `inbound_no`；「采购入库单号」与「入库单号」为同一业务对象）
+        inboundDate:
           type: string
-          description: 采购入库日期（006 来料检验扩展）
+          description: 入库日期（006 来料检验扩展，物理列 `inbound_date`）
         specification:
           type: string
-          description: 规格型号
+          description: 规格型号（物理列 `inspection_orders.specification`）。来源 ERP Ptype.Standard -> `materials.spec_model`；006 新增，迁移 023 按物料主数据回填全部检验类型
         spec:
           type: string
-          description: 规格型号别名
+          description: 规格型号只读别名：读侧由 specification 派生，不落库（写侧请用 specification）
         unit:
           type: string
           description: 计量单位
         totalQty:
           type: number
-          description: 来料批次总数量
+          description: 报检批量总数（物理列 total_qty）；过程检验 = 该工序投产/送检批量，即台账「数量」列
         workOrderNo:
           type: string
           description: MES 生产工单号（007 过程检验 IPQC 扩展）
@@ -636,7 +1232,7 @@ components:
 
     CreateInspectionOrderRequest:
       type: object
-      required: [inspectionType, materialCode, materialName, batchNo, sampleQty]
+      required: [inspectionType, materialCode, batchNo, sampleQty]
       properties:
         orderNo:
           type: string
@@ -649,8 +1245,12 @@ components:
           enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH, OQC_HEAT, OQC_BLACK, OQC_ZINC, OQC_NICKEL, OQC_PHOSPH, OQC_DACRO, OQC_MACH]
         materialCode:
           type: string
+          description: 物料编码（ERP Ptype.UserCode）；服务端按它回查存货档案，为台账补齐物料名称 / 规格型号 / 计量单位
         materialName:
           type: string
+          description: >-
+            物料名称/品名（ERP Ptype.FullName -> materials.material_name）；
+            省略时服务端按 materialCode 从存货档案补齐（补齐失败返回 400 validation-failed）
         batchNo:
           type: string
         supplierCode:
@@ -667,34 +1267,41 @@ components:
           type: boolean
         totalQty:
           type: number
-          description: 来料批次总数量（006 来料检验扩展）
+          description: 报检批量总数（落库 inspection_orders.total_qty，过程检验台账「数量」列）
         furnaceHeatNo:
           type: string
           description: 炉批号（支持智能关联溯源）
-        receiptNo:
+        inboundNo:
           type: string
-          description: 采购入库单号，来自 ERP Dlyndx（006 来料检验扩展）
+          description: 入库单号，来自 ERP 采购入库单 Dlyndx.Number（006 来料检验扩展）
           example: RK-20260706-001
-        receiptDate:
+        inboundDate:
           type: string
-          description: 采购入库日期（006 来料检验扩展）
+          description: 入库日期（006 来料检验扩展）
           example: '2026-07-06'
         specification:
           type: string
-          description: 规格型号，来自 ERP Ptype.Standard（006 来料检验扩展）
-          example: Φ20mm
+          description: >-
+            规格型号，来自 ERP Ptype.Standard -> `materials.spec_model`（006 来料检验扩展）；
+            与 spec 等价但优先级更高，服务端统一收敛到该字段落库；
+            省略时按 materialCode 从存货档案补齐（补齐不到则落 NULL，绝不从物料名称猜规格）
+          example: Φ5.0mm / 盘圆 / 304HC
         spec:
           type: string
-          description: 规格型号别名（兼容简写）
-          example: Φ20mm
+          description: 规格型号的兼容别名：仅在省略 specification 时生效，服务端归一后写入 specification 列
+          example: Φ5.0mm / 盘圆 / 304HC
         unit:
           type: string
-          description: 计量单位
+          description: 计量单位（ERP Unit1 -> materials.unit）；省略时按 materialCode 从存货档案补齐
           example: 件
+        inspectorId:
+          type: string
+          format: uuid
+          description: 检验人（员工主数据 id，落库 inspection_orders.inspector_id）：与 inspectorName 可任选其一或同时传入
         inspectorName:
           type: string
-          description: 检验人姓名
-          example: 张检验
+          description: 检验人姓名（落库 inspection_orders.inspector_name，即过程检验台账「检验人」列）；缺省时由读侧按 inspector_id 从员工主数据补齐，绝不推导假值
+          example: 刘芳
         workOrderNo:
           type: string
           description: MES 生产工单号（007 过程检验扩展）
@@ -703,7 +1310,7 @@ components:
           description: 断料/下料长度 mm（007 过程检验扩展）
         operatorName:
           type: string
-          description: 操作员姓名（007 过程检验扩展）
+          description: 机台作业员姓名（007 过程检验扩展，工序执行人；**不是**当前登录操作人）
         operatorId:
           type: string
           description: 操作员工号（007 过程检验扩展）
@@ -748,11 +1355,333 @@ components:
           description: 加工商/外协厂商名称（009 委外检验扩展）
         completedAt:
           type: string
-          description: 检验完成时间
+          description: 台账「完成时间」列：该工序报工/报检登记时间；终判完成时由状态流转刷新
         planVersionId:
           type: string
           format: uuid
+          description: >-
+            指定的质检方案版本行 UUID；显式传入时必须真实存在（否则 404，禁止静默降级为其它方案）；
+            省略时服务端按「物料编码 + 检验类型」自动匹配已启用方案，匹配不到返回 400 inspection-plan-not-found。
+            口径见 docs/17-检验录入界面说明与质检方案匹配口径.md §7
 
+    MatchedInspectionPlan:
+      type: object
+      required: [planCode, planName, matchSource, planVersionId, versionNo, inspectionType, materialCode, items, matchedAt]
+      properties:
+        planCode:
+          type: string
+        planName:
+          type: string
+        matchSource:
+          type: string
+          enum: [MATERIAL, MATERIAL_CATEGORY]
+          description: 命中来源：MATERIAL = 物料专属方案；MATERIAL_CATEGORY = 存货分类通用方案（兜底命中）
+        planVersionId:
+          type: string
+          format: uuid
+          description: 命中的方案版本行 UUID，建单时原样回传给 POST /inspections
+        versionNo:
+          type: string
+        inspectionType:
+          type: string
+          enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH, OQC_HEAT, OQC_BLACK, OQC_ZINC, OQC_NICKEL, OQC_PHOSPH, OQC_DACRO, OQC_MACH]
+        materialCode:
+          type: string
+        samplingScheme:
+          type: string
+        aqlLevel:
+          type: string
+        strictness:
+          type: string
+        items:
+          type: array
+          description: 待检指标清单（结构同质检方案版本的 items）
+          items:
+            type: object
+        matchedAt:
+          type: string
+          format: date-time
+    InspectionPlanItem:
+      type: object
+      required: [itemCode, name]
+      description: 检验指标项（落 inspection_plans.items JSONB）
+      properties:
+        id:
+          type: string
+          format: uuid
+        seq:
+          type: integer
+          description: 指标项序号
+        itemCode:
+          type: string
+        name:
+          type: string
+        dataType:
+          type: string
+          enum: [NUMERIC, TEXT, QUALITATIVE]
+        metricCategory:
+          type: string
+          description: 检验类别（页面「检验类别」列的取值来源）
+          enum: [DIMENSION, APPEARANCE, HARDNESS, COATING_THICKNESS, TENSILE_STRENGTH, MECHANICAL_PERFORMANCE, CHEMICAL_COMPOSITION, TEXT_INTERVAL]
+        standardText:
+          type: string
+        acceptableValues:
+          type: array
+          description: 定性 / 文本型的可接受值清单（TBD-06）。非空时判定只认清单成员，不再依赖 standardText 的 “, ， / |” 分隔符约定；建单时随方案快照固化进工单指标项
+          items:
+            type: string
+        nominalValue:
+          type: number
+        upperTolerance:
+          type: number
+        lowerTolerance:
+          type: number
+        sampleSize:
+          type: integer
+        unit:
+          type: string
+        measurementTool:
+          type: string
+        isMandatory:
+          type: boolean
+        remark:
+          type: string
+    InspectionPlanVersion:
+      type: object
+      required: [planId, versionNo, createdBy]
+      description: 方案版本（一行 = 一个版本，存储模型见 docs/03-数据模型.md §2.8）
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: 版本行 UUID（建单快照绑定的 planVersionId 来源）
+        planId:
+          type: string
+          format: uuid
+        versionNo:
+          type: string
+        status:
+          type: string
+          description: 版本状态（契约 PlanVersionStatus，落 version_status 列）
+          enum: [DRAFT, ACTIVE, INACTIVE]
+        samplingScheme:
+          type: string
+        aqlLevel:
+          type: string
+        strictness:
+          type: string
+        effectiveStartDate:
+          type: string
+          description: 方案生效起始日 YYYY-MM-DD（存 sampling_config JSONB）
+        effectiveEndDate:
+          type: string
+          description: 方案生效截止日 YYYY-MM-DD（存 sampling_config JSONB）
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/InspectionPlanItem'
+        createdBy:
+          type: string
+          format: uuid
+        createdByName:
+          type: string
+          description: 版本创建人姓名（按 created_by 联表 employees 读时派生，页面「创建人」列）
+        createdAt:
+          type: string
+          format: date-time
+    InspectionPlan:
+      type: object
+      required: [planCode, planName, inspectionType]
+      description: 质检方案（方案级字段 + versions[] 版本集合；展示名称均为读时派生，不落冗余快照列）
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: 方案级标识，优先取 ACTIVE 版本行
+        planCode:
+          type: string
+        planName:
+          type: string
+        inspectionType:
+          type: string
+          enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH, OQC_HEAT, OQC_BLACK, OQC_ZINC, OQC_NICKEL, OQC_PHOSPH, OQC_DACRO, OQC_MACH]
+        materialCode:
+          type: string
+          description: 专属物料编码；空串表示「该分类的通用方案」（014 口径）
+        materialName:
+          type: string
+          description: 适用产品名称（按 material_code 联表 materials 读时派生，分类通用方案为空）
+        categoryCode:
+          type: string
+          description: 方案归属存货分类编码（分类级兜底匹配与分类筛选的检索键）
+        categoryId:
+          type: string
+          format: uuid
+          description: 存货分类主键（按 category_code 联表 inventory_categories 读时派生）
+        categoryName:
+          type: string
+          description: 存货分类名称（读时派生）
+        isCategoryDefault:
+          type: boolean
+          description: 是否为该分类的默认（通用）方案：material_code 为空串且 category_code 非空
+        status:
+          $ref: '#/components/schemas/PlanStatus'
+        versions:
+          type: array
+          items:
+            $ref: '#/components/schemas/InspectionPlanVersion'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    CreateInspectionPlanRequest:
+      type: object
+      required: [planName, inspectionType]
+      description: >-
+        新建质检方案请求体（POST /api/v1/plans 专用口径）。与读模型 InspectionPlan 有两处差别：
+        ① versions[].id / planId / createdBy 由服务端派生（版本行 UUID 落库时才生成、创建人取 JWT 操作人），
+        调用方不得传也无法传 —— 用读模型校验请求体会让页面新建方案恒定 400；
+        ② planCode 可省略：留空（不传该字段）时由服务端按 QP-{YYYYMMDD}-{NNN} 取号（本地时区当日流水、3 位左补零、每日归零；
+        规则见 @letian/domain 的 inspection-plan-number，取号池见迁移 017），显式传入则按原值使用
+        （QP-IQC-304SS 这类人工语义编码仍然合法），但传空串会被 400 validation-failed 拒绝（留空只能「不传字段」）。
+        首个版本一律以 DRAFT 落库（待质量主管审批后启用），请求体携带的 status 会被忽略。
+        指标项为空（versions 省略或 items 为空）由领域规则 PLAN_EMPTY_ITEMS 拒绝，
+        收敛为 400 validation-failed（含 invalidParams），不得放行空草稿。
+      properties:
+        planCode:
+          type: string
+          description: 方案编码；留空（不传字段）时由服务端按 QP-{YYYYMMDD}-{NNN} 取号，显式传入按原值使用，传空串会被 400 拒绝
+        planName:
+          type: string
+        inspectionType:
+          type: string
+          enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH, OQC_HEAT, OQC_BLACK, OQC_ZINC, OQC_NICKEL, OQC_PHOSPH, OQC_DACRO, OQC_MACH]
+        materialCode:
+          type: string
+          description: 专属物料编码；留空 = 分类通用方案（需配合 categoryCode）
+        categoryCode:
+          type: string
+          description: 方案归属存货分类编码；缺省时回落到绑定物料的真实存货分类
+        versions:
+          type: array
+          items:
+            $ref: '#/components/schemas/CreateInspectionPlanVersion'
+    CreateInspectionPlanVersion:
+      type: object
+      required: [versionNo]
+      description: 新建方案时的版本正文（版本行 id / planId / createdBy 由服务端生成，故不在此列出）
+      properties:
+        versionNo:
+          type: string
+        status:
+          type: string
+          description: 提交值会被服务端忽略：首个版本一律以 DRAFT 落库
+          enum: [DRAFT, ACTIVE, INACTIVE]
+        samplingScheme:
+          type: string
+        aqlLevel:
+          type: string
+        strictness:
+          type: string
+        effectiveStartDate:
+          type: string
+          description: 版本生效起始日 YYYY-MM-DD（落 sampling_config JSONB）；留空 = 不限制起始日
+        effectiveEndDate:
+          type: string
+          description: 版本生效截止日 YYYY-MM-DD（落 sampling_config JSONB）；留空 = 长期有效
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/InspectionPlanItem'
+    PlanStatus:
+      type: string
+      description: 方案级状态（由该方案全部版本行的 version_status 派生，全系统唯一口径）
+      enum: [ENABLED, PENDING_APPROVAL, DISABLED]
+    PlanVersionStatusAction:
+      type: string
+      description: 方案版本启停动作：ACTIVATE = 审批启用该版本，DEACTIVATE = 停用该版本
+      enum: [ACTIVATE, DEACTIVATE]
+    TogglePlanVersionStatusRequest:
+      type: object
+      required: [action]
+      description: >-
+        方案版本启停（审批）请求体（POST /api/v1/plans/versions/{versionId}/status）。
+        只传动作，目标版本由 URL 的版本行 UUID 指定 —— 不做任何「按方案编码回退」。
+      properties:
+        action:
+          $ref: '#/components/schemas/PlanVersionStatusAction'
+    UpgradePlanVersionRequest:
+      type: object
+      description: >-
+        方案版本升版请求体（POST /api/v1/plans/versions/{versionId}/upgrade）。
+        模板版本由 URL 的版本行 UUID 指定；以下字段**全部可省略**，省略即由服务端 / 模板版本行派生：
+        versionNo 省略 → 服务端在现有最大版本号上自动升位；items / 抽样参数省略 → 沿用模板版本行；
+        生效周期**不继承**（省略即长期有效）。空对象 {} 合法。
+      properties:
+        versionNo:
+          type: string
+          minLength: 1
+          description: 新版本号；省略时由服务端在现有最大版本号上自动升位（如 v2.5 → v2.6）。不接受空串
+        items:
+          type: array
+          minItems: 1
+          description: 新版本的指标项；省略时沿用模板版本行。显式传入时至少 1 项，不接受空数组
+          items:
+            $ref: '#/components/schemas/InspectionPlanItem'
+        samplingScheme:
+          type: string
+          description: 抽样方案；省略时沿用模板版本行
+        aqlLevel:
+          type: string
+          description: AQL 水平；省略时沿用模板版本行
+        strictness:
+          type: string
+          description: 检验严格度；省略时沿用模板版本行
+        effectiveStartDate:
+          type: string
+          description: 生效起始日（不继承模板版本行；省略即长期有效）
+        effectiveEndDate:
+          type: string
+          description: 生效截止日（不继承模板版本行；省略即长期有效）
+    PlanStats:
+      type: object
+      required: [total, enabled, pending, productCount]
+      description: 「质检方案设计」页 KPI 卡片口径（服务端全量聚合，只受 PBAC 过滤）
+      properties:
+        total:
+          type: integer
+          description: 质检方案总数（去重 plan_code）
+        enabled:
+          type: integer
+          description: 已启用方案数（存在 ACTIVE 版本）
+        pending:
+          type: integer
+          description: 待审批方案数（无 ACTIVE 版本但存在 DRAFT 版本）
+        productCount:
+          type: integer
+          description: 覆盖产品数（去重 material_code，分类通用方案不计入）
+    PaginatedInspectionPlans:
+      type: object
+      required: [total, page, pageSize, items, list]
+      properties:
+        total:
+          type: integer
+          description: 去重后的方案编码命中总数（不是版本行数）
+        page:
+          type: integer
+        pageSize:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/InspectionPlan'
+        list:
+          type: array
+          description: 兼容别名，与 items 指向同一份当页数据
+          items:
+            $ref: '#/components/schemas/InspectionPlan'
     SubmitMeasurementsRequest:
       type: object
       required: [inspectorId, isDraft, items]
@@ -777,21 +1706,176 @@ components:
               measuredText:
                 type: string
 
+    PendingDefectItem:
+      type: object
+      required: [id, inspectionOrderId, orderNo, inspectionType, batchNo, materialCode, materialName, defectQty, totalQty, defectDescription, status, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: 不合格记录 UUID（待审核池条目主键）
+        inspectionOrderId:
+          type: string
+          format: uuid
+          description: 来源检验工单 UUID
+        orderNo:
+          type: string
+          example: IQC-20260918-0002
+        inspectionType:
+          type: string
+          description: 检验类型/环节（IQC / IPQC / FQC / OQC 及其细分）
+        batchNo:
+          type: string
+        materialCode:
+          type: string
+        materialName:
+          type: string
+        supplierName:
+          type: string
+          description: 供应商名称（来料类不合格时有值）
+        customerName:
+          type: string
+          description: 客户名称（出货/委外类不合格时有值）
+        defectQty:
+          type: integer
+          description: 不良数量
+        totalQty:
+          type: integer
+          description: 受检数量（不良率分母口径 = 检验单抽样数量，非报检总数）
+        defectRate:
+          type: number
+          description: 不良率(%) = defectQty / totalQty × 100，服务端按库内 defect_rate 回吐（保留 4 位小数）
+        defectDescription:
+          type: string
+          description: 不合格现象/超差实测描述
+        defectItemCode:
+          type: string
+          description: 具体不合格的指标项编码
+        status:
+          type: string
+          enum: [PENDING_INITIATE, INITIATED, DISMISSED]
+        mrbId:
+          type: string
+          format: uuid
+          description: 关联的 MRB 评审单 ID（发起后回填，status = INITIATED）
+        inspectorId:
+          type: string
+          format: uuid
+        inspectorName:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+          description: 汇入待审核池时间
+
+    InitiateReviewRequest:
+      type: object
+      required: [pendingDefectId]
+      properties:
+        pendingDefectId:
+          type: string
+          format: uuid
+          description: 待审核池条目 UUID
+        flowId:
+          type: string
+          format: uuid
+          description: 选用的评审流程定义 ID；省略时由后端按不合格类型自动匹配已启用流程
+        urgencyLevel:
+          type: string
+          enum: [NORMAL, URGENT, CRITICAL]
+          default: NORMAL
+        reviewNotes:
+          type: string
+          description: 发起说明 / 初步建议处置方向
+
+    ReviewFlow:
+      type: object
+      required: [flowCode, flowName, applicableType, nodes]
+      properties:
+        id:
+          type: string
+          format: uuid
+        flowCode:
+          type: string
+          example: FLOW-IQC-FAIL
+        flowName:
+          type: string
+        description:
+          type: string
+          description: 流程说明；落 review_flows.description（迁移 019 新增），供「评审流程设置」页流程卡片与详情行展示
+        applicableType:
+          type: string
+          enum: [INCOMING_FAIL, PROCESS_FAIL, SHIPMENT_FAIL, SUBCONTRACT_FAIL]
+        version:
+          type: string
+          default: v1.0.0
+        isActive:
+          type: boolean
+          default: true
+        nodes:
+          type: array
+          items:
+            type: object
+            required: [nodeLevel, nodeName, roleCode]
+            properties:
+              nodeLevel:
+                type: integer
+                description: 审批层级序号；**唯一排序键**（等价于「评审流程设置」页的「顺序」列，不再有 nodeSeq）
+              nodeName:
+                type: string
+              roleCode:
+                type: string
+                description: 审批责任角色编码
+              roleName:
+                type: string
+                description: 授权签署角色显示名；未配置时读侧回退 roleCode
+              isRequired:
+                type: boolean
+                default: true
+                description: 是否必签；必签节点未签署不得推进到下一层级
+              allowConcession:
+                type: boolean
+                default: false
+                description: 是否具有让步接收（特采）裁决权；默认仅终审层级为 true
+              requireCustomerSign:
+                type: boolean
+                default: false
+                description: 是否强制要求客户/客户代表书面签核
+
     MRBRecord:
       type: object
-      required: [id, mrbNo, inspectionOrderId, batchNo, materialCode, materialName, defectDescription, status]
+      required: [id, mrbNo, sourceType, sourceOrderNo, batchNo, materialCode, materialName, defectDescription, defectQty, status, approvers, createdAt, updatedAt]
       properties:
         id:
           type: string
           format: uuid
         mrbNo:
           type: string
-        inspectionOrderId:
-          type: string
-          format: uuid
+          example: MRB-20260706-001
         sourceType:
           type: string
-          enum: [IQC, IPQC, OQC]
+          enum: [INCOMING_FAIL, PROCESS_FAIL, SHIPMENT_FAIL, SUBCONTRACT_FAIL]
+          description: 不合格来源分类（驱动评审流程路由）
+        sourceOrderNo:
+          type: string
+          description: 关联的原始检验单号
+          example: IQC20260706-001
+        pendingDefectId:
+          type: string
+          format: uuid
+          description: 关联的不合格待审核池记录 UUID（由池抽屉发起时回填）
+        reviewFlowId:
+          type: string
+          format: uuid
+          description: 发起时选用的评审流程定义 ID（落 mrb_reviews.review_flow_id）
+        urgencyLevel:
+          type: string
+          enum: [NORMAL, URGENT, CRITICAL]
+          default: NORMAL
+          description: 紧急程度（落 mrb_reviews.urgency_level，默认 NORMAL）
+        reviewNotes:
+          type: string
+          description: 发起说明/建议处置方向（落 mrb_reviews.review_notes，与不合格描述分离）
         batchNo:
           type: string
         materialCode:
@@ -800,95 +1884,158 @@ components:
           type: string
         defectDescription:
           type: string
+        defectQty:
+          type: integer
+        inspectorName:
+          type: string
+          description: >-
+            源检验单检验人姓名（读侧按 sourceOrderNo 关联 inspection_orders.inspector_name 派生，
+            非 mrb_reviews 物理列；查不到对应检验单时不返回该字段）
+          example: 张检验
         status:
           type: string
           enum: [PENDING_REVIEW, UNDER_REVIEW, DISPOSED, REJECTED]
-        decision:
+        disposition:
           type: string
           enum: [RETURN_TO_VENDOR, REWORK, CONCESSION, SCRAP]
+          description: 最终裁决处置方案
+        dispositionNotes:
+          type: string
+          description: 处置执行方案说明
         approvers:
           type: array
+          description: 多方联合会签历史与签名记录
           items:
             type: object
-            required: [role, reviewerName, decision, reviewComment, reviewedAt]
+            required: [userId, userName, roleCode, action, comment, signedAt]
             properties:
-              role:
+              userId:
                 type: string
-              reviewerName:
+                format: uuid
+              userName:
                 type: string
-              decision:
+              roleCode:
                 type: string
-              reviewComment:
+                description: 会签席位角色编码（QA_MGR / TECH_DIR / PROD_SUP / MGMT_DIR）
+              action:
                 type: string
-              reviewedAt:
+                enum: [APPROVED, REJECTED]
+              comment:
+                type: string
+              signatureUrl:
+                type: string
+              signedAt:
                 type: string
                 format: date-time
         concessionAttachmentUrl:
           type: string
+          description: 让步接收（特采）必须上传的客户书面同意书附件路径
+        disposedAt:
+          type: string
+          format: date-time
+          description: 处置闭环时间（DISPOSED 时写入 mrb_reviews.disposed_at）
+        disposedBy:
+          type: string
+          description: 最终裁决人姓名（落 mrb_reviews.disposed_by）
         createdAt:
+          type: string
+          format: date-time
+        updatedAt:
           type: string
           format: date-time
 
     DisposeMRBRequest:
       type: object
-      required: [decision, approvers]
+      required: [disposition]
+      description: >-
+        处置决议提交体：除 disposition 外，必须在 dispositionReason / dispositionNotes / reason
+        中至少提供一项（服务端强校验，缺失返回 400）。
       properties:
-        decision:
+        disposition:
           type: string
           enum: [RETURN_TO_VENDOR, REWORK, CONCESSION, SCRAP]
+          description: 处置决策方式（兼容别名 RETURN = RETURN_TO_VENDOR）
+        dispositionReason:
+          type: string
+          description: 处置决议理由与防范措施（页面字段名；与 reason / dispositionNotes 至少一项）
+        reason:
+          type: string
+          description: dispositionReason 的兼容别名
+        dispositionNotes:
+          type: string
+          description: dispositionReason 的兼容别名
         approvers:
           type: array
-          description: 多方联合会签数组（涵盖质量部、技术部、生产部、厂长）
+          description: 可选：本次共同签署人凭证；省略时沿用会签历史，最终裁决人记入 disposedBy
           items:
             type: object
-            required: [role, reviewerId, reviewerName, reviewComment]
+            required: [userId, userName, roleCode, action, comment, signedAt]
             properties:
-              role:
-                type: string
-              reviewerId:
+              userId:
                 type: string
                 format: uuid
-              reviewerName:
+              userName:
                 type: string
-              reviewComment:
+              roleCode:
                 type: string
+                description: 会签席位角色编码（QA_MGR / TECH_DIR / PROD_SUP / MGMT_DIR）
+              action:
+                type: string
+                enum: [APPROVED, REJECTED]
+              comment:
+                type: string
+              signatureUrl:
+                type: string
+              signedAt:
+                type: string
+                format: date-time
         concessionAttachmentUrl:
           type: string
           description: 特采让步接收时强制上传的客户书面签署凭证地址
 
+    DisposeMRBResponse:
+      description: >-
+        处置结论响应体：主体仍是**裸 MRBRecord**（与 docs/04 §3.5 口径一致，非 { mrbReview } 包装对象），
+        仅在「返工（REWORK）」连带生成下一轮复检单时追加 reinspectionOrderId / reinspectionOrderNo。
+        两个追加字段均可选，故既有按 MRBRecord 解析的调用方完全向后兼容。
+      allOf:
+        - $ref: '#/components/schemas/MRBRecord'
+        - type: object
+          properties:
+            reinspectionOrderId:
+              type: string
+              format: uuid
+              description: 本次返工处置在同一事务内生成的复检单主键（非 REWORK 处置不返回）
+            reinspectionOrderNo:
+              type: string
+              description: >-
+                复检单号，口径恒为 {来源检验单号}-R{轮次}（轮次 = 该批次既有检验单数 + 1）；
+                由 decide-mrb-disposition 用例算出，此前在控制器出口被丢弃
+              example: IQC20260706-001-R2
+
     TraceabilityGraphResponse:
       type: object
-      required: [rootBatchNo, nodes, edges, hasCycleWarning]
+      required: [batchNo, hasCycle, nodes, edges, impact]
       properties:
-        rootBatchNo:
+        batchNo:
           type: string
-        hasCycleWarning:
+          description: 查询目标根批次号
+        hasCycle:
           type: boolean
-          description: 是否检测到循环流转引用，由应用层安全闭合
+          description: 整条全链路是否存在循环引用，由应用层安全闭合
         nodes:
           type: array
           items:
-            type: object
-            required: [batchNo, stageName, materialName, status]
-            properties:
-              batchNo:
-                type: string
-              stageName:
-                type: string
-                description: 工序节点名称（如 原材料来料检、下料检验、滚丝检验、委外镀锌、成品检★ 等）
-              materialName:
-                type: string
-              status:
-                type: string
-                description: 节点流转判定状态（PASSED, FAILED, INSPECTING, PENDING, STORED）
-              isDefective:
-                type: boolean
+            $ref: '#/components/schemas/TraceNode'
         edges:
           type: array
           items:
             type: object
             required: [sourceBatchNo, targetBatchNo, relationType, depth]
             properties:
+              id:
+                type: string
+                format: uuid
               sourceBatchNo:
                 type: string
               targetBatchNo:
@@ -900,6 +2047,199 @@ components:
                 type: integer
               isCycle:
                 type: boolean
+              hasCycleWarning:
+                type: boolean
+        impact:
+          $ref: '#/components/schemas/TraceImpactSummary'
+
+    TraceNode:
+      type: object
+      required: [nodeId, batchNo, stageName, materialName, operatorName, timestamp, nodeStatus]
+      properties:
+        nodeId:
+          type: string
+        batchNo:
+          type: string
+          description: 生产或物料批次号（追溯主键）
+        stageName:
+          type: string
+          description: 工序节点名称（如 原材料来料检、下料检验、滚丝检验、委外镀锌、成品检）
+        materialName:
+          type: string
+        operatorName:
+          type: string
+        timestamp:
+          type: string
+        nodeStatus:
+          type: string
+          description: 节点状态（6 值）。CONCESSION 即特采/让步接收，必须能同时举证 MRB 单号与客户书面授权件，不得展示为已合格
+          enum: [PASSED, FAILED, INSPECTING, PENDING, STORED, CONCESSION]
+        orderNo:
+          type: string
+          description: 关联来源单据号（工单 / 采购单 / 委外单 / 销售出库单）
+        supplierOrCustomer:
+          type: string
+        materialCode:
+          type: string
+          description: 物料编码；主数据未建档时缺省，界面显示 —
+        furnaceHeatBatchNo:
+          type: string
+          description: 炉批号（钢材炉号 / 热处理炉批号）；无炉批概念时缺省
+        inspectionOrderNo:
+          type: string
+          description: 本节点对应检验单号；该环节尚未建检验单时缺省
+        mrbNo:
+          type: string
+          description: 特采节点的 MRB 评审单号
+        concessionAttachmentUrl:
+          type: string
+          description: 特采节点的客户书面授权件地址；缺失即表示未取得客户授权
+
+    TraceImpactSummary:
+      type: object
+      required: [downstreamBatchCount, upstreamBatchCount, downstreamOrderCount, downstreamPartyCount, downstreamOrderNos, downstreamParties]
+      properties:
+        downstreamBatchCount:
+          type: integer
+          minimum: 0
+        upstreamBatchCount:
+          type: integer
+          minimum: 0
+        downstreamOrderCount:
+          type: integer
+          minimum: 0
+        downstreamPartyCount:
+          type: integer
+          minimum: 0
+        downstreamOrderNos:
+          type: array
+          items:
+            type: string
+        downstreamParties:
+          type: array
+          items:
+            type: string
+          description: 下游单位。节点表只有单一 supplier_or_customer 列、不区分客户与供应商，故不称「客户数」
+
+    TraceBatchSummary:
+      type: object
+      required: [batchNo, materialName, sources, relatedOrderNos]
+      properties:
+        batchNo:
+          type: string
+        furnaceHeatBatchNo:
+          type: string
+        materialCode:
+          type: string
+        materialName:
+          type: string
+        stageName:
+          type: string
+          description: 当前/最近工序环节名；仅有检验台账时缺省
+        nodeStatus:
+          type: string
+          enum: [PASSED, FAILED, INSPECTING, PENDING, STORED, CONCESSION]
+        timestamp:
+          type: string
+        inspectionOrderNo:
+          type: string
+        orderNo:
+          type: string
+        supplierOrCustomer:
+          type: string
+        sources:
+          type: array
+          items:
+            type: string
+            enum: [TRACE_NODE, INSPECTION_ORDER]
+          description: 本行命中来源；只有 INSPECTION_ORDER 表示「仅检验台账、尚无血缘」
+        relatedOrderNos:
+          type: array
+          items:
+            type: string
+
+    TraceBatchSearchResponse:
+      type: object
+      required: [total, page, pageSize, items]
+      properties:
+        total:
+          type: integer
+          minimum: 0
+        page:
+          type: integer
+          minimum: 1
+        pageSize:
+          type: integer
+          minimum: 1
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/TraceBatchSummary'
+
+    TraceOrderChainStage:
+      type: object
+      required: [seq, stageName, orderNo, orderType, batchNo, status]
+      properties:
+        seq:
+          type: integer
+          minimum: 1
+          description: 工艺序位（按检验类型映射，非时间排序）
+        stageName:
+          type: string
+        orderNo:
+          type: string
+        orderType:
+          type: string
+        batchNo:
+          type: string
+        sourceDocNo:
+          type: string
+        status:
+          type: string
+          enum: [PASSED, FAILED, INSPECTING, PENDING, STORED, CONCESSION]
+        judgment:
+          type: string
+          enum: [PASSED, FAILED, CONCESSION]
+        inspectorName:
+          type: string
+        occurredAt:
+          type: string
+        durationMinutes:
+          type: integer
+          minimum: 0
+          description: 耗时分钟数；无终检时间时缺省，界面显示 —
+
+    TraceOrderChainResponse:
+      type: object
+      required: [orderNo, matchedBy, batchNos, stages]
+      properties:
+        orderNo:
+          type: string
+        matchedBy:
+          type: string
+          enum: [SALES_ORDER_PO_NO, SALES_ORDER_NO, WORK_ORDER_NO, ORDER_NO]
+        customerName:
+          type: string
+        erpStatus:
+          type: string
+        salesOrderNo:
+          type: string
+        salesOrderPoNo:
+          type: string
+        batchNos:
+          type: array
+          items:
+            type: string
+        materialCode:
+          type: string
+        materialName:
+          type: string
+        totalQty:
+          type: number
+        stages:
+          type: array
+          items:
+            $ref: '#/components/schemas/TraceOrderChainStage'
 
     SyncRequest:
       type: object
@@ -953,10 +2293,11 @@ components:
 
     PaginatedMRBRecords:
       type: object
-      required: [total, pendingCount, underReviewCount, totalReviewedCount, disposedCount, monthlyReviewRate, list]
+      required: [total, pendingCount, underReviewCount, totalReviewedCount, disposedCount, monthlyReviewRate, items, page, pageSize]
       properties:
         total:
           type: integer
+          description: 当前过滤条件下的总条数（PBAC 行级过滤后）
         pendingCount:
           type: integer
           description: 待评审数量
@@ -971,9 +2312,21 @@ components:
           description: 已处置完成数量
         monthlyReviewRate:
           type: number
-          description: 本月评审完成率 (0~100 百分比)
+          description: 本月评审完成率 (0~100 百分比)，口径 = 本月已处置 / 本月发起，本月无单据时为 0
+        items:
+          type: array
+          description: MRB 评审单据明细列表（当页数据）
+          items:
+            $ref: '#/components/schemas/MRBRecord'
+        page:
+          type: integer
+          description: 当前页码
+        pageSize:
+          type: integer
+          description: 每页条数
         list:
           type: array
+          description: 兼容别名，与 items 指向同一份当页数据
           items:
             $ref: '#/components/schemas/MRBRecord'
 

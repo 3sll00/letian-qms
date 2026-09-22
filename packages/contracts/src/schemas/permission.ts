@@ -93,7 +93,14 @@ export const MaterialPermissionListResponseSchema = z
   })
   .openapi('MaterialPermissionListResponse');
 
-/** 创建 / 编辑权限规则请求体（id 走路径参数） */
+/**
+ * 创建 / 编辑权限规则请求体（id 走路径参数）
+ *
+ * `userName` 为可选：它是 `material_permissions.user_name` 的冗余展示快照，
+ * 服务端在缺省时统一从职员档案（employees.name）补全，因此调用方无需回传。
+ * 创建与编辑两条路径的字段口径必须保持一致，避免出现「列表页启停能存、
+ * 弹窗编辑报 400 userName Required」的契约割裂。
+ */
 export const CreatePermissionRequestSchema = z
   .object({
     userId: z.string().uuid().openapi({ description: '授权用户 UUID（职员档案主键）' }),
@@ -105,6 +112,19 @@ export const CreatePermissionRequestSchema = z
     isActive: z.boolean().default(true).openapi({ description: '规则是否生效' }),
   })
   .openapi('CreatePermissionRequest');
+
+/**
+ * 更新权限规则请求体（三维维度 / 用户 / 角色 / 启停）
+ *
+ * 由 CreatePermissionRequestSchema 派生，唯一差异是各维度转为可选（PATCH 语义的
+ * 部分更新：未提交的维度保持原值），`userName` 同样可选并由服务端补全。
+ */
+export const UpdateMaterialPermissionRequestSchema = CreatePermissionRequestSchema.partial()
+  .extend({
+    userId: z.string().uuid().optional().openapi({ description: '授权用户 UUID，缺省时保持不变' }),
+    roleCode: z.string().min(1).optional().openapi({ description: '角色编码，缺省时保持不变' }),
+  })
+  .openapi('UpdateMaterialPermissionRequest');
 
 /** 按角色批量配置请求体：将该角色下所有用户规则的三维维度统一改写 */
 export const ApplyRolePermissionRequestSchema = z

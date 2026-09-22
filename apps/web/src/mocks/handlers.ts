@@ -2,7 +2,12 @@
 import {
   mockInspectionOrders,
   mockMrbRecords,
+  mockPendingDefects,
+  mockReviewFlows,
   mockTraceabilityGraph,
+  mockConcessionGraph,
+  mockTraceBatchSearch,
+  mockOrderChain,
   mockIntegrationConfigs,
   mockIntegrationLogs,
   mockSuppliers,
@@ -10,30 +15,199 @@ import {
   mockWorkshops,
   mockEmployees,
   mockMaterials,
+  mockCompanyProfile,
   mockCategoryTree,
+  mockPlans,
+  withPlanDisplayFields,
+  allocateMockPlanCode,
   mockEquipmentMappings,
   mockInterceptionRules,
   type MesEquipmentMapping,
 } from './data';
+// 计划版本号升位规则直接复用领域唯一口径（不复制第二份实现，避免离线演示与真实后端分叉）
+import { nextInspectionPlanVersionNo } from '@letian/domain';
 import {
   InspectionOrderSchema,
   CreateInspectionOrderRequestSchema,
   MRBReviewSchema,
+  DisposeMRBResponseSchema,
+  PendingDefectItemSchema,
   PaginatedMRBRecordsSchema,
+  ReviewFlowSchema,
   TraceabilityGraphResponseSchema,
+  TraceBatchSearchResponseSchema,
+  TraceOrderChainResponseSchema,
   IntegrationConfigSchema,
   IntegrationSyncLogSchema,
   TriggerSyncResponseSchema,
+  UpsertCompanyProfileRequestSchema,
   type InspectionOrder,
+  type InspectionPlan,
+  type InspectionPlanVersion,
   type MRBReview,
+  type MRBDisposition,
+  type PendingDefectItem,
+  type ReviewFlow,
   type TriggerSyncRequest,
+  type CompanyProfile,
 } from '@letian/contracts';
 import { inspectionTypeMatchesGroup } from '../lib/inspectionTypes';
 
 // In-memory working copies for live updates
 const inspectionOrdersList: InspectionOrder[] = [...mockInspectionOrders];
 const mrbList: MRBReview[] = [...mockMrbRecords];
+const pendingPoolList: PendingDefectItem[] = [...mockPendingDefects];
+const reviewFlowsList: ReviewFlow[] = [...mockReviewFlows];
 const equipmentList: MesEquipmentMapping[] = [...mockEquipmentMappings];
+const plansList: InspectionPlan[] = [...mockPlans];
+
+/**
+ * 当前登录身份（Mock 无服务端会话）。
+ *
+ * 真实后端从会话取「谁签核 / 谁维护」，离线 Mock 没有会话中间件，
+ * 由登录接口写入这里，供签核与档案维护回执使用 —— 保证回执上的姓名与登录账号一致，
+ * 而不是请求体里自称的任意姓名（与后端「不接受请求体自称」同口径）。
+ */
+let mockCurrentUser = {
+  userId: '11111111-1111-1111-1111-111111111111',
+  userName: '张三 (测试质检员)',
+  role: 'INSPECTOR',
+};
+
+/** 企业档案 Mock 单行：null = 未维护（与真实后端 GET 无行返回 null 同口径） */
+let companyProfileRow: CompanyProfile | null = { ...mockCompanyProfile };
+
+/** RFC 7807 problem+json 错误体（与后端异常处理器的输出结构保持一致） */
+function problemResponse(status: number, title: string, detail: string) {
+  return HttpResponse.json({ type: 'about:blank', title, status, detail }, { status });
+}
+
+/** 检验单状态合法值（与 @letian/domain 的 InspectionStateMachine / 契约 InspectionStatusEnum 对齐） */
+const INSPECTION_STATUSES = [
+  'PENDING',
+  'INSPECTING',
+  'DRAFT',
+  'PASSED',
+  'FAILED',
+  'IN_MRB_REVIEW',
+  'RE_INSPECTING',
+  'COMPLETED',
+] as const;
+
+/** 契约 MRBDispositionEnum 的 4 个合法处置方式（与 packages/contracts 对齐） */
+const MRB_DISPOSITIONS = ['RETURN_TO_VENDOR', 'REWORK', 'CONCESSION', 'SCRAP'] as const;
+
+function isMrbDisposition(value: string): value is MRBDisposition {
+  return (MRB_DISPOSITIONS as readonly string[]).includes(value);
+}
+
+/**
+ * 待审核池环节筛选 → 池条目的检验环节标识集合。
+ * 与 src/lib/inspectionTypes.ts 的分组口径一致（FQC 成品终检为 IPQC 的子集）。
+ */
+const POOL_STAGE_MEMBERS: Record<string, readonly string[]> = {
+  IQC: ['IQC'],
+  IPQC: ['IPQC', 'IPQC_CT', 'IPQC_RL', 'IPQC_FN'],
+  FQC: ['FQC', 'IPQC_FN'],
+  OQC: ['OQC', 'OQC_SF', 'OQC_SH', 'OQC_MACH', 'OQC_HEAT'],
+};
+
+function readPositiveInt(url: URL, key: string, fallback: number, max?: number): number {
+  const raw = Number(url.searchParams.get(key) ?? '');
+  const value = Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : fallback;
+  return max !== undefined ? Math.min(max, value) : value;
+}
+
+/**
+ * 检验人派生：真实后端在 listMrbReviews 内按 sourceOrderNo 关联
+ * inspection_orders.inspector_name 构建 Map 后条件注入（绝不写 undefined），
+ * Mock 层沿用同一口径，查不到对应检验单时不注入（页面显示「-」）。
+ */
+function inspectorNameByOrderNo(): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const order of inspectionOrdersList) {
+    if (order.inspectorName !== undefined) map.set(order.orderNo, order.inspectorName);
+  }
+  return map;
+}
+
+function withDerivedMrbFields(record: MRBReview, inspectorMap: Map<string, string>): MRBReview {
+  const inspectorName = inspectorMap.get(record.sourceOrderNo);
+  return inspectorName !== undefined ? { ...record, inspectorName } : { ...record };
+}
+
+/** 检验环节 → 不合格来源分类（驱动评审流程路由，口径同后端 MRBFailCategoryEnum） */
+function failCategoryOfInspectionType(inspectionType: string): MRBReview['sourceType'] {
+  if (inspectionType === 'IQC') return 'INCOMING_FAIL';
+  if (inspectionType === 'SHIPMENT' || inspectionType === 'OQC') return 'SHIPMENT_FAIL';
+  if (inspectionType.startsWith('OQC')) return 'SUBCONTRACT_FAIL';
+  return 'PROCESS_FAIL';
+}
+
+/** 紧急程度白名单（契约 MRBUrgencyLevelEnum），非白名单值一律回落 NORMAL */
+function isUrgencyLevel(value: string | undefined): value is 'NORMAL' | 'URGENT' | 'CRITICAL' {
+  return value === 'NORMAL' || value === 'URGENT' || value === 'CRITICAL';
+}
+
+/**
+ * 复检单构造（口径同后端 `create-reinspection.ts`，见 docs/26 §5.2）：
+ * 沿用原单的批次凭证快照（入库单号 / 入库日期 / 规格型号 / 计量单位 / 供应商 / 客户 /
+ * 销售出库 / 委外工艺），只重置「本轮判定产物」（实测值 / 判定 / 检验人 / 综合结论）。
+ * 离线 Mock 与真实后端必须逐字段同口径，否则页面上看到的是 Mock 自己编的规则。
+ */
+function buildReinspectionOrder(source: InspectionOrder, round: number): InspectionOrder {
+  const now = new Date().toISOString();
+  return InspectionOrderSchema.parse({
+    id: crypto.randomUUID(),
+    orderNo: `${source.orderNo}-R${round}`,
+    inspectionType: source.inspectionType,
+    materialCode: source.materialCode,
+    materialName: source.materialName,
+    ...(source.specification !== undefined ? { specification: source.specification } : {}),
+    ...(source.spec !== undefined ? { spec: source.spec } : {}),
+    ...(source.unit !== undefined ? { unit: source.unit } : {}),
+    batchNo: source.batchNo,
+    ...(source.inboundNo !== undefined ? { inboundNo: source.inboundNo } : {}),
+    ...(source.inboundDate !== undefined ? { inboundDate: source.inboundDate } : {}),
+    ...(source.supplierCode !== undefined ? { supplierCode: source.supplierCode } : {}),
+    ...(source.supplierName !== undefined ? { supplierName: source.supplierName } : {}),
+    ...(source.customerCode !== undefined ? { customerCode: source.customerCode } : {}),
+    ...(source.customerName !== undefined ? { customerName: source.customerName } : {}),
+    ...(source.salesOrderNo !== undefined ? { salesOrderNo: source.salesOrderNo } : {}),
+    ...(source.dispatchDate !== undefined ? { dispatchDate: source.dispatchDate } : {}),
+    ...(source.salesOrderPoNo !== undefined ? { salesOrderPoNo: source.salesOrderPoNo } : {}),
+    ...(source.erpStatus !== undefined ? { erpStatus: source.erpStatus } : {}),
+    ...(source.processType !== undefined ? { processType: source.processType } : {}),
+    ...(source.vendorName !== undefined ? { vendorName: source.vendorName } : {}),
+    sampleQty: source.sampleQty,
+    passQty: 0,
+    failQty: 0,
+    isMandatoryGate: source.isMandatoryGate,
+    status: 'PENDING',
+    planVersionId: source.planVersionId,
+    planSnapshot: source.planSnapshot,
+    // 指标清单沿用原单快照，但判定与实测值必须由本轮重新产生（复检不继承上一轮的结论）
+    items: source.items.map((item) => ({
+      seq: item.seq,
+      itemCode: item.itemCode,
+      name: item.name,
+      dataType: item.dataType,
+      metricCategory: item.metricCategory,
+      ...(item.standardText !== undefined ? { standardText: item.standardText } : {}),
+      ...(item.acceptableValues !== undefined ? { acceptableValues: item.acceptableValues } : {}),
+      ...(item.nominalValue !== undefined ? { nominalValue: item.nominalValue } : {}),
+      ...(item.upperTolerance !== undefined ? { upperTolerance: item.upperTolerance } : {}),
+      ...(item.lowerTolerance !== undefined ? { lowerTolerance: item.lowerTolerance } : {}),
+      ...(item.sampleSize !== undefined ? { sampleSize: item.sampleSize } : {}),
+      ...(item.unit !== undefined ? { unit: item.unit } : {}),
+      isExempt: false,
+      result: 'PENDING',
+    })),
+    createdAt: now,
+    updatedAt: now,
+    inspectionNotes: `MRB 返工复检（第 ${round} 轮，原单 ${source.orderNo}）`,
+  });
+}
 
 export const handlers = [
   // ==========================================
@@ -48,6 +222,8 @@ export const handlers = [
       department: body.department || '品质保证部',
       permissions: body.permissions || ['*'],
     };
+    // 登录即记住当前身份：签核 / 企业档案维护的「谁做的」取自这里
+    mockCurrentUser = { userId: user.userId, userName: user.userName, role: user.role };
     return HttpResponse.json({
       token: 'mock_jwt_token_for_dev_mode_' + Date.now(),
       user,
@@ -72,6 +248,8 @@ export const handlers = [
     const dateTo = url.searchParams.get('dateTo');
     const partner = url.searchParams.get('partner');
     const materialCode = url.searchParams.get('materialCode');
+    const orderNo = url.searchParams.get('orderNo');
+    const workOrderNo = url.searchParams.get('workOrderNo');
     const keyword = url.searchParams.get('keyword');
     const page = Math.max(1, Number(url.searchParams.get('page') ?? '1'));
     const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get('pageSize') ?? '20')));
@@ -149,6 +327,18 @@ export const handlers = [
           r.materialCode.toLowerCase().includes(q) || r.materialName.toLowerCase().includes(q)
       );
     }
+    // 过程检验台账「检验工单」：只查检验单号（与真实后端 ?orderNo= 同口径，见 docs/28 §2.1）
+    if (orderNo && orderNo.trim() !== '') {
+      const q = orderNo.trim().toLowerCase();
+      filtered = filtered.filter((r) => r.orderNo.toLowerCase().includes(q));
+    }
+    // 过程检验台账「生产工单」：生产工单号为空时按批次号兜底（与真实后端兜底口径一致，见 docs/28 §2.3）
+    if (workOrderNo && workOrderNo.trim() !== '') {
+      const q = workOrderNo.trim().toLowerCase();
+      filtered = filtered.filter((r) =>
+        (r.workOrderNo ?? r.batchNo).toLowerCase().includes(q)
+      );
+    }
     if (keyword) {
       const q = keyword.toLowerCase();
       filtered = filtered.filter(
@@ -215,12 +405,32 @@ export const handlers = [
     const body = await request.json();
     const validatedDto = CreateInspectionOrderRequestSchema.parse(body);
 
+    // 方案版本：显式传入时以其为准；省略时（自动匹配口径）用演示版本占位。
+    // 真实匹配逻辑在服务端 GET /api/v1/plans/match，见 docs/17-检验录入界面说明与质检方案匹配口径.md §7。
+    const planVersionId = validatedDto.planVersionId ?? '11111111-1111-4111-8111-111111111111';
+
+    // 与真实后端同口径（docs/26 §5.1）：名称 / 规格型号 / 计量单位省略时按 materialCode
+    // 从存货档案补齐，避免离线 Mock 下新建工单的「规格型号」列落空。
+    const material = mockMaterials.find((m) => m.materialCode === validatedDto.materialCode);
+    const materialName = validatedDto.materialName ?? material?.materialName;
+    if (materialName === undefined) {
+      return problemResponse(
+        400,
+        'ValidationError',
+        `物料名称缺失且无法从存货档案补齐：物料编码 [${validatedDto.materialCode}] 不存在`
+      );
+    }
+    const specification = validatedDto.specification ?? validatedDto.spec ?? material?.specModel;
+    const unit = validatedDto.unit ?? material?.unit;
+
     const newRecord: InspectionOrder = {
       id: crypto.randomUUID(),
       orderNo: `INS-${Date.now().toString().slice(-8)}`,
       inspectionType: validatedDto.inspectionType,
       materialCode: validatedDto.materialCode,
-      materialName: validatedDto.materialName,
+      materialName,
+      ...(specification !== undefined ? { specification } : {}),
+      ...(unit !== undefined ? { unit } : {}),
       batchNo: validatedDto.batchNo,
       supplierCode: validatedDto.supplierCode,
       customerCode: validatedDto.customerCode,
@@ -232,12 +442,12 @@ export const handlers = [
       overallDecision: undefined,
       inspectorId: undefined,
       inspectionNotes: '新建质检工单',
-      planVersionId: validatedDto.planVersionId,
+      planVersionId,
       planSnapshot: {
         planId: 'd4e5f6a1-b2c3-4d4e-bf5a-6b7c8d9e0f1a',
         planCode: `QP-${validatedDto.inspectionType}-AUTO`,
-        planName: `${validatedDto.materialName} 自动匹配检验方案`,
-        versionId: validatedDto.planVersionId,
+        planName: `${materialName} 自动匹配检验方案`,
+        versionId: planVersionId,
         versionNo: 'V1.0',
         samplingScheme: 'GB_T_2828',
         aqlLevel: 'II',
@@ -255,79 +465,425 @@ export const handlers = [
     return HttpResponse.json(validatedRecord, { status: 201 });
   }),
 
-  // ==========================================
-  // 2. MRB API
-  // ==========================================
-  http.get('/api/v1/mrb/records', ({ request }) => {
-    const url = new URL(request.url);
-    const status = url.searchParams.get('status');
+  // 录入写路径（docs/34 §6.2）：离线 Mock 同样接受「实测值落库 + 终判」两步，保证断网演示能走完
+  // 录入链路；判标复算仍在服务端领域层，Mock 只搬数据，不在这里替服务端下结论。
+  http.post('/api/v1/inspections/:id/submit-measurements', async ({ params, request }) => {
+    const body = (await request.json()) as {
+      items?: Array<{ itemCode: string; measuredVal?: number; measuredText?: string }>;
+      isDraft?: boolean;
+    };
+    const index = inspectionOrdersList.findIndex((r) => r.id === params.id);
+    if (index < 0) {
+      return problemResponse(404, 'NotFound', `检验单不存在: ${String(params.id)}`);
+    }
+    const record = inspectionOrdersList[index]!;
+    const submitted = body.items ?? [];
+    const items = (record.items ?? []).map((item) => {
+      const hit = submitted.find((candidate) => candidate.itemCode === item.itemCode);
+      if (hit === undefined) return item;
+      return {
+        ...item,
+        ...(hit.measuredVal !== undefined ? { measuredVal: hit.measuredVal } : {}),
+        ...(hit.measuredText !== undefined ? { measuredText: hit.measuredText } : {}),
+      };
+    });
+    const updated = InspectionOrderSchema.parse({
+      ...record,
+      items,
+      // 首次录入实测值即进入检验中（与真实后端 recordMeasurementsAndJudge 的 PENDING -> INSPECTING 同口径）
+      status: record.status === 'PENDING' ? 'INSPECTING' : record.status,
+      updatedAt: new Date().toISOString(),
+    });
+    inspectionOrdersList[index] = updated;
+    return HttpResponse.json(updated);
+  }),
 
-    let filtered = [...mrbList];
-    if (status && status !== 'ALL') {
-      filtered = filtered.filter((m) => m.status === status);
+  http.post('/api/v1/inspections/:id/status', async ({ params, request }) => {
+    const body = (await request.json()) as {
+      status?: string;
+      judgment?: string;
+      passQty?: number;
+      failQty?: number;
+      remark?: string;
+      inspectionNotes?: string;
+    };
+    const index = inspectionOrdersList.findIndex((r) => r.id === params.id);
+    if (index < 0) {
+      return problemResponse(404, 'NotFound', `检验单不存在: ${String(params.id)}`);
+    }
+    if (body.status === undefined || !(INSPECTION_STATUSES as readonly string[]).includes(body.status)) {
+      return problemResponse(400, 'ValidationError', `非法检验单状态: ${String(body.status)}`);
+    }
+    const record = inspectionOrdersList[index]!;
+    const notes = body.inspectionNotes ?? body.remark;
+    const updated = InspectionOrderSchema.parse({
+      ...record,
+      status: body.status,
+      ...(body.judgment !== undefined ? { overallDecision: body.judgment } : {}),
+      ...(body.passQty !== undefined ? { passQty: body.passQty } : {}),
+      ...(body.failQty !== undefined ? { failQty: body.failQty } : {}),
+      ...(notes !== undefined ? { inspectionNotes: notes } : {}),
+      ...(['PASSED', 'FAILED', 'COMPLETED'].includes(body.status)
+        ? { completedAt: new Date().toISOString() }
+        : {}),
+      updatedAt: new Date().toISOString(),
+    });
+    inspectionOrdersList[index] = updated;
+    return HttpResponse.json(updated);
+  }),
+
+  // 质量负责人签核（docs/35 §5）：Mock 只搬数据，不替服务端下结论。
+  // 落库字段与真实后端一致（approver_name / approved_at），签核人取当前登录身份，
+  // 重复签核即覆盖（换人 / 换时间）；审计日志与角色门禁属服务端职责，Mock 不复刻。
+  http.post('/api/v1/inspections/:id/approve', ({ params }) => {
+    const index = inspectionOrdersList.findIndex((r) => r.id === params.id);
+    if (index < 0) {
+      return problemResponse(404, 'NotFound', `检验单不存在: ${String(params.id)}`);
+    }
+    const record = inspectionOrdersList[index]!;
+    const updated = InspectionOrderSchema.parse({
+      ...record,
+      approverName: mockCurrentUser.userName,
+      approvedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    inspectionOrdersList[index] = updated;
+    return HttpResponse.json(updated);
+  }),
+
+  // ==========================================
+  // 2. MRB API（不合格品处置整合：待审核池 → 评审会签 → 处置结论）
+  // 路由与请求体以 apps/api/src/controllers/mrb.controller.ts 为唯一真相源，
+  // 页面口径见 docs/19-MRB不合格品处置页整合设计.md。
+  // ==========================================
+
+  // 2.1 待审核池：各检验环节判定不合格、尚未发起评审的记录（统一入口）
+  http.get('/api/v1/mrb/pending-pool', ({ request }) => {
+    const url = new URL(request.url);
+    const stage =
+      url.searchParams.get('stage') ??
+      url.searchParams.get('sourceStage') ??
+      url.searchParams.get('inspectionType');
+    const status = url.searchParams.get('status');
+    const materialCode = url.searchParams.get('materialCode');
+    const batchNo = url.searchParams.get('batchNo');
+    const page = readPositiveInt(url, 'page', 1);
+    const pageSize = readPositiveInt(url, 'pageSize', 20, 100);
+
+    let filtered = [...pendingPoolList];
+    if (stage !== null && stage !== '' && stage !== 'ALL') {
+      const members = POOL_STAGE_MEMBERS[stage];
+      filtered =
+        members !== undefined
+          ? filtered.filter((item) => members.includes(item.inspectionType))
+          : filtered.filter((item) => item.inspectionType === stage);
+    }
+    if (status !== null && status !== '') {
+      filtered = filtered.filter((item) => item.status === status);
+    }
+    if (materialCode !== null && materialCode !== '') {
+      filtered = filtered.filter((item) => item.materialCode === materialCode);
+    }
+    if (batchNo !== null && batchNo !== '') {
+      filtered = filtered.filter((item) => item.batchNo === batchNo);
     }
 
-    const validatedItems = filtered.map((item) => MRBReviewSchema.parse(item));
+    const start = (page - 1) * pageSize;
+    const items = filtered
+      .slice(start, start + pageSize)
+      .map((item) => PendingDefectItemSchema.parse(item));
+
+    // list 为兼容别名，与 items 指向同一份当页数据（与后端返回结构一致）
+    return HttpResponse.json({
+      items,
+      list: items,
+      total: filtered.length,
+      page,
+      pageSize,
+    });
+  }),
+
+  // 2.2 待审核池逐条发起独立评审 → 生成 MRB 工单，池条目置为 INITIATED
+  http.post('/api/v1/mrb/pending-pool/initiate', async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as {
+      pendingDefectId?: string;
+      flowId?: string;
+      urgencyLevel?: string;
+      reviewNotes?: string;
+    };
+    const item = pendingPoolList.find((row) => row.id === body.pendingDefectId);
+    if (!item) {
+      return problemResponse(404, 'NotFoundError', `待审核池条目不存在: ${body.pendingDefectId ?? ''}`);
+    }
+    if (item.status === 'INITIATED') {
+      return problemResponse(409, 'ConflictError', `该不合格记录已发起过 MRB 评审: ${item.orderNo}`);
+    }
+
+    const sourceOrder = inspectionOrdersList.find((order) => order.orderNo === item.orderNo);
+    const now = new Date().toISOString();
+    // 015 起紧急程度 / 评审流程 / 发起说明均落库（docs/20 §4.2），Mock 与真实接口同形
+    const created: MRBReview = {
+      id: crypto.randomUUID(),
+      mrbNo: `MRB-${now.slice(0, 10).replace(/-/g, '')}-${String(mrbList.length + 1).padStart(3, '0')}`,
+      sourceType: failCategoryOfInspectionType(sourceOrder?.inspectionType ?? item.inspectionType),
+      sourceOrderNo: item.orderNo,
+      pendingDefectId: item.id,
+      batchNo: item.batchNo,
+      materialCode: item.materialCode,
+      materialName: item.materialName,
+      defectDescription: item.defectDescription,
+      defectQty: item.defectQty,
+      status: 'PENDING_REVIEW',
+      urgencyLevel: isUrgencyLevel(body.urgencyLevel) ? body.urgencyLevel : 'NORMAL',
+      approvers: [],
+      createdAt: now,
+      updatedAt: now,
+      ...(body.flowId !== undefined ? { reviewFlowId: body.flowId } : {}),
+      ...(body.reviewNotes !== undefined ? { reviewNotes: body.reviewNotes } : {}),
+    };
+
+    mrbList.unshift(created);
+    item.status = 'INITIATED';
+    item.mrbId = created.id;
+
+    return HttpResponse.json(MRBReviewSchema.parse(created), { status: 201 });
+  }),
+
+  // 2.3 MRB 列表：多状态页签、单号/来源单号模糊检索、处置方式与发现日期区间过滤 + KPI
+  http.get('/api/v1/mrb/records', ({ request }) => {
+    const url = new URL(request.url);
+    const page = readPositiveInt(url, 'page', 1);
+    const pageSize = readPositiveInt(url, 'pageSize', 20, 100);
+
+    const statuses = (url.searchParams.get('status') ?? '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter((item) => item !== '');
+    const mrbNo = (url.searchParams.get('mrbNo') ?? '').trim().toLowerCase();
+    const sourceOrderNo = (url.searchParams.get('sourceOrderNo') ?? '').trim().toLowerCase();
+    const disposition = url.searchParams.get('disposition') ?? '';
+    const dateFrom = url.searchParams.get('dateFrom');
+    const dateTo = url.searchParams.get('dateTo');
+
+    let filtered = [...mrbList];
+    if (statuses.length > 0) {
+      filtered = filtered.filter((m) => statuses.includes(m.status));
+    }
+    if (mrbNo !== '') {
+      filtered = filtered.filter((m) => m.mrbNo.toLowerCase().includes(mrbNo));
+    }
+    if (sourceOrderNo !== '') {
+      filtered = filtered.filter((m) => m.sourceOrderNo.toLowerCase().includes(sourceOrderNo));
+    }
+    if (disposition !== '') {
+      filtered = filtered.filter((m) => m.disposition === disposition);
+    }
+    // 真实后端按本地日界右开区间过滤；Mock 单据为 ISO 时间戳，这里按日期前缀比较
+    if (dateFrom !== null) {
+      filtered = filtered.filter((m) => m.createdAt.slice(0, 10) >= dateFrom);
+    }
+    if (dateTo !== null) {
+      filtered = filtered.filter((m) => m.createdAt.slice(0, 10) <= dateTo);
+    }
+
+    const start = (page - 1) * pageSize;
+    const inspectorMap = inspectorNameByOrderNo();
+    const validatedItems = filtered
+      .slice(start, start + pageSize)
+      .map((item) => MRBReviewSchema.parse(withDerivedMrbFields(item, inspectorMap)));
+
+    // monthlyReviewRate 口径与后端一致（DISPOSED / 当月总数）；真实后端取「当前自然月」，
+    // Mock 单据为固定历史日期，故取数据中最新单据所在月份作为统计窗口，避免演示恒为 0%。
+    const referenceMonth = mrbList.reduce<string>(
+      (latest, m) => (m.createdAt.slice(0, 7) > latest ? m.createdAt.slice(0, 7) : latest),
+      ''
+    );
+    const monthRecords = mrbList.filter((m) => m.createdAt.startsWith(referenceMonth));
+    const monthDisposed = monthRecords.filter((m) => m.status === 'DISPOSED').length;
 
     const payload = {
       items: validatedItems,
-      total: validatedItems.length,
-      page: 1,
-      pageSize: 20,
+      total: filtered.length,
+      page,
+      pageSize,
       pendingCount: mrbList.filter((m) => m.status === 'PENDING_REVIEW').length,
       underReviewCount: mrbList.filter((m) => m.status === 'UNDER_REVIEW').length,
       totalReviewedCount: mrbList.filter(
         (m) => m.status === 'UNDER_REVIEW' || m.status === 'DISPOSED' || m.status === 'REJECTED'
       ).length,
       disposedCount: mrbList.filter((m) => m.status === 'DISPOSED').length,
-      monthlyReviewRate: 88.9,
+      monthlyReviewRate:
+        monthRecords.length > 0
+          ? Number(((monthDisposed / monthRecords.length) * 100).toFixed(2))
+          : 0,
     };
 
     const validated = PaginatedMRBRecordsSchema.parse(payload);
     return HttpResponse.json(validated);
   }),
 
-  http.post('/api/v1/mrb/records/:id/signatures', async ({ params, request }) => {
-    const body = (await request.json()) as {
-      roleCode: string;
-      approverName: string;
-      action: 'APPROVED' | 'REJECTED';
+  // 2.4 节点会签（携带会签席位 roleCode 与签署人姓名，写入 approvers 凭据）
+  http.post('/api/v1/mrb/records/:id/sign', async ({ params, request }) => {
+    const body = (await request.json().catch(() => ({}))) as {
+      action?: string;
       comment?: string;
+      roleCode?: string;
+      approverName?: string;
     };
     const target = mrbList.find((m) => m.id === params.id);
     if (!target) {
-      return new HttpResponse(null, { status: 404 });
+      return problemResponse(404, 'NotFoundError', `MRB记录不存在: ${String(params.id)}`);
+    }
+    if (target.status === 'DISPOSED') {
+      return problemResponse(409, 'ConflictError', `MRB 单据已完成处置，不能再发起会签: ${target.mrbNo}`);
     }
 
-    const newApprover = {
+    const isApprove = body.action === 'APPROVE' || body.action === 'APPROVED';
+    const comment = (body.comment ?? '').trim();
+    const now = new Date().toISOString();
+
+    target.approvers.push({
       userId: crypto.randomUUID(),
-      userName: body.approverName,
-      roleCode: body.roleCode,
-      action: body.action,
-      comment: body.comment?.trim() || '会签同意',
-      signedAt: new Date().toISOString(),
-    };
+      userName: (body.approverName ?? '').trim() !== '' ? (body.approverName ?? '').trim() : '未署名',
+      roleCode: (body.roleCode ?? '').trim() !== '' ? (body.roleCode ?? '').trim() : 'UNSPECIFIED',
+      action: isApprove ? 'APPROVED' : 'REJECTED',
+      comment: comment !== '' ? comment : isApprove ? '会签同意' : '会签驳回',
+      signedAt: now,
+    });
+    // 口径同后端 submitSignature：会签通过进入评审中，驳回直接置为已驳回
+    target.status = isApprove ? 'UNDER_REVIEW' : 'REJECTED';
+    target.updatedAt = now;
 
-    const approverIndex = target.approvers.findIndex((a) => a.roleCode === body.roleCode);
-    if (approverIndex >= 0) {
-      target.approvers[approverIndex] = newApprover;
-    } else {
-      target.approvers.push(newApprover);
+    return HttpResponse.json(
+      MRBReviewSchema.parse(withDerivedMrbFields(target, inspectorNameByOrderNo()))
+    );
+  }),
+
+  // 2.5 提交最终处置结论（特采让步接收必须提供客户书面签核凭证）
+  http.post('/api/v1/mrb/records/:id/disposition', async ({ params, request }) => {
+    const body = (await request.json().catch(() => ({}))) as {
+      disposition?: string;
+      reason?: string;
+      dispositionReason?: string;
+      dispositionNotes?: string;
+      concessionAttachmentUrl?: string;
+    };
+    const target = mrbList.find((m) => m.id === params.id);
+    if (!target) {
+      return problemResponse(404, 'NotFoundError', `MRB记录不存在: ${String(params.id)}`);
     }
 
-    target.updatedAt = new Date().toISOString();
-    const validated = MRBReviewSchema.parse(target);
-    return HttpResponse.json(validated);
+    const rawDisposition = (body.disposition ?? '') === 'RETURN' ? 'RETURN_TO_VENDOR' : (body.disposition ?? '');
+    if (!isMrbDisposition(rawDisposition)) {
+      return problemResponse(
+        400,
+        'ValidationError',
+        `处置方式非法: ${body.disposition ?? ''}（可选 ${MRB_DISPOSITIONS.join(' / ')}）`
+      );
+    }
+    const attachment = (body.concessionAttachmentUrl ?? '').trim();
+    if (
+      rawDisposition === 'CONCESSION' &&
+      attachment === '' &&
+      target.concessionAttachmentUrl === undefined
+    ) {
+      return problemResponse(400, 'ValidationError', '特采（让步接收）必须提供客户书面签核凭证');
+    }
+
+    const reason =
+      (body.dispositionReason ?? '').trim() ||
+      (body.reason ?? '').trim() ||
+      (body.dispositionNotes ?? '').trim();
+    const now = new Date().toISOString();
+
+    target.disposition = rawDisposition;
+    if (reason !== '') target.dispositionNotes = reason;
+    if (attachment !== '') target.concessionAttachmentUrl = attachment;
+    target.status = 'DISPOSED';
+    target.disposedAt = now;
+    target.disposedBy = '张强';
+    target.updatedAt = now;
+
+    // 返工（REWORK）处置：与后端同口径，在同一事务内生成下一轮复检单，
+    // 并把原单推进为 RE_INSPECTING（见 docs/26 §5.2 与 create-reinspection.ts）
+    let reinspectionOrderId: string | undefined;
+    let reinspectionOrderNo: string | undefined;
+    if (rawDisposition === 'REWORK') {
+      const sourceOrder = inspectionOrdersList.find((o) => o.orderNo === target.sourceOrderNo);
+      if (sourceOrder !== undefined) {
+        const round =
+          inspectionOrdersList.filter((o) => o.batchNo === sourceOrder.batchNo).length + 1;
+        const reinspection = buildReinspectionOrder(sourceOrder, round);
+        sourceOrder.status = 'RE_INSPECTING';
+        sourceOrder.updatedAt = now;
+        inspectionOrdersList.unshift(reinspection);
+        reinspectionOrderId = reinspection.id;
+        reinspectionOrderNo = reinspection.orderNo;
+      }
+    }
+
+    // 响应体 = MRB 单据本体 + 处置连带产物（契约 DisposeMRBResponse）
+    return HttpResponse.json(
+      DisposeMRBResponseSchema.parse({
+        ...withDerivedMrbFields(target, inspectorNameByOrderNo()),
+        ...(reinspectionOrderId !== undefined ? { reinspectionOrderId } : {}),
+        ...(reinspectionOrderNo !== undefined ? { reinspectionOrderNo } : {}),
+      })
+    );
+  }),
+
+  // 2.6 评审流程定义列表（供「发起评审」抽屉选择流程）
+  http.get('/api/v1/review-flows', () => {
+    const items = reviewFlowsList.map((flow) => ReviewFlowSchema.parse(flow));
+    return HttpResponse.json({ total: items.length, items });
+  }),
+
+  // 2.6.1 评审流程启停（「评审流程设置」页）
+  // 口径与后端 review-flows.controller.ts 的 POST /:id/toggle-active 一致：
+  // 路径必须带 -active（历史上前端打的 /toggle 恒 404），响应体为 { success, id, isActive }
+  http.post('/api/v1/review-flows/:id/toggle-active', ({ params }) => {
+    const index = reviewFlowsList.findIndex((flow) => flow.id === params.id);
+    if (index < 0) {
+      return problemResponse(404, '流程定义不存在', `未找到评审流程定义: ${String(params.id)}`);
+    }
+    const current = reviewFlowsList[index];
+    const updated = { ...current, isActive: !current.isActive };
+    reviewFlowsList[index] = updated;
+    return HttpResponse.json({ success: true, id: updated.id, isActive: updated.isActive });
   }),
 
   // ==========================================
   // 3. TRACEABILITY API
   // ==========================================
+  // 批次检索：两路数据源并集（已建血缘 + 仅有检验台账），返回命中批次清单
+  http.get('/api/v1/traceability/batches', ({ request }) => {
+    const url = new URL(request.url);
+    const keyword = (url.searchParams.get('batchNo') ?? '').trim().toLowerCase();
+    const items =
+      keyword === ''
+        ? mockTraceBatchSearch.items
+        : mockTraceBatchSearch.items.filter((item) => item.batchNo.toLowerCase().includes(keyword));
+    const validated = TraceBatchSearchResponseSchema.parse({
+      ...mockTraceBatchSearch,
+      total: items.length,
+      items,
+    });
+    return HttpResponse.json(validated);
+  }),
+
+  // 订单检验环节：并列台账，不是血缘链路
+  http.get('/api/v1/traceability/orders/:orderNo', () => {
+    const validated = TraceOrderChainResponseSchema.parse(mockOrderChain);
+    return HttpResponse.json(validated);
+  }),
+
+  // 批次血缘图：特采样本单独成图，其余批次共用一份可达子图（根批次替换为查询值）
   http.get('/api/v1/traceability/graph/:batchNo', ({ params }) => {
-    const graph = {
-      ...mockTraceabilityGraph,
-      batchNo: String(params.batchNo || 'LOT-2026-FN-01'),
-    };
+    const requested = String(params.batchNo || 'LOT-2026-FN-01');
+    const graph =
+      requested === mockConcessionGraph.batchNo
+        ? mockConcessionGraph
+        : { ...mockTraceabilityGraph, batchNo: requested };
     const validated = TraceabilityGraphResponseSchema.parse(graph);
     return HttpResponse.json(validated);
   }),
@@ -408,6 +964,303 @@ export const handlers = [
 
   http.get('/api/v1/master-data/categories', () => {
     return HttpResponse.json(mockCategoryTree);
+  }),
+
+  // 企业档案主数据（company_profile 单行，docs/35 §6）：
+  // 未维护时 GET 返回 null（不是空对象、也不是编造默认值），界面据此提示「企业档案未维护」、
+  // 证书对应单元格留白；PUT 只更新请求体显式给出的字段（空串 = 清空），
+  // updated_by / updated_at 由「服务端」按当前登录身份写入。
+  http.get('/api/v1/master-data/company-profile', () => {
+    return HttpResponse.json(companyProfileRow);
+  }),
+
+  http.put('/api/v1/master-data/company-profile', async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const parsed = UpsertCompanyProfileRequestSchema.safeParse(body);
+    if (!parsed.success) {
+      return problemResponse(
+        400,
+        'ValidationError',
+        parsed.error.issues.map((issue) => issue.message).join('; ')
+      );
+    }
+    const next: CompanyProfile = { ...(companyProfileRow ?? {}) };
+    for (const [key, value] of Object.entries(parsed.data)) {
+      if (typeof value === 'string') next[key as keyof CompanyProfile] = value;
+    }
+    next.updatedBy = mockCurrentUser.userName;
+    next.updatedAt = new Date().toISOString();
+    companyProfileRow = next;
+    return HttpResponse.json(companyProfileRow);
+  }),
+
+
+  // ==========================================
+  // 5.5 INSPECTION PLANS API (质检方案库 / 质检方案设计页)
+  // ==========================================
+  // 质检方案自动匹配（第一步 · 读）：按「物料编码 + 检验类型」返回待检指标清单。
+  // 与后端 apps/api/src/controllers/plans.controller.ts 的 GET /match 同口径：
+  // 第一级物料专属方案 → 第二级存货分类通用方案（materialCode 为空 + categoryCode 命中）；
+  // 口径唯一真相见 docs/17-检验录入界面说明与质检方案匹配口径.md §7。
+  http.get('/api/v1/plans/match', ({ request }) => {
+    const url = new URL(request.url);
+    const materialCode = (url.searchParams.get('materialCode') ?? '').trim();
+    const inspectionType = (url.searchParams.get('inspectionType') ?? '').trim();
+    if (materialCode === '' || inspectionType === '') {
+      return problemResponse(400, 'ValidationError', 'materialCode 与 inspectionType 均为必填');
+    }
+
+    const hasActiveVersion = (plan: InspectionPlan): boolean =>
+      (plan.versions ?? []).some((version) => version.status === 'ACTIVE');
+    const materialCategory =
+      mockMaterials.find((material) => material.materialCode === materialCode)?.categoryCode ?? '';
+
+    const candidates = plansList.filter(
+      (plan) => plan.inspectionType === inspectionType && hasActiveVersion(plan)
+    );
+    const plan =
+      candidates.find((candidate) => candidate.materialCode === materialCode) ??
+      candidates.find(
+        (candidate) =>
+          (candidate.materialCode ?? '') === '' &&
+          materialCategory !== '' &&
+          (candidate.categoryCode ?? '') === materialCategory
+      );
+
+    if (!plan) {
+      return problemResponse(
+        404,
+        'inspection-plan-not-found',
+        `未找到适用于物料 [${materialCode}]、检验类型 [${inspectionType}] 的已启用质检方案`
+      );
+    }
+
+    const version = (plan.versions ?? []).find((candidate) => candidate.status === 'ACTIVE');
+    if (!version || (version.id ?? '') === '' || version.items.length === 0) {
+      return problemResponse(
+        400,
+        'inspection-plan-not-active',
+        `质检方案 [${plan.planCode}] 当前无已启用的有效版本或指标项为空`
+      );
+    }
+
+    return HttpResponse.json({
+      planCode: plan.planCode,
+      planName: plan.planName,
+      matchSource: plan.materialCode === materialCode ? 'MATERIAL' : 'MATERIAL_CATEGORY',
+      planVersionId: version.id,
+      versionNo: version.versionNo,
+      inspectionType: plan.inspectionType,
+      materialCode: plan.materialCode ?? materialCode,
+      samplingScheme: version.samplingScheme,
+      aqlLevel: version.aqlLevel,
+      strictness: version.strictness,
+      items: version.items,
+      matchedAt: new Date().toISOString(),
+    });
+  }),
+
+  // 质检方案 KPI 聚合（与后端 GET /plans/stats 同口径：全量方案聚合，不受列表筛选影响）
+  http.get('/api/v1/plans/stats', () => {
+    const decorated = plansList.map(withPlanDisplayFields);
+    return HttpResponse.json({
+      total: decorated.length,
+      enabled: decorated.filter((plan) => plan.status === 'ENABLED').length,
+      pending: decorated.filter((plan) => plan.status === 'PENDING_APPROVAL').length,
+      productCount: new Set(
+        decorated
+          .map((plan) => plan.materialCode)
+          .filter((code): code is string => typeof code === 'string' && code !== '')
+      ).size,
+    });
+  }),
+
+  http.get('/api/v1/plans', ({ request }) => {
+    const url = new URL(request.url);
+    const page = Number(url.searchParams.get('page') ?? '1');
+    const pageSize = Number(url.searchParams.get('pageSize') ?? '20');
+    const keyword = url.searchParams.get('keyword') ?? '';
+    const materialCode = url.searchParams.get('materialCode') ?? '';
+    const inspectionType = url.searchParams.get('inspectionType') ?? '';
+    const categoryCode = url.searchParams.get('categoryCode') ?? '';
+    const activeOnly = url.searchParams.get('isActive') === 'true';
+
+    // 产品分类过滤与真实后端同口径：经物料主数据反查方案物料所属分类
+    const categoryByMaterial = new Map(
+      mockMaterials.map((item) => [item.materialCode, item.categoryCode])
+    );
+
+    const filtered = plansList.filter((plan) => {
+      if (
+        keyword !== '' &&
+        !`${plan.planCode}${plan.planName}`.toLowerCase().includes(keyword.toLowerCase())
+      ) {
+        return false;
+      }
+      if (
+        materialCode !== '' &&
+        !(plan.materialCode ?? '').toLowerCase().includes(materialCode.toLowerCase())
+      ) {
+        return false;
+      }
+      if (inspectionType !== '' && plan.inspectionType !== inspectionType) return false;
+      if (categoryCode !== '' && categoryByMaterial.get(plan.materialCode ?? '') !== categoryCode) {
+        return false;
+      }
+      if (activeOnly && !(plan.versions ?? []).some((version) => version.status === 'ACTIVE')) {
+        return false;
+      }
+      return true;
+    });
+
+    const start = (page - 1) * pageSize;
+    const items = filtered.slice(start, start + pageSize).map(withPlanDisplayFields);
+    return HttpResponse.json({ total: filtered.length, page, pageSize, items, list: items });
+  }),
+
+  // 新建方案：与后端一致，首个版本一律以草稿（DRAFT）落库，待审批后启用
+  http.post('/api/v1/plans', async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as Partial<InspectionPlan>;
+    const planId = crypto.randomUUID();
+    const firstVersion = body.versions?.[0];
+    // 方案编码：与真实后端同口径（TBD-11）—— 未指定时按当日流水取号 QP-{YYYYMMDD}-{NNN}，
+    // 原实现回落 `QP-${Date.now()}`（13 位时间戳），既不是文档化的编码形态也不可读
+    const planCode = body.planCode ?? allocateMockPlanCode(plansList);
+    const now = new Date().toISOString();
+    const created: InspectionPlan = {
+      id: planId,
+      planCode,
+      planName: body.planName ?? '未命名质检方案',
+      inspectionType: body.inspectionType ?? 'IQC',
+      ...(body.materialCode != null && body.materialCode !== ''
+        ? { materialCode: body.materialCode }
+        : {}),
+      versions: [
+        {
+          id: crypto.randomUUID(),
+          planId,
+          versionNo: firstVersion?.versionNo ?? 'V1.0',
+          status: 'DRAFT',
+          samplingScheme: firstVersion?.samplingScheme ?? 'GB_T_2828',
+          aqlLevel: firstVersion?.aqlLevel ?? 'II',
+          strictness: firstVersion?.strictness ?? 'NORMAL',
+          // 生效周期与真实后端同口径（数据落版本级 sampling_config，缺失 = 该侧不设边界），
+          // 否则离线演示里新建方案永远"即刻生效、长期有效"，方案列表的未生效 / 已过期提示无法复现
+          ...(firstVersion?.effectiveStartDate !== undefined
+            ? { effectiveStartDate: firstVersion.effectiveStartDate }
+            : {}),
+          ...(firstVersion?.effectiveEndDate !== undefined
+            ? { effectiveEndDate: firstVersion.effectiveEndDate }
+            : {}),
+          items: firstVersion?.items ?? [],
+          createdBy: 'b2c3d4e5-f6a1-4b2c-9d3e-4f5a6b7c8d9e',
+          createdAt: now,
+        },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    };
+    plansList.unshift(created);
+    return HttpResponse.json(withPlanDisplayFields(created), { status: 201 });
+  }),
+
+  // 方案版本启停（审批）：与后端 TogglePlanVersionUseCase + 领域状态机同口径
+  //   1. ACTIVATE：目标版本转 ACTIVE，同方案其它 ACTIVE 版本自动转 INACTIVE（单激活态保证）；
+  //   2. 目标版本没有指标项时拒绝启用（避免建单时拿不到待检清单）；
+  //   3. DEACTIVATE 只接受当前为 ACTIVE 的版本，其余状态拒绝。
+  http.post('/api/v1/plans/versions/:versionId/status', async ({ request, params }) => {
+    const versionId = String(params.versionId ?? '');
+    const body = (await request.json().catch(() => ({}))) as { action?: string };
+    const action = body.action;
+    if (action !== 'ACTIVATE' && action !== 'DEACTIVATE') {
+      return problemResponse(400, 'ValidationError', 'action 必须为 ACTIVATE 或 DEACTIVATE');
+    }
+    const plan = plansList.find((candidate) =>
+      (candidate.versions ?? []).some((version) => version.id === versionId)
+    );
+    const target = plan?.versions?.find((version) => version.id === versionId);
+    if (plan === undefined || target === undefined) {
+      return problemResponse(404, 'NotFoundError', `未找到质检方案版本: ${versionId}`);
+    }
+    if (action === 'ACTIVATE') {
+      if ((target.items ?? []).length === 0) {
+        return problemResponse(
+          400,
+          'PlanToggleFailed',
+          `版本 [${target.versionNo}] 未配置指标项，严禁激活`
+        );
+      }
+      for (const version of plan.versions ?? []) {
+        if (version.id === versionId) {
+          version.status = 'ACTIVE';
+        } else if (version.status === 'ACTIVE') {
+          version.status = 'INACTIVE';
+        }
+      }
+    } else if (target.status !== 'ACTIVE') {
+      return problemResponse(
+        400,
+        'PlanToggleFailed',
+        `仅有处于 ACTIVE 状态的版本可执行停用，当前状态为 [${target.status}]`
+      );
+    } else {
+      target.status = 'INACTIVE';
+    }
+    return HttpResponse.json(withPlanDisplayFields(plan));
+  }),
+
+  // 方案版本升版：与后端 UpgradePlanVersionUseCase 同口径 ——
+  //   1. 版本号省略时由服务端升位（直接复用领域规则 nextInspectionPlanVersionNo，不复制第二份实现）；
+  //   2. 指标项 / 抽样参数省略即沿用 URL 版本行；生效周期**不继承**（省略即长期有效）；
+  //   3. 领域守门：同一方案已有草稿时拒绝再造草稿（PLAN_DRAFT_ALREADY_EXISTS）、指标项为空拒绝。
+  http.post('/api/v1/plans/versions/:versionId/upgrade', async ({ request, params }) => {
+    const versionId = String(params.versionId ?? '');
+    const body = (await request.json().catch(() => ({}))) as Partial<InspectionPlanVersion>;
+    const plan = plansList.find((candidate) =>
+      (candidate.versions ?? []).some((version) => version.id === versionId)
+    );
+    const source = plan?.versions?.find((version) => version.id === versionId);
+    if (plan === undefined || source === undefined) {
+      return problemResponse(404, 'NotFoundError', `未找到质检方案版本: ${versionId}`);
+    }
+    const existingDraft = (plan.versions ?? []).find((version) => version.status === 'DRAFT');
+    if (existingDraft !== undefined) {
+      return problemResponse(
+        400,
+        'ValidationFailed',
+        `PLAN_DRAFT_ALREADY_EXISTS: 方案 [${plan.planCode}] 已存在草稿版本 [${existingDraft.versionNo}]，禁止重复创建`
+      );
+    }
+    const items = body.items ?? source.items ?? [];
+    if (items.length === 0) {
+      return problemResponse(
+        400,
+        'ValidationFailed',
+        'PLAN_EMPTY_ITEMS: 创建草稿必须包含至少一个有效指标项'
+      );
+    }
+    const now = new Date().toISOString();
+    const draft: InspectionPlanVersion = {
+      id: crypto.randomUUID(),
+      planId: source.planId,
+      versionNo:
+        body.versionNo ??
+        nextInspectionPlanVersionNo((plan.versions ?? []).map((version) => version.versionNo)),
+      status: 'DRAFT',
+      samplingScheme: body.samplingScheme ?? source.samplingScheme,
+      aqlLevel: body.aqlLevel ?? source.aqlLevel,
+      strictness: body.strictness ?? source.strictness,
+      ...(body.effectiveStartDate !== undefined
+        ? { effectiveStartDate: body.effectiveStartDate }
+        : {}),
+      ...(body.effectiveEndDate !== undefined ? { effectiveEndDate: body.effectiveEndDate } : {}),
+      items,
+      createdBy: 'b2c3d4e5-f6a1-4b2c-9d3e-4f5a6b7c8d9e',
+      createdAt: now,
+    };
+    plan.versions = [...(plan.versions ?? []), draft];
+    plan.updatedAt = now;
+    return HttpResponse.json(withPlanDisplayFields(plan), { status: 201 });
   }),
 
   // ==========================================

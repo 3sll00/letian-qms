@@ -18,17 +18,18 @@ WEB_BASE=http://127.0.0.1:5201/ CDP_PORT=9222 node scripts/testing/cdp-runner.js
 
 ## 截图清单与走查项说明
 
-| 截图文件名 | 走查项 | 验证的核心要素 | 2026-09-21 实测 |
+| 截图文件名 | 走查项 | 验证的核心要素 | 2026-09-22 实测 |
 | :--- | :--- | :--- | :---: |
 | `screenshot_01_dashboard.png` | 1. 系统导航与主骨架 | 全局侧边栏导航加载、页面标题、无白屏 | **PASS** |
 | （无独立截图） | 2. 检验进度总览 KPI 与 ECharts | 总检验单数 / 待检验 / 合格率等 KPI 文案 + ECharts canvas 渲染 | **PASS** |
-| `screenshot_02_iqc.png` | 3. 来料检验台账 | 十列表头（含「检验单号」「采购入库单号」）、数据行非空 | **PASS** |
+| `screenshot_02_iqc.png` | 3. 来料检验台账 | 十列表头（含「检验单号」「入库单号」）、数据行非空 | **PASS** |
 | `screenshot_03_oqc.png` | 4. 出货检验台账 | 首列表头为「检验单号」、数据行非空 | **PASS** |
 | `screenshot_04_mrb.png` | 5. MRB 不合格品处置 | 页面渲染出评审/不合格等业务要素 | **PASS** |
 | `screenshot_05_traceability.png` | 6. 质量追溯看板 | 批次检索输入框就绪 | **PASS** |
 | `screenshot_06_plans.png` | 7. 质检方案设计 | 方案/抽样/版本等特征文案 | **PASS** |
 
-实测结果：**7/7 PASS，未捕获运行时异常 0 条**（明细见 `scripts/logs/cdp-runner.log`）。
+实测结果：**7/7 PASS，未捕获运行时异常 0 条**（2026-09-22 在 `:5200` 真实前后端联动环境整体重跑后重新捕获，
+明细见 `scripts/logs/cdp-runner.log`）。
 
 ---
 
