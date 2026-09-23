@@ -26,7 +26,7 @@ const MRBQuerySchema = z.object({
   categoryTab: MRBCategoryTabEnum.default('ALL'),
   /**
    * 评审状态过滤：支持单值或逗号分隔多值。
-   * 页面「已评审」页签 = `DISPOSED,REJECTED`（已评审为已处置的父集，见 docs/19 §4）。
+   * 页面「已评审」页签 = `DISPOSED,REJECTED`（2026-09-23 起原「已处置」页签已并入「已评审」，谓词不变，见 docs/19 §4.1）。
    * 逐项按 MRBStatusEnum 校验，非法值直接 400，绝不静默忽略。
    */
   status: z

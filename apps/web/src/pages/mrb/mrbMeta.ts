@@ -5,11 +5,13 @@ import type { BadgeTone } from '../../components/StatusBadge';
  * MRB 不合格品处置页的口径单点定义（页签 / 状态 / 处置方式 / 会签席位）。
  *
  * 口径依据：docs/19-MRB不合格品处置页整合设计.md §4。
- * 「已评审」= 已有评审结论（DISPOSED + REJECTED），是「已处置」的父集，
+ * 「已评审」= 已有评审结论（DISPOSED + REJECTED）= 处置闭环 + 驳回终止；
+ * 2026-09-23 起原「已处置」页签**并入「已评审」**：两者本为包含关系
+ * （DISPOSED ⊆ DISPOSED + REJECTED），合并后谓词不变、页签不再重复，
  * 与后端 KPI `totalReviewedCount` 口径一致（packages/infrastructure/src/repositories/mrb-review-repository.ts）。
  */
 
-export type MrbTabKey = 'ALL' | 'PENDING_REVIEW' | 'UNDER_REVIEW' | 'REVIEWED' | 'DISPOSED';
+export type MrbTabKey = 'ALL' | 'PENDING_REVIEW' | 'UNDER_REVIEW' | 'REVIEWED';
 
 export interface MrbTab {
   key: MrbTabKey;
@@ -18,12 +20,13 @@ export interface MrbTab {
   statuses: readonly MRBStatus[];
 }
 
+/** 页签行与筛选栏「评审状态」下拉的同源口径（页签行渲染除 `ALL` 外的全部项） */
 export const MRB_TABS: readonly MrbTab[] = [
   { key: 'ALL', label: '全部', statuses: [] },
   { key: 'PENDING_REVIEW', label: '待评审', statuses: ['PENDING_REVIEW'] },
   { key: 'UNDER_REVIEW', label: '评审中', statuses: ['UNDER_REVIEW'] },
+  // 原「已处置」页签（statuses: ['DISPOSED']）于 2026-09-23 并入本项：它是本项的真子集
   { key: 'REVIEWED', label: '已评审', statuses: ['DISPOSED', 'REJECTED'] },
-  { key: 'DISPOSED', label: '已处置', statuses: ['DISPOSED'] },
 ];
 
 export const MRB_STATUS_LABEL: Record<MRBStatus, string> = {

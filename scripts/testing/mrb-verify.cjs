@@ -3,7 +3,7 @@
  *
  * 验证目标：
  *   1. 菜单与页头口径：菜单「MRB不合格品处置」，页面标题 + 副标题与原型一致；
- *   2. 十列表头与页签（全部/待评审/评审中/已评审/已处置）齐备；
+ *   2. 十列表头与页签（待评审/评审中/已评审；2026-09-23 起「已处置」并入「已评审」）齐备；
  *   3. KPI 取值来自 GET /mrb/records（Mock 层计算，非写死）；
  *   4. 浅色主题：页面容器/KPI 卡片/表头背景均为浅色，无深色残留；
  *   5. 页头口径（docs/43）：判定不合格自动进入评审，**无人工发起入口** ——
@@ -246,7 +246,12 @@ const check = (name, ok, detail) => {
     }
     const tabLabels = [...document.querySelectorAll('button')]
       .map((b) => b.innerText.trim())
-      .filter((t) => ['全部','待评审','评审中','已评审','已处置'].includes(t));
+      .filter((t) => ['全部','待评审','评审中','已评审'].includes(t));
+    // 筛选栏「评审状态」下拉与页签同源（MRB_TABS），同样不再出现「已处置」
+    const statusSelect = [...document.querySelectorAll('select')].find((s) =>
+      [...s.options].some((o) => o.value === 'REVIEWED')
+    );
+    const statusOptions = statusSelect ? [...statusSelect.options].map((o) => o.textContent.trim()) : [];
     // 浅色校验只针对 MRB 页面自身子树（侧边栏/顶栏是应用外壳，深色属既有设计）
     const title = [...document.querySelectorAll('h2')].find((h) => h.innerText.includes('MRB不合格品处置'));
     const pageScope = title ? title.closest('div.space-y-5') || title.parentElement.parentElement : null;
@@ -267,7 +272,7 @@ const check = (name, ok, detail) => {
     const activeTab = [...document.querySelectorAll('button')]
       .filter((b) => (b.className || '').includes('border-blue-600'))
       .map((b) => b.innerText.trim());
-    return { heads, rowCount: rows.length, firstRow: rows[0] || [], kpis, tabLabels, darkEls, activeTab,
+    return { heads, rowCount: rows.length, firstRow: rows[0] || [], kpis, tabLabels, statusOptions, darkEls, activeTab,
       hasTitle: text.includes('MRB不合格品处置'), hasSubtitle: text.includes('不合格品评审与处置'), url: location.href };
   })()`);
   log('snapshot:', snapshot);
@@ -276,7 +281,8 @@ const check = (name, ok, detail) => {
   check('页头标题「MRB不合格品处置」', snapshot.hasTitle === true);
   check('副标题「不合格品评审与处置 · 判定不合格自动进入评审」', snapshot.hasSubtitle === true, snapshot.hasSubtitle);
   check('十列表头与原型一致（第5列为「不合格原因」）', JSON.stringify(snapshot.heads) === JSON.stringify(expectedHeads), snapshot.heads);
-  check('4 个状态页签（不含「全部」，与原型一致）', JSON.stringify(snapshot.tabLabels) === JSON.stringify(['待评审','评审中','已评审','已处置']), snapshot.tabLabels);
+  check('3 个状态页签（不含「全部」；「已处置」已并入「已评审」）', JSON.stringify(snapshot.tabLabels) === JSON.stringify(['待评审','评审中','已评审']), snapshot.tabLabels);
+  check('筛选栏「评审状态」下拉与页签同源（全部/待评审/评审中/已评审）', JSON.stringify(snapshot.statusOptions) === JSON.stringify(['全部','待评审','评审中','已评审']), snapshot.statusOptions);
   check('默认选中「待评审」页签', JSON.stringify(snapshot.activeTab) === JSON.stringify(['待评审']), snapshot.activeTab);
   check('KPI 5 张卡片齐全', Object.keys(snapshot.kpis).length === 5, snapshot.kpis);
   check('「待评审」页签取到 1 条 Mock 记录（断言的是条数，不是空态）', snapshot.rowCount === 1, snapshot.rowCount);
