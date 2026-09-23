@@ -1,0 +1,29 @@
+[
+  {
+    "typeId": 900001,
+    "userCode": "ERP-FIX-1001",
+    "fullName": "ERP 样例螺栓 M12*60",
+    "standard": "M12*60 / GB/T 5782",
+    "unitName": "PCS",
+    "comment": "erp-sync fixture",
+    "parentCode": "CAT-FIN-BOLT"
+  },
+  {
+    "typeId": 900002,
+    "userCode": "ERP-FIX-1002",
+    "fullName": "ERP 样例螺母 M10",
+    "standard": "M10 / GB/T 6170",
+    "unitName": "PCS",
+    "comment": "erp-sync fixture",
+    "parentCode": "CAT-FIN-NUT"
+  },
+  {
+    "typeId": 900003,
+    "userCode": "ERP-FIX-1003",
+    "fullName": "ERP 样例盘条 10B21 Φ6.5mm",
+    "standard": "Φ6.5mm / 盘条 / 10B21",
+    "unitName": "KG",
+    "comment": "erp-sync fixture",
+    "parentCode": "CAT-RAW-WIRE"
+  }
+]

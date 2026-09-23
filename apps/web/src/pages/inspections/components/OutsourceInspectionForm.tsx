@@ -66,6 +66,23 @@ const DECISION_TO_STATUS: Readonly<Record<'合格' | '不合格' | '返工', str
 };
 
 /**
+ * 委外检验「处置建议」选项（值 = 契约 `MRBDispositionEnum`）。
+ *
+ * 仅当判定「不合格」（`FAILED`）时随终判下发 `preliminaryDisposition`，落自动创建的 MRB 单
+ * 「处置方式」列初值，终审时由 MRB 处置决策覆盖（docs/44-过程委外出货不合格自动进MRB口径补齐设计.md §1/§4）。
+ * 「返工」是另一个决策（`RE_INSPECTING`，退回供应商返工后复检），不建 MRB，因此不出现在这里。
+ */
+const OUTSOURCE_PRELIMINARY_DISPOSITIONS = [
+  { value: 'RETURN_TO_VENDOR', label: '退货' },
+  { value: 'CONCESSION', label: '让步接收' },
+  { value: 'REWORK', label: '返工返修' },
+  { value: 'SCRAP', label: '报废' },
+] as const;
+
+type OutsourcePreliminaryDisposition =
+  (typeof OUTSOURCE_PRELIMINARY_DISPOSITIONS)[number]['value'];
+
+/**
  * 规范文本 + 单位（docs/34 §4「命中指标行的 standard + 单位」）：
  * 方案文本里已经写了单位（如「局部≥8μm」）就不再重复追加，避免打印成「局部≥8μm μm」。
  */
@@ -144,6 +161,9 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
   // 综合判定**不预置结论**（docs/34 §6.2）：未选择前保持空串，三选一无人勾选，提交时强制显式选择。
   // 历史实现默认 `合格`，会把尚未检验的单据判成合格并写进制造证书与检验单状态。
   const [decision, setDecision] = useState<'' | '合格' | '不合格' | '返工'>('');
+  /** 处置建议（拟定处置）：仅判「不合格」时随终判下发，作为自动创建的 MRB 单「处置方式」初值 */
+  const [mrbDisposition, setMrbDisposition] =
+    useState<OutsourcePreliminaryDisposition>('RETURN_TO_VENDOR');
   const [inspector, setInspector] = useState(fromList(initialItem?.inspector));
   // 检验日期默认「今天」：录入动作真实发生日；历史默认值 `2026-07-06` 是编造的固定日期
   // 存量单优先取本单落库值（inspection_orders.inspected_date，docs/36），无值才默认「今天」
@@ -609,12 +629,19 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
           failQty: decision === '不合格' ? qty : 0,
           ...(decision === '返工' ? {} : { judgment: targetStatus }),
           ...(conclusion.trim() !== '' ? { remark: conclusion, inspectionNotes: conclusion } : {}),
+          // 判不合格时服务端在**同一事务**自动创建 MRB 评审单（docs/43，无人工发起环节），
+          // 处置建议作为「处置方式」初值随终判下发（docs/44 §3）；「返工」走 RE_INSPECTING，不进 MRB。
+          ...(decision === '不合格' ? { preliminaryDisposition: mrbDisposition } : {}),
         }
       );
 
       const orderNo = finished.orderNo ?? docNo.trim();
       setSubmitted({ orderId, orderNo });
-      setSubmitReceipt(`已保存并终判：${orderNo}（判定：${decision}）`);
+      setSubmitReceipt(
+        decision === '不合格'
+          ? `已保存并终判：${orderNo}（判定：不合格）· 已自动发起 MRB 评审，请到【MRB不合格品处置】查看`
+          : `已保存并终判：${orderNo}（判定：${decision}）`
+      );
     } catch (err) {
       setSubmitError(errorMessage(err));
     } finally {
@@ -1291,6 +1318,33 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
                 </span>
               </label>
             </div>
+
+            {decision === '不合格' && (
+              <div className="mt-2.5">
+                <label className="block text-slate-600 mb-1">
+                  处置建议（作为自动创建的 MRB 单「处置方式」初值）
+                </label>
+                <div className="grid grid-cols-4 gap-2">
+                  {OUTSOURCE_PRELIMINARY_DISPOSITIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => setMrbDisposition(option.value)}
+                      className={`py-1.5 rounded border text-xs font-semibold transition-all ${
+                        mrbDisposition === option.value
+                          ? 'bg-amber-50 border-amber-500 text-amber-700 shadow-sm'
+                          : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  判定不合格即在同一事务自动创建 MRB 评审单，由 MRB 会签决定最终处置（特采仍需客户书面签核）
+                </p>
+              </div>
+            )}
           </div>
 
           <div>

@@ -19,6 +19,9 @@ import { generateTestToken } from '../../src/plugins/auth';
  * 7. 三维限定用户（IQC 检验员陈静：分类 + 编码 + 供应商）在台账中能看到该单，
  *    而规则不覆盖该物料的用户（OQC 检验员刘芳）看不到 —— 修的是「误导伤」，不是「放大可见范围」（docs/39 D2）；
  * 8. 非法状态 / 非法判定结论返回 400（契约校验前移到用例层）。
+ * 9. 四环节来源分类与评审流程绑定（docs/44 §1）：来料 / 过程（下料 + 成品检）/ 委外 / 出货
+ *    判定不合格后各归各的不合格分类，并绑定对应生效评审流程 —— 改造前只认精确值
+ *    `IQC/IPQC/OQC/FQC/OUTSOURCE`，委外八类与出货都被错绑到 `FLOW-PROCESS-FAIL`。
  */
 
 /** 三维限定用户的台账可见性探针 */
@@ -70,6 +73,39 @@ async function runFinalizePoolLinkTests() {
       },
     });
     assert.equal(res.statusCode, 201, `建单必须返回 201，实际 ${res.statusCode}：${res.body}`);
+    const order = JSON.parse(res.body) as { id: string; orderNo: string };
+    createdOrderIds.push(order.id);
+    createdOrderNos.push(order.orderNo);
+    touchedBatches.push(batchNo);
+    return order;
+  };
+
+  /**
+   * 按指定检验类型建单（四环节分类回归用）：
+   * 物料必须能命中该环节的生效质检方案，否则服务端按「方案未就绪」拒绝建单。
+   */
+  const createOrderOfType = async (
+    inspectionType: string,
+    materialCode: string,
+    batchNo: string
+  ) => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/inspections',
+      headers: authHeader,
+      payload: {
+        inspectionType,
+        materialCode,
+        batchNo,
+        sampleQty: 10,
+        totalQty: 10,
+      },
+    });
+    assert.equal(
+      res.statusCode,
+      201,
+      `${inspectionType} 建单必须返回 201，实际 ${res.statusCode}：${res.body}`
+    );
     const order = JSON.parse(res.body) as { id: string; orderNo: string };
     createdOrderIds.push(order.id);
     createdOrderNos.push(order.orderNo);
@@ -281,6 +317,142 @@ async function runFinalizePoolLinkTests() {
     });
     assert.equal(badDisposition.statusCode, 400, '非法拟定处置必须返回 400');
     console.log('✔ 非法状态 / 非法判定结论 / 非法拟定处置均返回 400');
+
+    // ==== 7. 四环节来源分类与评审流程绑定（docs/44 §1）====
+    //     同一写路径下，过程 / 委外 / 出货必须各归各的不合格分类并绑定对应生效流程：
+    //     错绑会让 MRB 单落到别的评审流程（会签角色与节点层级全错），因此逐环节断言到流程编码。
+    const stageCases: ReadonlyArray<{
+      inspectionType: string;
+      materialCode: string;
+      expectCategory: string;
+      expectFlowCode: string;
+    }> = [
+      {
+        inspectionType: 'IPQC_CT',
+        materialCode: 'MAT-SCR-M6-25',
+        expectCategory: 'PROCESS_FAIL',
+        expectFlowCode: 'FLOW-PROCESS-FAIL',
+      },
+      {
+        inspectionType: 'IPQC_FN',
+        materialCode: 'MAT-BLT-109-M10',
+        expectCategory: 'PROCESS_FAIL',
+        expectFlowCode: 'FLOW-PROCESS-FAIL',
+      },
+      {
+        inspectionType: 'OQC_SH',
+        materialCode: 'MAT-BLT-109-M10',
+        expectCategory: 'SHIPMENT_FAIL',
+        expectFlowCode: 'FLOW-SHIPMENT-FAIL',
+      },
+      {
+        inspectionType: 'OQC_SF',
+        materialCode: 'MAT-BLT-109-M10',
+        expectCategory: 'SUBCONTRACT_FAIL',
+        expectFlowCode: 'FLOW-SUBCONTRACT-FAIL',
+      },
+    ];
+
+    for (const stageCase of stageCases) {
+      const batchNo = `VERIFY-STAGE-${stageCase.inspectionType}`;
+      const stageOrder = await createOrderOfType(
+        stageCase.inspectionType,
+        stageCase.materialCode,
+        batchNo
+      );
+      const stageFail = await finalize(stageOrder.id, {
+        status: 'FAILED',
+        judgment: 'FAILED',
+        passQty: 0,
+        failQty: 10,
+      });
+      assert.equal(
+        stageFail.statusCode,
+        200,
+        `${stageCase.inspectionType} 终判不合格必须返回 200，实际 ${stageFail.statusCode}：${stageFail.body}`
+      );
+      assert.equal(
+        (JSON.parse(stageFail.body) as { status: string }).status,
+        'IN_MRB_REVIEW',
+        `${stageCase.inspectionType} 判定不合格后必须直接进入 MRB 评审中`
+      );
+
+      const stageMrb = await db
+        .selectFrom('mrbReviews')
+        .select(['id', 'status', 'sourceType', 'reviewFlowId', 'disposition'])
+        .where('sourceOrderNo', '=', stageOrder.orderNo)
+        .executeTakeFirst();
+      assert.ok(stageMrb, `${stageCase.inspectionType} 判定不合格必须自动创建 MRB 评审单`);
+      assert.equal(
+        stageMrb.sourceType,
+        stageCase.expectCategory,
+        `${stageCase.inspectionType} 的不合格来源分类必须是 ${stageCase.expectCategory}` +
+          `（实际 ${stageMrb.sourceType}；错绑会让 MRB 走错评审流程）`
+      );
+      assert.equal(stageMrb.status, 'PENDING_REVIEW', '自动建单的初始状态必须是待评审');
+      assert.equal(
+        stageMrb.disposition,
+        'REWORK',
+        '未传拟定处置时缺省返工（docs/43 §4.4）'
+      );
+
+      const stageFlow = await db
+        .selectFrom('reviewFlows')
+        .select(['flowCode', 'applicableType', 'isActive'])
+        .where('id', '=', stageMrb.reviewFlowId ?? '')
+        .executeTakeFirst();
+      assert.ok(stageFlow, `${stageCase.inspectionType} 的 MRB 单必须绑定评审流程`);
+      assert.equal(
+        stageFlow.flowCode,
+        stageCase.expectFlowCode,
+        `${stageCase.inspectionType} 必须绑定 ${stageCase.expectFlowCode}（实际 ${stageFlow.flowCode}）`
+      );
+      assert.equal(
+        stageFlow.applicableType,
+        stageCase.expectCategory,
+        '绑定的评审流程必须与该分类同口径'
+      );
+
+      const stagePool = await db
+        .selectFrom('pendingMrbItems')
+        .select(['status', 'mrbReviewId'])
+        .where('sourceOrderId', '=', stageOrder.id)
+        .executeTakeFirst();
+      assert.equal(
+        stagePool?.status,
+        'INITIATED',
+        `${stageCase.inspectionType} 台账条目必须即时转 INITIATED`
+      );
+      assert.equal(
+        stagePool?.mrbReviewId,
+        stageMrb.id,
+        '台账条目必须回填自动创建的 MRB 单主键'
+      );
+
+      // 读侧闭环：MRB 处置列表能按来源单号命中，且回吐的分类与落库一致
+      const stageList = await app.inject({
+        method: 'GET',
+        url: `/api/v1/mrb/records?page=1&pageSize=10&sourceOrderNo=${encodeURIComponent(
+          stageOrder.orderNo
+        )}`,
+        headers: authHeader,
+      });
+      assert.equal(stageList.statusCode, 200, 'MRB 列表查询必须返回 200');
+      const stageItems = (JSON.parse(stageList.body) as {
+        items: Array<{ sourceOrderNo: string; sourceType: string }>;
+      }).items;
+      assert.ok(
+        stageItems.some(
+          (item) =>
+            item.sourceOrderNo === stageOrder.orderNo &&
+            item.sourceType === stageCase.expectCategory
+        ),
+        `${stageCase.inspectionType} 的评审单必须在【MRB不合格品处置】列表可见且分类正确`
+      );
+      console.log(
+        `✔ ${stageCase.inspectionType} 判定不合格 -> ${stageCase.expectCategory} -> ${stageCase.expectFlowCode}（MRB ${stageMrb.id}）`
+      );
+    }
   } finally {
     if (createdOrderIds.length > 0) {
       // mrb_reviews 与检验单之间只有 source_order_no 文本关联（无外键），必须显式删除

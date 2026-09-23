@@ -1,4 +1,8 @@
 
+// 不合格来源分类的**类型**由 dtos 统一派生（`z.infer<typeof MRBFailCategoryEnum>`），
+// 这里只做类型引用，避免与 schemas/mrb 之间产生运行时环依赖。
+import type { MRBFailCategory } from '../dtos';
+
 export type InspectionGroupKey = 'ALL' | 'IQC' | 'IPQC' | 'OUTSOURCE' | 'OQC';
 
 /**
@@ -50,4 +54,49 @@ export function inspectionGroupMembers(group: InspectionGroupKey): string[] {
     return Object.values(INSPECTION_GROUPS).flat();
   }
   return [...INSPECTION_GROUPS[group]];
+}
+
+/** 业务大类 → 不合格来源分类（驱动 MRB 评审流程路由） */
+export const GROUP_TO_FAIL_CATEGORY: Record<
+  Exclude<InspectionGroupKey, 'ALL'>,
+  MRBFailCategory
+> = {
+  IQC: 'INCOMING_FAIL',
+  IPQC: 'PROCESS_FAIL',
+  OUTSOURCE: 'SUBCONTRACT_FAIL',
+  OQC: 'SHIPMENT_FAIL',
+};
+
+/**
+ * 检验环节 → 不合格来源分类（`mrb_reviews.source_type` / `review_flows.applicable_type`）的**唯一口径**。
+ *
+ * 口径表（docs/44-过程委外出货不合格自动进MRB口径补齐设计.md §1）：
+ * - `IQC` → `INCOMING_FAIL`（来料）
+ * - `IPQC_CT` / `IPQC_RL` / `IPQC_FN` → `PROCESS_FAIL`（过程：下料 / 滚丝 / 成品检）
+ * - `OQC_SF` / `OQC_HEAT` / `OQC_BLACK` / `OQC_ZINC` / `OQC_NICKEL` / `OQC_PHOSPH` / `OQC_DACRO` / `OQC_MACH`
+ *   → `SUBCONTRACT_FAIL`（委外：通用表面处理 + 七分类）
+ * - `OQC_SH*` → `SHIPMENT_FAIL`（出货检验 / 客户放行）
+ *
+ * 先按 `INSPECTION_GROUPS`（唯一分组清单）精确命中，再走历史别名（`FQC*` / `SHIPMENT*` → 出货，
+ * `OUTSOURCE*` / `SUBCONTRACT*` → 委外），最后对未知环节回落 `PROCESS_FAIL` ——
+ * 终判是现场写路径，不能因为「出现了一个没登记过的检验类型」把质量判定卡死（回落分支显式声明，非静默兜底）。
+ */
+export function inspectionTypeToFailCategory(inspectionType: string | undefined): MRBFailCategory {
+  const type = (inspectionType ?? '').trim().toUpperCase();
+  if (type === '') return 'PROCESS_FAIL';
+
+  for (const [group, category] of Object.entries(GROUP_TO_FAIL_CATEGORY) as Array<
+    [Exclude<InspectionGroupKey, 'ALL'>, MRBFailCategory]
+  >) {
+    if (inspectionGroupMembers(group).includes(type)) return category;
+  }
+
+  if (type.startsWith('FQC') || type.startsWith('SHIPMENT')) return 'SHIPMENT_FAIL';
+  if (type.startsWith('OUTSOURCE') || type.startsWith('SUBCONTRACT')) return 'SUBCONTRACT_FAIL';
+  // 未登记子类型按前缀归族：`OQC_SH*` 是出货，其余 `OQC_*` 一律委外
+  if (type.startsWith('OQC_SH')) return 'SHIPMENT_FAIL';
+  if (type.startsWith('OQC')) return 'SUBCONTRACT_FAIL';
+  if (type.startsWith('IPQC')) return 'PROCESS_FAIL';
+  if (type.startsWith('IQC')) return 'INCOMING_FAIL';
+  return 'PROCESS_FAIL';
 }

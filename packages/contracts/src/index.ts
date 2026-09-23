@@ -130,6 +130,8 @@ export {
   isInspectionGroup,
   inspectionTypeMatchesGroup,
   inspectionGroupMembers,
+  GROUP_TO_FAIL_CATEGORY,
+  inspectionTypeToFailCategory,
 } from './schemas/inspection-groups';
 
 // ERP/MES 集成主数据契约

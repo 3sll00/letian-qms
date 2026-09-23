@@ -63,7 +63,7 @@ IQC / IPQC / 委外 / OQC 检验员终判不合格
 
 1. **同一事务**：发起 MRB 与终判、入池、追溯节点、审计必须在一个事务内完成。因此自动发起走 `executeInTransaction(ctx, ...)`，**不得**再调用会自开事务的 `execute()`（嵌套事务会另取连接，既破坏原子性，也会与 `pg_advisory_xact_lock` 批次锁形成死锁风险）。
 2. **幂等**：以 `mrb_reviews.source_order_no` 为天然键 —— 同一检验单重复终判（含网络重试）复用既有 MRB 单，不产生第二张工单；台账回填同样幂等。已处于 `IN_MRB_REVIEW` 的在途单不被回改。
-3. **流程绑定**：按来源类型自动匹配生效流程（`reviewFlows.findApplicableFlow(sourceType)`：`IQC → INCOMING_FAIL`、`IPQC → PROCESS_FAIL`、`OQC/FQC → SHIPMENT_FAIL`、委外 → `SUBCONTRACT_FAIL`）。库内无生效流程时**不阻断终判**：仍建单并落 `PENDING_REVIEW`（首审角色回退 `QUALITY_MANAGER`），避免"没配流程就不能判不合格"这种把质量判定卡死的降级。
+3. **流程绑定**：按来源类型自动匹配生效流程（`reviewFlows.findApplicableFlow(sourceType)`）。映射口径的**唯一实现**是契约层 `inspectionTypeToFailCategory()`（与 `INSPECTION_GROUPS` 同源；逐环节对照表见 `docs/44-过程委外出货不合格自动进MRB口径补齐设计.md` §1）：`IQC → INCOMING_FAIL`、`IPQC_CT / IPQC_RL / IPQC_FN → PROCESS_FAIL`、`OQC_SH → SHIPMENT_FAIL`、委外八类（`OQC_SF` / `OQC_HEAT` / `OQC_BLACK` / `OQC_ZINC` / `OQC_NICKEL` / `OQC_PHOSPH` / `OQC_DACRO` / `OQC_MACH`）→ `SUBCONTRACT_FAIL`（改造前只做精确值匹配，委外与出货都被错绑到过程流程，见 `docs/44` §2）。库内无生效流程时**不阻断终判**：仍建单并落 `PENDING_REVIEW`（首审角色回退 `QUALITY_MANAGER`），避免"没配流程就不能判不合格"这种把质量判定卡死的降级。
 4. **拟定处置映射**（决定列表「处置方式」列初值，终审时由处置决策覆盖）：
    - 来料检验「✕ 不合格退货」→ `RETURN_TO_VENDOR`；「让步接收」→ `CONCESSION`（最终放行仍需 MRB 会签 + 客户书面签核）；
    - 出货检验「特采」→ `CONCESSION`；其余环节缺省 `REWORK`。

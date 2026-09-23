@@ -5,7 +5,8 @@
  * 池表新增列回吐、发起评审四参数落库、池条目状态机回填、会签、特采凭证强制校验、
  * 处置响应形态（裸 MRBRecord）与闭环时间/裁决人落库；§11 的「返工处置响应回吐复检单标识」
  * （自建来源单走完整链路：建单 -> 越界判定 -> 自动入池并自动建 MRB 单（docs/43，无人工发起环节）
- *  -> REWORK 处置 -> 库内复检行逐字段核对）。
+ *  -> REWORK 处置 -> 库内复检行逐字段核对）；以及四环节来源分类与评审流程绑定
+ * （docs/44 §1：过程 -> PROCESS_FAIL / 出货 -> SHIPMENT_FAIL / 委外 -> SUBCONTRACT_FAIL）。
  *
  * 前置条件：
  *   1. 数据库已迁移到 019 且 `pnpm db:seed` 已执行（脚本按演示数据断言，末尾会还原）；
@@ -16,7 +17,7 @@
  *   pnpm run verify:mrb-wiring
  *   MRB_WIRING_BASE=http://127.0.0.1:3102/api/v1 node scripts/testing/mrb-wiring-verify.cjs
  *
- * 退出码 0 = 全部断言通过（当前 35 条）；非 0 = 存在 FAIL。
+ * 退出码 0 = 全部断言通过（当前 38 条）；非 0 = 存在 FAIL。
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -51,6 +52,8 @@ let pass = 0;
 let fail = 0;
 /** 返工链路的清理回调：断言中途抛错时也要保证不把验收行留在库里（见末尾 catch） */
 let reworkCleanup = null;
+/** 四环节分类探针的清理回调（同上方口径：断言中途抛错也要回收，不污染演示库） */
+let stageCleanup = null;
 const check = (name, ok, extra) => {
   if (ok) {
     pass++;
@@ -481,6 +484,92 @@ const check = (name, ok, extra) => {
     await db.query('delete from inspection_orders where batch_no=$1', [reworkOrder.batchNo]);
   };
 
+  // 7.6 四环节「判定不合格 -> 自动进 MRB」的来源分类与评审流程绑定（docs/44 §1）：
+  //     过程 / 委外 / 出货必须各归各的不合格分类并绑定对应生效流程 —— 改造前只认精确值
+  //     IQC/IPQC/OQC/FQC/OUTSOURCE，委外八类与出货全部错绑 FLOW-PROCESS-FAIL（会签角色全错）。
+  const stageCases = [
+    {
+      inspectionType: 'IPQC_CT',
+      materialCode: 'MAT-SCR-M6-25',
+      expectCategory: 'PROCESS_FAIL',
+      expectFlowCode: 'FLOW-PROCESS-FAIL',
+    },
+    {
+      inspectionType: 'OQC_SH',
+      materialCode: 'MAT-BLT-109-M10',
+      expectCategory: 'SHIPMENT_FAIL',
+      expectFlowCode: 'FLOW-SHIPMENT-FAIL',
+    },
+    {
+      inspectionType: 'OQC_SF',
+      materialCode: 'MAT-BLT-109-M10',
+      expectCategory: 'SUBCONTRACT_FAIL',
+      expectFlowCode: 'FLOW-SUBCONTRACT-FAIL',
+    },
+  ];
+  const stageOrderIds = [];
+  const stageOrderNos = [];
+  const stageBatchNos = [];
+  stageCleanup = async () => {
+    if (stageOrderIds.length === 0) return;
+    await db.query('delete from mrb_reviews where source_order_no = ANY($1::text[])', [stageOrderNos]);
+    await db.query('delete from batch_trace_nodes where batch_no = ANY($1::text[])', [stageBatchNos]);
+    await db.query('delete from inspection_orders where id = ANY($1::uuid[])', [stageOrderIds]);
+  };
+
+  for (const stageCase of stageCases) {
+    const stageBatchNo = 'WIRING-STAGE-' + stageCase.inspectionType + '-' + Date.now();
+    const stageCreate = await req('POST', '/inspections', {
+      inspectionType: stageCase.inspectionType,
+      materialCode: stageCase.materialCode,
+      batchNo: stageBatchNo,
+      sampleQty: 10,
+      totalQty: 10,
+    });
+    if (stageCreate.status === 201) {
+      stageOrderIds.push(stageCreate.body.id);
+      stageOrderNos.push(stageCreate.body.orderNo);
+      stageBatchNos.push(stageBatchNo);
+    }
+    const stageJudge = await req('POST', '/inspections/' + stageCreate.body?.id + '/status', {
+      status: 'FAILED',
+      judgment: 'FAILED',
+      passQty: 0,
+      failQty: 10,
+    });
+    const stageMrbRow = (
+      await db.query(
+        'select m.source_type, m.status, m.disposition, f.flow_code, f.applicable_type, f.is_active, io.status as order_status from mrb_reviews m left join review_flows f on f.id = m.review_flow_id left join inspection_orders io on io.order_no = m.source_order_no where m.source_order_no = $1',
+        [stageCreate.body?.orderNo ?? '']
+      )
+    ).rows[0];
+    check(
+      stageCase.inspectionType +
+        ' 判定不合格 -> ' +
+        stageCase.expectCategory +
+        ' -> ' +
+        stageCase.expectFlowCode +
+        '（自动建单 + 单据转 IN_MRB_REVIEW）',
+      stageCreate.status === 201 &&
+        stageJudge.status === 200 &&
+        stageJudge.body?.status === 'IN_MRB_REVIEW' &&
+        stageMrbRow?.source_type === stageCase.expectCategory &&
+        stageMrbRow?.status === 'PENDING_REVIEW' &&
+        stageMrbRow?.disposition === 'REWORK' &&
+        stageMrbRow?.flow_code === stageCase.expectFlowCode &&
+        stageMrbRow?.applicable_type === stageCase.expectCategory &&
+        stageMrbRow?.is_active === true &&
+        stageMrbRow?.order_status === 'IN_MRB_REVIEW',
+      {
+        create: stageCreate.status,
+        judge: stageJudge.body?.status,
+        sourceType: stageMrbRow?.source_type,
+        flow: stageMrbRow?.flow_code,
+        mrbStatus: stageMrbRow?.status,
+      }
+    );
+  }
+
   // 8. 评审流程设置子页字段打通（docs/21 §10）：流程说明 + 节点四字段 + 启停真实落库
   //    该子页此前三处断链（E1 说明恒空 / E2 节点四列对不上契约 / E3 启停假成功）已在 019 闭环。
   const flowsRes = await req('GET', '/review-flows');
@@ -558,12 +647,14 @@ const check = (name, ok, extra) => {
     item.inspectionOrderId,
   ]);
   if (reworkCleanup) await reworkCleanup();
+  if (stageCleanup) await stageCleanup();
   console.log('== 结果: ' + pass + '/' + (pass + fail) + ' 通过 ==');
   await db.end();
   process.exit(fail === 0 ? 0 : 1);
 })().catch(async (e) => {
   // 中途抛错也必须回收返工链路的验收行，避免污染演示库
   if (reworkCleanup) await reworkCleanup().catch(() => {});
+  if (stageCleanup) await stageCleanup().catch(() => {});
   console.error('ERR', e.message);
   process.exit(1);
 });

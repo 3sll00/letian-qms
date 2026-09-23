@@ -6,7 +6,7 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b --force",
-    "test": "tsx src/__tests__/audit-diff.test.ts && tsx src/__tests__/idempotency.test.ts && tsx src/__tests__/pbac-translator.test.ts && tsx src/__tests__/jsonb-shape.test.ts",
+    "test": "tsx src/__tests__/audit-diff.test.ts && tsx src/__tests__/idempotency.test.ts && tsx src/__tests__/pbac-translator.test.ts && tsx src/__tests__/jsonb-shape.test.ts && tsx src/__tests__/erp-readonly.test.ts",
     "migrate:up": "tsx src/migrations/runner.ts up",
     "migrate:down": "tsx src/migrations/runner.ts down",
     "seed": "tsx src/seeds/runner.ts"

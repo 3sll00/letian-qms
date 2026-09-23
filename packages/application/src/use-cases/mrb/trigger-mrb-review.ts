@@ -1,17 +1,11 @@
 
-function mapOrderStageToSourceType(stage?: string): MRBFailCategory {
-  if (stage === "IQC") return "INCOMING_FAIL";
-  if (stage === "IPQC") return "PROCESS_FAIL";
-  if (stage === "OQC" || stage === "FQC") return "SHIPMENT_FAIL";
-  if (stage === "OUTSOURCE") return "SUBCONTRACT_FAIL";
-  return "PROCESS_FAIL";
-}
 import type {
   MRBReview as MRBReviewDTO,
   CreateMRBReviewRequest,
   MRBDisposition,
   MRBFailCategory,
 } from '@letian/contracts';
+import { inspectionTypeToFailCategory } from '@letian/contracts';
 import { ApplicationError } from '../../errors/application-error.js';
 import type { ISecurityContext } from '../../security/security-context.js';
 import type { IUnitOfWork, IUnitOfWorkContext } from '../../tx/unit-of-work.js';
@@ -106,14 +100,16 @@ export async function triggerMrbReviewInTransaction(
   await ctx.locks.acquireXactLock(orderDTO.batchNo);
 
   // 不合格来源类型：显式指定优先，否则按检验环节映射（此前默认值 'CRITICAL_DIMENSION'
-  // 不在 MRBFailCategoryEnum 内，导致流程匹配恒失效，见 docs/20 §3.2 D5）
+  // 不在 MRBFailCategoryEnum 内，导致流程匹配恒失效，见 docs/20 §3.2 D5）。
+  // 映射口径收敛在契约层 `inspectionTypeToFailCategory`（docs/44 §1）：委外八类 → SUBCONTRACT_FAIL、
+  // 出货 → SHIPMENT_FAIL，此前只认精确值 IQC/IPQC/OQC/FQC/OUTSOURCE，让委外与出货都错绑过程流程。
   const sourceType = (
     cmd.sourceType !== undefined &&
     ['INCOMING_FAIL', 'PROCESS_FAIL', 'SHIPMENT_FAIL', 'SUBCONTRACT_FAIL'].includes(
       cmd.sourceType
     )
       ? cmd.sourceType
-      : mapOrderStageToSourceType(orderDTO.inspectionType)
+      : inspectionTypeToFailCategory(orderDTO.inspectionType)
   ) as MRBFailCategory;
 
   // 评审流配置：优先用发起时选定的流程；未选定时按不合格来源类型自动匹配生效流程

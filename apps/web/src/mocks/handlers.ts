@@ -52,6 +52,8 @@ import {
   type ReviewFlow,
   type TriggerSyncRequest,
   type CompanyProfile,
+  // 检验环节 → 不合格来源分类的唯一口径（后端同源复用，docs/44 §1）
+  inspectionTypeToFailCategory,
 } from '@letian/contracts';
 import { inspectionTypeMatchesGroup } from '../lib/inspectionTypes';
 
@@ -136,14 +138,6 @@ function inspectorNameByOrderNo(): Map<string, string> {
 function withDerivedMrbFields(record: MRBReview, inspectorMap: Map<string, string>): MRBReview {
   const inspectorName = inspectorMap.get(record.sourceOrderNo);
   return inspectorName !== undefined ? { ...record, inspectorName } : { ...record };
-}
-
-/** 检验环节 → 不合格来源分类（驱动评审流程路由，口径同后端 MRBFailCategoryEnum） */
-function failCategoryOfInspectionType(inspectionType: string): MRBReview['sourceType'] {
-  if (inspectionType === 'IQC') return 'INCOMING_FAIL';
-  if (inspectionType === 'SHIPMENT' || inspectionType === 'OQC') return 'SHIPMENT_FAIL';
-  if (inspectionType.startsWith('OQC')) return 'SUBCONTRACT_FAIL';
-  return 'PROCESS_FAIL';
 }
 
 /** 紧急程度白名单（契约 MRBUrgencyLevelEnum），非白名单值一律回落 NORMAL */
@@ -587,7 +581,7 @@ export const handlers = [
       const created: MRBReview = {
         id: crypto.randomUUID(),
         mrbNo: `MRB-${now.slice(0, 10).replace(/-/g, '')}-${String(mrbList.length + 1).padStart(3, '0')}`,
-        sourceType: failCategoryOfInspectionType(updated.inspectionType),
+        sourceType: inspectionTypeToFailCategory(updated.inspectionType),
         sourceOrderNo: updated.orderNo,
         ...(poolItem !== undefined ? { pendingDefectId: poolItem.id } : {}),
         batchNo: updated.batchNo,
@@ -716,7 +710,7 @@ export const handlers = [
     const created: MRBReview = {
       id: crypto.randomUUID(),
       mrbNo: `MRB-${now.slice(0, 10).replace(/-/g, '')}-${String(mrbList.length + 1).padStart(3, '0')}`,
-      sourceType: failCategoryOfInspectionType(sourceOrder?.inspectionType ?? item.inspectionType),
+      sourceType: inspectionTypeToFailCategory(sourceOrder?.inspectionType ?? item.inspectionType),
       sourceOrderNo: item.orderNo,
       pendingDefectId: item.id,
       batchNo: item.batchNo,

@@ -19,12 +19,15 @@ node scripts/testing/leftovers2-probe.cjs     # docs/35 遗留项二轮收口（
 node scripts/testing/leftovers2-mock-probe.cjs # 同一批收口的离线 Mock 冒烟（需 dev:mock 跑在 :5200）
 node scripts/testing/eol-check.cjs             # 仓库行尾（EOL）门禁：读 git ls-files --eol，不碰业务代码
 node scripts/testing/plan-match-ui-probe.cjs    # 质检方案匹配界面级验收：陈静「录入表单为空」的正例 / 负例（只读）
+node scripts/testing/dev-mode-check.cjs         # 真库形态自检：当前前端到底是「真连后端写库」还是「离线 Mock 演示」（只读）
+node scripts/testing/erp-readonly-check.cjs     # ERP 只读静态门禁：还有没有旁路能直连 / 回写 ERP（只读）
+node scripts/testing/erp-sync-verify.cjs        # ERP -> QMS 只读同步端到端验收（真跑同步 + 对账 + 幂等，跑完自清）
 ```
 
 前三个脚本需要后端 `:3100` 与前端 `:5200` 已启动；`mrb-wiring-verify.cjs` 需要**后端 API 已启动**（默认 `:3101`，
 用 `PORT=3101 pnpm --filter @letian/api run dev` 另起一个实例，勿指向常驻 `:3100`）且数据库已迁移到最新并执行过
 `pnpm db:seed`（脚本按演示数据断言，跑完会还原数据；自建来源单的验收行亦同批清理）。
-根脚本入口：`pnpm run verify:oqc` / `verify:inspections` / `verify:ipqc-ledger` / `verify:mrb` / `verify:mrb-wiring` / `verify:plan-match` / `verify:outsource-no` / `verify:leftovers2` / `verify:leftovers2:mock` / `verify:eol` / `audit:code`。
+根脚本入口：`pnpm run verify:oqc` / `verify:inspections` / `verify:ipqc-ledger` / `verify:mrb` / `verify:mrb-wiring` / `verify:plan-match` / `verify:dev-mode` / `verify:outsource-no` / `verify:leftovers2` / `verify:leftovers2:mock` / `verify:erp-readonly` / `verify:erp-sync` / `verify:eol` / `audit:code`（另有 `pnpm db:recent` 速查最近落库行）。
 
 退出码 `0` = 通过，非 `0` = 存在 FAIL / 超预算（明细见输出与 `scripts/logs/`，该目录已 gitignore）。
 
@@ -98,7 +101,7 @@ node scripts/testing/plan-match-ui-probe.cjs    # 质检方案匹配界面级验
 （等价入口：`pnpm run verify:mrb-wiring`）
 
 回答的是「MRB 不合格品处置页的每个字段，是不是真的落到了 PostgreSQL 物理列、由 Fastify 接口读写」——
-**真实数据库 + 真实 HTTP**（不使用 Mock），35 条断言覆盖：
+**真实数据库 + 真实 HTTP**（不使用 Mock），38 条断言覆盖：
 
 1. `GET /mrb/pending-pool` 回吐 015 新增列（供应商 / 客户 / 不合格指标项 / 检验人 / 受检数量 / 不良率）与环节前缀筛选；
 2. `GET /mrb/records` 回吐派生 `inspectorName` 与新增 `urgencyLevel` / `reviewFlowId`；
@@ -123,6 +126,12 @@ node scripts/testing/plan-match-ui-probe.cjs    # 质检方案匹配界面级验
    `id` / `order_no` 与响应**逐一对齐**且状态 `PENDING`、`inbound_no` / `specification` / `unit` 逐字段等于原单
    （沿承快照而非回查主数据）、源单翻转为 `RE_INSPECTING`。清理动作挂在成功与异常两条路径上（见脚本内
    `reworkCleanup`），中途失败也不会把验收行留在库里。
+10. **四环节来源分类与评审流程绑定**（`docs/44` §1 闭环，3 条断言）：过程（`IPQC_CT`）/ 出货（`OQC_SH`）/ 委外（`OQC_SF`）
+    自建单走真实 HTTP 终判 `FAILED`，断言 `mrb_reviews.source_type` 分别为 `PROCESS_FAIL` / `SHIPMENT_FAIL` / `SUBCONTRACT_FAIL`，
+    且 `review_flow_id` 指向该分类的**生效**流程（`FLOW-PROCESS-FAIL` / `FLOW-SHIPMENT-FAIL` / `FLOW-SUBCONTRACT-FAIL`，
+    `applicable_type` 同口径）、检验单转 `IN_MRB_REVIEW`、拟定处置缺省 `REWORK`。改造前只认精确值
+    `IQC/IPQC/OQC/FQC/OUTSOURCE`，委外八类与出货全部错绑过程流程（会签角色与节点层级全错）。清理同样挂在
+    成功与异常两条路径上（见脚本内 `stageCleanup`）。
 
 ```bash
 # 前置：数据库已迁移到最新且执行过 pnpm db:seed；目标 API 已启动
@@ -339,3 +348,30 @@ pnpm verify:eol            # 等价 node scripts/testing/eol-check.cjs
    stderr 落到 `scripts/logs/plan-match-ui-probe.chrome.err.log` 便于定位。
 2. **固定 `sleep` 赌加载时间会偶发假失败**：页面加载 / 点击 / 请求返回都是异步的，改成轮询「目标行出现 / 提示条
    出现 / `data-status` 变成期望值」后，探针从 51s 压到 5s，且连续多次运行结果一致。
+
+---
+
+# 八、真库形态自检与 ERP 只读门禁（`dev-mode-check.cjs` / `erp-readonly-check.cjs` / `erp-sync-verify.cjs`）
+
+## 8.1 `dev-mode-check.cjs`（`pnpm verify:dev-mode`）
+
+回答「我起的前端是真连数据库，还是离线 Mock 演示」。**端口不能作为判据**（`.env.mock` 里 `VITE_PORT` 也是 5200）：
+脚本直接取 dev server 下发的 `/src/mocks/browser.ts`，解析被注入的 `import.meta.env` 字面量 —— `MODE=mock`
+或 `VITE_USE_MOCK=true` 即演示模式；再断言「经前端同源请求 `/api/v1` 得到真后端 401 + problem+json」与
+「接口返回的单号全部存在于 PostgreSQL」。同时列出 `:5200/:5201/:5202` 上**所有**在跑实例的形态。
+
+前置：前端与 API 已启动（`pnpm dev:all`）。实测（2026-09-23）：`:5200` 为真库形态 **4/4 PASS**；把它指向
+`dev:mock` 实例（`:5202`，`MODE=mock`）则 **2/4 FAIL、退出码 1** —— 即负例可控。
+
+## 8.2 `erp-readonly-check.cjs`（`pnpm verify:erp-readonly`）
+
+静态门禁，回答「除了唯一入口，还有没有别的地方能直连 ERP」：① 引用 `getErpConnectionPool` 的文件必须全在白名单内
+（豁免清单**冻结**，新增即 FAIL）；② CLI 层不得出现 `.request()`；③ `erp-source.ts` 必须调用 `queryErpReadOnly`；
+④ `erp-source.ts` 的 `.request()` 收敛为唯一 1 处；⑤ 守门本体必须保留首关断言与写关键字清单。实测：扫描 155 个
+`.ts`、违规 0、遗留豁免 2 项（`sync-master-data.ts` / `external-adapters.ts`，见 docs/45 §7）打 WARN。
+
+## 8.3 `erp-sync-verify.cjs`（`pnpm verify:erp-sync`）
+
+端到端验收 `Ptype -> materials` 最小闭环：真跑 `pnpm erp:sync:ptype`（本地样例源，无需 ERP 连接）→ 逐字段对账 →
+幂等复跑 → 改源触发更新 → 校验 CLI 的只读审计行 → 清理测试行。实测 **8/8 PASS**（首轮 `inserted=3`；二次
+`unchanged=3` 且总行数不变；改源 `updated=1`；清理后残留 0）。**只碰 `material_code LIKE 'ERP-FIX-%'` 的测试行。**

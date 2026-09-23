@@ -36,6 +36,21 @@ import {
 import type { InspectionType } from '@letian/contracts';
 
 /**
+ * 过程检验「处置建议」选项（值 = 契约 `MRBDispositionEnum`）。
+ *
+ * 判不合格时随终判下发 `preliminaryDisposition`，落自动创建的 MRB 单「处置方式」列初值；
+ * 终审时由 MRB 处置决策覆盖（docs/44-过程委外出货不合格自动进MRB口径补齐设计.md §1/§4.3）。
+ * 合格 / 检验中不下发 —— 合格单不该带处置意图。
+ */
+const IPQC_PRELIMINARY_DISPOSITIONS = [
+  { value: 'REWORK', label: '返工返修' },
+  { value: 'CONCESSION', label: '让步接收' },
+  { value: 'SCRAP', label: '报废' },
+] as const;
+
+type IpqcPreliminaryDisposition = (typeof IPQC_PRELIMINARY_DISPOSITIONS)[number]['value'];
+
+/**
  * 回看行的判定徽标样式。
  * 判定值域是契约的 PASSED / FAILED / PENDING / EXEMPT（**不是** FAIL），
  * 之前弹窗里写的是 `result === 'FAIL'`，导致不合格项一律显示成 OK —— 回看结论必须与落库判定一字不差。
@@ -389,6 +404,11 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
   const [inspectPassQty, setInspectPassQty] = useState<number>(0);
   const [inspectFailQty, setInspectFailQty] = useState<number>(0);
   const [inspectRemark, setInspectRemark] = useState('');
+  /** 处置建议（拟定处置，见 IPQC_PRELIMINARY_DISPOSITIONS 注释）：仅判不合格时随终判下发 */
+  const [inspectDisposition, setInspectDisposition] =
+    useState<IpqcPreliminaryDisposition>('REWORK');
+  /** 单行快速终判成功后的绿色回执（判不合格时提示已自动发起 MRB 评审） */
+  const [inspectNotice, setInspectNotice] = useState('');
   const [inspectSubmitting, setInspectSubmitting] = useState(false);
   /** 提交失败文案（docs/35 §4 M3：失败就地红字提示，不再 alert 弹窗打断） */
   const [inspectError, setInspectError] = useState('');
@@ -404,6 +424,8 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [bulkModalOpen, setBulkModalOpen] = useState(false);
   const [bulkVerdict, setBulkVerdict] = useState<'PASSED' | 'FAILED'>('PASSED');
+  /** 批量检视的处置建议（应用到最后一批判不合格的记录；合格批次不下发） */
+  const [bulkDisposition, setBulkDisposition] = useState<IpqcPreliminaryDisposition>('REWORK');
   const [bulkSubmitting, setBulkSubmitting] = useState(false);
   const [bulkError, setBulkError] = useState('');
   const [bulkFailures, setBulkFailures] = useState<Array<{ orderNo: string; message: string }>>([]);
@@ -581,6 +603,8 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
     setInspectPassQty(item.passQty ?? item.sampleQty ?? 32);
     setInspectFailQty(item.failQty ?? 0);
     setInspectRemark(item.inspectionNotes || '');
+    setInspectDisposition('REWORK');
+    setInspectNotice('');
     setInspectError('');
     setInspectModalOpen(true);
   };
@@ -608,14 +632,26 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
           }),
         });
       }
-      await api.post(`/inspections/${inspectingOrder.id}/status`, {
-        status: inspectVerdict,
-        passQty: inspectPassQty,
-        failQty: inspectFailQty,
-        judgment: inspectVerdict,
-        remark: inspectRemark.trim() || undefined,
-        inspectionNotes: inspectRemark.trim() || undefined,
-      });
+      const finished = await api.post<{ orderNo?: string }>(
+        `/inspections/${inspectingOrder.id}/status`,
+        {
+          status: inspectVerdict,
+          passQty: inspectPassQty,
+          failQty: inspectFailQty,
+          judgment: inspectVerdict,
+          remark: inspectRemark.trim() || undefined,
+          inspectionNotes: inspectRemark.trim() || undefined,
+          // 判不合格时服务端在**同一事务**自动创建 MRB 评审单（docs/43），
+          // 这里只把检验员的处置意图作为「处置方式」初值随终判下发（docs/44 §3）
+          ...(inspectVerdict === 'FAILED' ? { preliminaryDisposition: inspectDisposition } : {}),
+        }
+      );
+      const finalizedOrderNo = finished.orderNo ?? inspectingOrder.orderNo;
+      setInspectNotice(
+        inspectVerdict === 'FAILED'
+          ? `已终判：${finalizedOrderNo}（不合格）· 已自动发起 MRB 评审，请到【MRB不合格品处置】查看`
+          : `已终判：${finalizedOrderNo}（合格放行）`
+      );
       setInspectModalOpen(false);
       setInspectingOrder(null);
       await fetchTableData();
@@ -670,6 +706,7 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
   const handleOpenBulkInspect = () => {
     if (selectedRows.length === 0) return;
     setBulkVerdict('PASSED');
+    setBulkDisposition('REWORK');
     setBulkError('');
     setBulkFailures([]);
     setBulkModalOpen(true);
@@ -706,6 +743,8 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
           status: bulkVerdict,
           judgment: bulkVerdict,
           ...qtyPatch,
+          // 判不合格时服务端自动创建 MRB 评审单（docs/43）；处置建议作为「处置方式」初值
+          ...(bulkVerdict === 'FAILED' ? { preliminaryDisposition: bulkDisposition } : {}),
         });
         succeededIds.push(row.id);
       } catch (err) {
@@ -719,7 +758,9 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
     if (failures.length === 0) {
       setBulkModalOpen(false);
       setBulkNotice(
-        `已将勾选的 ${succeededIds.length} 条过程检验单统一判定为${bulkVerdict === 'PASSED' ? '合格' : '不合格'}`
+        bulkVerdict === 'PASSED'
+          ? `已将勾选的 ${succeededIds.length} 条过程检验单统一判定为合格`
+          : `已将勾选的 ${succeededIds.length} 条过程检验单统一判定为不合格 · 已自动发起 MRB 评审，请到【MRB不合格品处置】查看`
       );
     } else {
       setBulkError(
@@ -1196,6 +1237,16 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
         </div>
       )}
 
+      {/* 单行快速终判结果提示（成功）：与批量检视同款绿色提示条，判定不合格时明示已自动发起 MRB 评审 */}
+      {inspectNotice && (
+        <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs rounded-lg flex items-center justify-between">
+          <span>{inspectNotice}</span>
+          <button onClick={() => setInspectNotice('')} className="underline hover:text-emerald-900 ml-2">
+            关闭
+          </button>
+        </div>
+      )}
+
       {/* Main Table */}
       <div className="bg-white border border-slate-200 rounded-lg overflow-hidden shadow-sm">
         {/* 批量检视工具条（表格右上角）：仅下料 / 滚丝两页出现，成品检保持逐单关卡语义（docs/40 §3.6） */}
@@ -1603,6 +1654,33 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
                 </div>
               </div>
 
+              {bulkVerdict === 'FAILED' && (
+                <div>
+                  <label className="block text-slate-600 font-medium mb-1.5">
+                    处置建议（作为自动创建的 MRB 单「处置方式」初值）
+                  </label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {IPQC_PRELIMINARY_DISPOSITIONS.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => setBulkDisposition(option.value)}
+                        className={`py-2 rounded border text-xs font-semibold transition-all ${
+                          bulkDisposition === option.value
+                            ? 'bg-amber-50 border-amber-500 text-amber-700 shadow-sm'
+                            : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                        }`}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-1.5">
+                    判定不合格即在同一事务自动创建 MRB 评审单，由 MRB 会签决定最终处置（特采仍需客户书面签核）
+                  </p>
+                </div>
+              )}
+
               <div className="bg-slate-50 border border-slate-100 rounded p-3 space-y-1">
                 <div className="flex justify-between">
                   <span className="text-slate-400">勾选条数:</span>
@@ -1844,6 +1922,33 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
                   </button>
                 </div>
               </div>
+
+              {inspectVerdict === 'FAILED' && (
+                <div>
+                  <label className="block text-slate-600 font-medium mb-1.5">
+                    处置建议（作为自动创建的 MRB 单「处置方式」初值）
+                  </label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {IPQC_PRELIMINARY_DISPOSITIONS.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => setInspectDisposition(option.value)}
+                        className={`py-2 rounded border text-xs font-semibold transition-all ${
+                          inspectDisposition === option.value
+                            ? 'bg-amber-50 border-amber-500 text-amber-700 shadow-sm'
+                            : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                        }`}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-1.5">
+                    判定不合格即在同一事务自动创建 MRB 评审单，由 MRB 会签决定最终处置（特采仍需客户书面签核）
+                  </p>
+                </div>
+              )}
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
