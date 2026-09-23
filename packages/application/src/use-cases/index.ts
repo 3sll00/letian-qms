@@ -4,6 +4,7 @@ export * from './plans/toggle-plan-version.js';
 export * from './inspections/create-inspection-order.js';
 export * from './inspections/save-inspection-draft.js';
 export * from './inspections/record-measurements-and-judge.js';
+export * from './inspections/finalize-inspection-status.js';
 export * from './inspections/create-reinspection.js';
 export * from './mrb/trigger-mrb-review.js';
 export * from './mrb/advance-mrb-step.js';
@@ -18,3 +19,4 @@ export * from './export/export-trace-report.js';
 export * from './permissions/check-permission.js';
 
 export * from './mrb/pending-mrb-pool-use-case.js';
+export * from './mrb/auto-initiate-mrb-review.js';

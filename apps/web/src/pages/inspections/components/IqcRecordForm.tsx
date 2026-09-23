@@ -12,6 +12,7 @@ import { useMatchedPlan } from '../../../hooks/useMatchedPlan';
 import {
   DECISION_LABEL,
   judgeIndicatorRow,
+  planSectionEmptyText,
   parseMeasuredNumber,
   splitIndicatorRows,
   summarizeJudgements,
@@ -206,8 +207,9 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
    *   ① POST /inspections/{id}/submit-measurements —— 只下发**本单方案快照内、且已填写**的指标项；
    *      存在空项时按草稿落库（isDraft:true）—— 用「未录入」触发领域终判会把整单判成不合格
    *      并汇入不合格待审池，那不是检验员的真实结论；
-   *   ② POST /inspections/{id}/status —— 终判：合格 -> PASSED、不合格退货 -> FAILED、
-   *      让步接收 -> RE_INSPECTING，并带 passQty / failQty / judgment / remark；
+   *   ② POST /inspections/{id}/status —— 终判：合格 -> PASSED、不合格退货 / 让步接收 -> FAILED，
+   *      并带 passQty / failQty / judgment / remark / preliminaryDisposition；
+   *      判定不合格时服务端自动创建 MRB 评审单（docs/43），前端无需再调发起接口；
    * 回执：绿字显示服务端返回的检验单号；失败按 ApiError 文案红字就地提示（不再 alert 假成功）。
    */
   const handleSubmitInternal = async () => {
@@ -250,16 +252,21 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
         });
       }
 
-      // 判定映射：合格 -> PASSED(+judgment PASSED)；不合格 -> FAILED(+judgment FAILED)；
+      // 判定映射：合格 -> PASSED(+judgment PASSED)；不合格退货 -> FAILED(+judgment FAILED)；
       // 「让步接收」-> FAILED 且不落 judgment。理由是让步接收 / 特采属 MRB 会签结论
       // （领域侧 CONCESSION 必带客户签核凭证，见 MRBStateMachine.validateDispositionRules），
-      // 检验员在录入表单里无权直接把单据判成特采放行；此处把单据推进到不合格待审池，
-      // 由 MRB 决定特采 / 返工 / 结单，并把申请写进备注留痕。
+      // 检验员在录入表单里无权直接把单据判成特采放行；判定不合格后服务端会**自动创建 MRB
+      // 评审单**（docs/43，无人工发起环节），由 MRB 会签决定特采 / 返工 / 退货 / 报废，
+      // 这里只把检验员的处置意图（拟定处置）与申请写进备注留痕。
       const targetStatus = decision === '合格' ? 'PASSED' : 'FAILED';
       const note =
         decision === '让步接收'
           ? [remark.trim(), '检验员申请让步接收，转 MRB 评审'].filter((part) => part !== '').join('；')
           : remark.trim();
+      // 拟定处置（docs/43 §4.4）：退货 -> RETURN_TO_VENDOR、让步接收 -> CONCESSION，
+      // 作为自动创建的 MRB 单「处置方式」列初值（终审时由处置决策覆盖；合格不下发）。
+      const preliminaryDisposition =
+        decision === '退货' ? 'RETURN_TO_VENDOR' : decision === '让步接收' ? 'CONCESSION' : undefined;
       const finished = await api.post<{ orderNo?: string }>(
         `/inspections/${encodeURIComponent(orderId)}/status`,
         {
@@ -268,12 +275,17 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
           failQty: decision === '合格' ? 0 : qty !== null ? qty : 0,
           ...(decision === '让步接收' ? {} : { judgment: targetStatus }),
           ...(note !== '' ? { remark: note, inspectionNotes: note } : {}),
+          ...(preliminaryDisposition !== undefined ? { preliminaryDisposition } : {}),
         }
       );
 
       const orderNo = finished.orderNo ?? docNo;
       setSubmitted({ orderId, orderNo });
-      setSubmitReceipt(`已保存并终判：${orderNo}（判定：${decision}）`);
+      setSubmitReceipt(
+        decision === '合格'
+          ? `已保存并终判：${orderNo}（判定：合格）`
+          : `已保存并终判：${orderNo}（判定：${decision}）· 已自动发起 MRB 评审，请到【MRB不合格品处置】查看`
+      );
     } catch (err) {
       setSubmitError(errorMessage(err));
     } finally {
@@ -456,7 +468,7 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
         <div className="p-4 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-3 text-xs">
           {chemElements.length === 0 && (
             <div className="col-span-full text-center text-[11px] text-slate-400 py-3">
-              本单质检方案未包含化学成分类指标项，无需录入。
+              {planSectionEmptyText(planMatch.status, '化学成分')}
             </div>
           )}
           {chemElements.map((el, idx) => {
@@ -574,7 +586,7 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
             {mechProperties.length === 0 && (
               <tr>
                 <td colSpan={6} className="py-6 text-center text-[11px] text-slate-400">
-                  本单质检方案未包含力学与物理性能类指标项，无需录入。
+                  {planSectionEmptyText(planMatch.status, '力学与物理性能')}
                 </td>
               </tr>
             )}
@@ -680,7 +692,7 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
             {dimItems.length === 0 && (
               <tr>
                 <td colSpan={5} className="py-6 text-center text-[11px] text-slate-400">
-                  本单质检方案未包含尺寸与外观类指标项，无需录入。
+                  {planSectionEmptyText(planMatch.status, '尺寸与外观')}
                 </td>
               </tr>
             )}

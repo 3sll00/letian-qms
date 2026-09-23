@@ -27,6 +27,16 @@ export type MatchedPlan = z.infer<typeof MatchedInspectionPlanSchema>;
 export type InspectionOrder = z.infer<typeof InspectionOrderSchema>;
 
 /**
+ * 方案匹配 / 快照加载状态（唯一真相，`useMatchedPlan` 与各表单分区空态共用）：
+ *   idle      尚未发起匹配（缺物料编码 / 检验类型）
+ *   loading   匹配中
+ *   ready     方案已命中 / 本单快照已加载，指标行可渲染
+ *   not-found 两级匹配均未命中（404 inspection-plan-not-found）
+ *   error     其它失败（含 403 数据权限拦截、结构校验失败、网络错误）
+ */
+export type PlanMatchStatus = 'idle' | 'loading' | 'ready' | 'not-found' | 'error';
+
+/**
  * 指标行的「判定基准」：数值基准与判定规则的唯一读取处。
  *
  * 方案指标项（`PlanItem`）与工单实测项（`InspectionItem`）字段高度重叠，
@@ -569,6 +579,36 @@ export function isPlanNotFoundError(error: unknown): boolean {
     error instanceof ApiError &&
     (error.status === 404 || error.code === 'inspection-plan-not-found')
   );
+}
+
+/**
+ * 是否为 **PBAC 数据权限拦截**（403 `pbac-permission-denied`）。
+ *
+ * 与 404「方案未配置」是两种完全不同的失败：权限拦截时方案**可能就在那里**，
+ * 此时引导用户"去找质量工程师配方案"是答非所问（docs/42 §2.2）。
+ * 拦截详情原文（含用户 / 物料分类 / 物料 / 供应商三维）由服务端给出，保留在 `error.message` 中以便排查。
+ */
+export function isPermissionDeniedError(error: unknown): boolean {
+  return (
+    error instanceof ApiError && (error.code === 'pbac-permission-denied' || error.status === 403)
+  );
+}
+
+/**
+ * 指标分区空态文案（IQC / OQC 表单的三个分区共用）。
+ *
+ * 口径：**只有 `ready`（方案已命中 / 本单快照已加载）** 才能说"本单质检方案未包含××类指标项，无需录入"；
+ * 未就绪时说这句话，等于把"取不到"说成"不需要" —— 权限拦截 / 加载失败 / 未命中时用户会误以为
+ * 本单确实无需录入（docs/42 §2.2）。
+ */
+export function planSectionEmptyText(status: PlanMatchStatus, sectionLabel: string): string {
+  if (status === 'ready') {
+    return `本单质检方案未包含${sectionLabel}类指标项，无需录入。`;
+  }
+  if (status === 'loading') {
+    return '正在按质检方案加载待检指标清单…';
+  }
+  return '待检指标清单未就绪（方案未命中 / 加载失败 / 当前账号无数据权限），本分区不渲染任何待检项，请先按上方提示处理。';
 }
 
 /**

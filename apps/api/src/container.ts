@@ -9,6 +9,7 @@ import {
   DecideMrbDispositionUseCase,
   ExportInspectionReportUseCase,
   ExportTraceReportUseCase,
+  FinalizeInspectionStatusUseCase,
   GetOrderTraceChainUseCase,
   PenetrateBatchDagUseCase,
   RecordMeasurementsAndJudgeUseCase,
@@ -83,6 +84,8 @@ export interface ApiContainer {
     createInspectionOrder: CreateInspectionOrderUseCase;
     recordMeasurementsAndJudge: RecordMeasurementsAndJudgeUseCase;
     saveInspectionDraft: SaveInspectionDraftUseCase;
+    /** 终判唯一写入口：状态 / 结论 / 终判时间落库，判不合格时同事务入不合格待审核池（docs/39 §2 D1） */
+    finalizeInspectionStatus: FinalizeInspectionStatusUseCase;
     createReinspection: CreateReinspectionUseCase;
     triggerMrbReview: TriggerMrbReviewUseCase;
     advanceMrbStep: AdvanceMrbStepUseCase;
@@ -141,6 +144,7 @@ export function createApiContainer(options: CreateApiContainerOptions = {}): Api
     createInspectionOrder: new CreateInspectionOrderUseCase(uow),
     recordMeasurementsAndJudge: new RecordMeasurementsAndJudgeUseCase(uow),
     saveInspectionDraft: new SaveInspectionDraftUseCase(uow),
+    finalizeInspectionStatus: new FinalizeInspectionStatusUseCase(uow),
     createReinspection: new CreateReinspectionUseCase(uow),
     triggerMrbReview: new TriggerMrbReviewUseCase(uow),
     advanceMrbStep: new AdvanceMrbStepUseCase(uow),

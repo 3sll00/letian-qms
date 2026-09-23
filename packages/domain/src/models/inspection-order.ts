@@ -52,6 +52,10 @@ export class InspectionOrder {
   private processType?: string | undefined;
   private returnDate?: string | undefined;
   private vendorName?: string | undefined;
+  // 030 委外检验录入页业务事实字段（docs/36）：材质牌号 / 执行技术标准 / 检验日期
+  private materialGrade?: string | undefined;
+  private techStandard?: string | undefined;
+  private inspectedDate?: string | undefined;
   // 007 过程检验 (IPQC: 下料检验/滚丝检验/成品检) 工序追溯字段
   private workOrderNo?: string | undefined;
   private blankingLength?: number | undefined;
@@ -105,6 +109,9 @@ export class InspectionOrder {
     processType?: string | undefined;
     returnDate?: string | undefined;
     vendorName?: string | undefined;
+    materialGrade?: string | undefined;
+    techStandard?: string | undefined;
+    inspectedDate?: string | undefined;
     workOrderNo?: string | undefined;
     blankingLength?: number | undefined;
     operatorName?: string | undefined;
@@ -154,6 +161,9 @@ export class InspectionOrder {
     this.processType = params.processType;
     this.returnDate = params.returnDate;
     this.vendorName = params.vendorName;
+    this.materialGrade = params.materialGrade;
+    this.techStandard = params.techStandard;
+    this.inspectedDate = params.inspectedDate;
     this.workOrderNo = params.workOrderNo;
     this.blankingLength = params.blankingLength;
     this.operatorName = params.operatorName;
@@ -305,6 +315,18 @@ export class InspectionOrder {
 
   public getVendorName(): string | undefined {
     return this.vendorName;
+  }
+
+  public getMaterialGrade(): string | undefined {
+    return this.materialGrade;
+  }
+
+  public getTechStandard(): string | undefined {
+    return this.techStandard;
+  }
+
+  public getInspectedDate(): string | undefined {
+    return this.inspectedDate;
   }
 
   public getWorkOrderNo(): string | undefined {
@@ -606,6 +628,9 @@ export class InspectionOrder {
       ...(this.processType !== undefined ? { processType: this.processType } : {}),
       ...(this.returnDate !== undefined ? { returnDate: this.returnDate } : {}),
       ...(this.vendorName !== undefined ? { vendorName: this.vendorName } : {}),
+      ...(this.materialGrade !== undefined ? { materialGrade: this.materialGrade } : {}),
+      ...(this.techStandard !== undefined ? { techStandard: this.techStandard } : {}),
+      ...(this.inspectedDate !== undefined ? { inspectedDate: this.inspectedDate } : {}),
       // 007 过程检验工序追溯字段：此前聚合根完全没有这些属性，重建型用例的 `...orderDto` 展开
       // 传进来后被构造签名静默吞掉，序列化回去就丢了（下料检验台账的断料长度/操作员/设备列）
       ...(this.workOrderNo !== undefined ? { workOrderNo: this.workOrderNo } : {}),

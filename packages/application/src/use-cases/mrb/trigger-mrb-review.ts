@@ -14,7 +14,7 @@ import type {
 } from '@letian/contracts';
 import { ApplicationError } from '../../errors/application-error.js';
 import type { ISecurityContext } from '../../security/security-context.js';
-import type { IUnitOfWork } from '../../tx/unit-of-work.js';
+import type { IUnitOfWork, IUnitOfWorkContext } from '../../tx/unit-of-work.js';
 
 export interface TriggerMrbReviewCommand extends Partial<CreateMRBReviewRequest> {
   inspectionOrderId: string;
@@ -43,144 +43,166 @@ export class TriggerMrbReviewUseCase {
     cmd: TriggerMrbReviewCommand,
     securityCtx?: ISecurityContext
   ): Promise<MRBReviewDTO> {
-    return await this.uow.execute(async (ctx) => {
-      const order = await ctx.inspectionOrders.findById(cmd.inspectionOrderId);
-      if (!order) {
-        throw new ApplicationError(
-          'INSPECTION_ORDER_NOT_FOUND',
-          `未找到检验单 [${cmd.inspectionOrderId}]`,
-          404
-        );
-      }
+    return await this.uow.execute((ctx) => this.runInTransaction(ctx, cmd, securityCtx));
+  }
 
-      const orderDTO = order;
+  public async runInTransaction(
+    ctx: IUnitOfWorkContext,
+    cmd: TriggerMrbReviewCommand,
+    securityCtx?: ISecurityContext
+  ): Promise<MRBReviewDTO> {
+    return await triggerMrbReviewInTransaction(ctx, cmd, securityCtx);
+  }
+}
 
-      if (securityCtx) {
-        // 从物料主数据解析真实分类；查不到时 UNKNOWN 不命中任何白名单（fail-closed）
-        const material = await ctx.materials.getMaterialByCode(orderDTO.materialCode);
-        securityCtx.assertAccess({
-          targetCategory: material?.categoryCode ?? 'UNKNOWN',
-          targetMaterialCode: orderDTO.materialCode,
-        });
-      }
+/**
+ * 「不合格自动触发 MRB 评审单」的事务内实现（docs/43 §4.1）。
+ *
+ * 终判用例必须在**自己的事务**里建单：`execute()` 会另开一个事务（另一条连接），既破坏
+ * 「终判 + 入池 + 建 MRB 单」的原子性，也会与同一批次上的 pg_advisory_xact_lock 叠加成死锁风险。
+ * 因此把事务内实现抽为独立函数，`TriggerMrbReviewUseCase.execute()` 与终判用例共用同一段逻辑，
+ * 区别只在事务边界由谁提供。
+ */
+export async function triggerMrbReviewInTransaction(
+  ctx: IUnitOfWorkContext,
+  cmd: TriggerMrbReviewCommand,
+  securityCtx?: ISecurityContext
+): Promise<MRBReviewDTO> {
+  const order = await ctx.inspectionOrders.findById(cmd.inspectionOrderId);
+  if (!order) {
+    throw new ApplicationError(
+      'INSPECTION_ORDER_NOT_FOUND',
+      `未找到检验单 [${cmd.inspectionOrderId}]`,
+      404
+    );
+  }
 
-      if (orderDTO.status !== 'FAILED') {
-        throw new ApplicationError(
-          'ORDER_STATUS_NOT_FAILED',
-          `只有判定为 FAILED 不合格的检验单可触发 MRB 评审，当前状态为 [${orderDTO.status}]`,
-          400
-        );
-      }
+  const orderDTO = order;
 
-      // 幂等检查：是否已存在关联的 MRB 评审单
-      const existing = await ctx.mrbReviews.findByOrderNo(orderDTO.orderNo);
-      if (existing) {
-        return existing;
-      }
-
-      // 锁定批次，防止进入下一工序
-      await ctx.locks.acquireXactLock(orderDTO.batchNo);
-
-      // 不合格来源类型：显式指定优先，否则按检验环节映射（此前默认值 'CRITICAL_DIMENSION'
-      // 不在 MRBFailCategoryEnum 内，导致流程匹配恒失效，见 docs/20 §3.2 D5）
-      const sourceType = (
-        cmd.sourceType !== undefined &&
-        ['INCOMING_FAIL', 'PROCESS_FAIL', 'SHIPMENT_FAIL', 'SUBCONTRACT_FAIL'].includes(
-          cmd.sourceType
-        )
-          ? cmd.sourceType
-          : mapOrderStageToSourceType(orderDTO.inspectionType)
-      ) as MRBFailCategory;
-
-      // 评审流配置：优先用发起时选定的流程；未选定时按不合格来源类型自动匹配生效流程
-      const failCategory = cmd.failCategory ?? sourceType;
-      const disposition = cmd.preliminaryDisposition ?? 'REWORK';
-      const reviewFlow =
-        cmd.flowId !== undefined
-          ? await ctx.reviewFlows.findById(cmd.flowId)
-          : await ctx.reviewFlows.findApplicableFlow(failCategory);
-
-      const urgencyLevel: 'NORMAL' | 'URGENT' | 'CRITICAL' =
-        cmd.urgencyLevel !== undefined &&
-        ['NORMAL', 'URGENT', 'CRITICAL'].includes(cmd.urgencyLevel)
-          ? (cmd.urgencyLevel as 'NORMAL' | 'URGENT' | 'CRITICAL')
-          : 'NORMAL';
-
-      const reviewNo = `MRB-${Date.now()}-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`;
-      const firstStepApproverRole = reviewFlow?.nodes[0]?.roleCode ?? 'QUALITY_MANAGER';
-
-      const mrbRecord: MRBReviewDTO = {
-        id: crypto.randomUUID(),
-        mrbNo: reviewNo,
-        sourceType,
-        sourceOrderNo: orderDTO.orderNo,
-        batchNo: orderDTO.batchNo,
-        materialCode: orderDTO.materialCode,
-        materialName: orderDTO.materialName,
-        defectDescription:
-          cmd.defectDescription ??
-          cmd.reason ??
-          `检验单 [${orderDTO.orderNo}] 判定不合格，自动触发 MRB 评审`,
-        defectQty: cmd.defectQty ?? orderDTO.failQty,
-        status: 'PENDING_REVIEW',
-        disposition: disposition as MRBDisposition,
-        urgencyLevel,
-        approvers: [],
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        ...(reviewFlow !== null && reviewFlow.id !== undefined
-          ? { reviewFlowId: reviewFlow.id }
-          : {}),
-        ...(cmd.pendingDefectId !== undefined ? { pendingDefectId: cmd.pendingDefectId } : {}),
-        ...(cmd.reviewNotes !== undefined ? { reviewNotes: cmd.reviewNotes } : {}),
-      };
-
-      await ctx.mrbReviews.save(mrbRecord);
-
-      // 将检验单状态更新为 IN_MRB
-      await ctx.inspectionOrders.updateStatus(orderDTO.id ?? cmd.inspectionOrderId, 'IN_MRB_REVIEW');
-
-      // 写入 Outbox 事件
-      await ctx.outbox.append({
-        id: crypto.randomUUID(),
-        aggregateType: 'MRBReview',
-        aggregateId: mrbRecord.id,
-        eventType: 'MRBReviewTriggered',
-        payload: {
-          mrbId: mrbRecord.id,
-          reviewNo: mrbRecord.mrbNo,
-          orderNo: orderDTO.orderNo,
-          batchNo: orderDTO.batchNo,
-          failCategory,
-          preliminaryDisposition: disposition,
-          currentApproverRole: firstStepApproverRole,
-        },
-        traceId: crypto.randomUUID(),
-        occurredAt: new Date(),
-        status: 'PENDING',
-        retryCount: 0,
-      });
-
-      // 记录不可变审计日志
-      await ctx.auditLogs.insert({
-        id: crypto.randomUUID(),
-        traceId: securityCtx?.traceId ?? crypto.randomUUID(),
-        userId: cmd.applicantId,
-        userName: '申请人',
-        action: 'STATUS_CHANGE',
-        resourceType: 'MRB_REVIEW',
-        resourceId: mrbRecord.id,
-        status: 'SUCCESS',
-        diffPatch: {
-          orderNo: orderDTO.orderNo,
-          batchNo: orderDTO.batchNo,
-          failCategory,
-          disposition,
-        },
-        createdAt: new Date().toISOString(),
-      });
-
-      return mrbRecord;
+  if (securityCtx) {
+    // 从物料主数据解析真实分类；查不到时 UNKNOWN 不命中任何白名单（fail-closed）
+    const material = await ctx.materials.getMaterialByCode(orderDTO.materialCode);
+    securityCtx.assertAccess({
+      targetCategory: material?.categoryCode ?? 'UNKNOWN',
+      targetMaterialCode: orderDTO.materialCode,
     });
   }
+
+  if (orderDTO.status !== 'FAILED') {
+    throw new ApplicationError(
+      'ORDER_STATUS_NOT_FAILED',
+      `只有判定为 FAILED 不合格的检验单可触发 MRB 评审，当前状态为 [${orderDTO.status}]`,
+      400
+    );
+  }
+
+  // 幂等检查：是否已存在关联的 MRB 评审单
+  const existing = await ctx.mrbReviews.findByOrderNo(orderDTO.orderNo);
+  if (existing) {
+    return existing;
+  }
+
+  // 锁定批次，防止进入下一工序
+  await ctx.locks.acquireXactLock(orderDTO.batchNo);
+
+  // 不合格来源类型：显式指定优先，否则按检验环节映射（此前默认值 'CRITICAL_DIMENSION'
+  // 不在 MRBFailCategoryEnum 内，导致流程匹配恒失效，见 docs/20 §3.2 D5）
+  const sourceType = (
+    cmd.sourceType !== undefined &&
+    ['INCOMING_FAIL', 'PROCESS_FAIL', 'SHIPMENT_FAIL', 'SUBCONTRACT_FAIL'].includes(
+      cmd.sourceType
+    )
+      ? cmd.sourceType
+      : mapOrderStageToSourceType(orderDTO.inspectionType)
+  ) as MRBFailCategory;
+
+  // 评审流配置：优先用发起时选定的流程；未选定时按不合格来源类型自动匹配生效流程
+  const failCategory = cmd.failCategory ?? sourceType;
+  const disposition = cmd.preliminaryDisposition ?? 'REWORK';
+  const reviewFlow =
+    cmd.flowId !== undefined
+      ? await ctx.reviewFlows.findById(cmd.flowId)
+      : await ctx.reviewFlows.findApplicableFlow(failCategory);
+
+  const urgencyLevel: 'NORMAL' | 'URGENT' | 'CRITICAL' =
+    cmd.urgencyLevel !== undefined &&
+    ['NORMAL', 'URGENT', 'CRITICAL'].includes(cmd.urgencyLevel)
+      ? (cmd.urgencyLevel as 'NORMAL' | 'URGENT' | 'CRITICAL')
+      : 'NORMAL';
+
+  const reviewNo = `MRB-${Date.now()}-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`;
+  const firstStepApproverRole = reviewFlow?.nodes[0]?.roleCode ?? 'QUALITY_MANAGER';
+
+  const mrbRecord: MRBReviewDTO = {
+    id: crypto.randomUUID(),
+    mrbNo: reviewNo,
+    sourceType,
+    sourceOrderNo: orderDTO.orderNo,
+    batchNo: orderDTO.batchNo,
+    materialCode: orderDTO.materialCode,
+    materialName: orderDTO.materialName,
+    defectDescription:
+      cmd.defectDescription ??
+      cmd.reason ??
+      `检验单 [${orderDTO.orderNo}] 判定不合格，自动触发 MRB 评审`,
+    defectQty: cmd.defectQty ?? orderDTO.failQty,
+    status: 'PENDING_REVIEW',
+    disposition: disposition as MRBDisposition,
+    urgencyLevel,
+    approvers: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    ...(reviewFlow !== null && reviewFlow.id !== undefined
+      ? { reviewFlowId: reviewFlow.id }
+      : {}),
+    ...(cmd.pendingDefectId !== undefined ? { pendingDefectId: cmd.pendingDefectId } : {}),
+    ...(cmd.reviewNotes !== undefined ? { reviewNotes: cmd.reviewNotes } : {}),
+  };
+
+  await ctx.mrbReviews.save(mrbRecord);
+
+  // 将检验单状态更新为 IN_MRB
+  await ctx.inspectionOrders.updateStatus(orderDTO.id ?? cmd.inspectionOrderId, 'IN_MRB_REVIEW');
+
+  // 写入 Outbox 事件
+  await ctx.outbox.append({
+    id: crypto.randomUUID(),
+    aggregateType: 'MRBReview',
+    aggregateId: mrbRecord.id,
+    eventType: 'MRBReviewTriggered',
+    payload: {
+      mrbId: mrbRecord.id,
+      reviewNo: mrbRecord.mrbNo,
+      orderNo: orderDTO.orderNo,
+      batchNo: orderDTO.batchNo,
+      failCategory,
+      preliminaryDisposition: disposition,
+      currentApproverRole: firstStepApproverRole,
+    },
+    traceId: crypto.randomUUID(),
+    occurredAt: new Date(),
+    status: 'PENDING',
+    retryCount: 0,
+  });
+
+  // 记录不可变审计日志
+  await ctx.auditLogs.insert({
+    id: crypto.randomUUID(),
+    traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+    userId: cmd.applicantId,
+    userName: cmd.applicantName ?? '申请人',
+    action: 'STATUS_CHANGE',
+    resourceType: 'MRB_REVIEW',
+    resourceId: mrbRecord.id,
+    status: 'SUCCESS',
+    diffPatch: {
+      orderNo: orderDTO.orderNo,
+      batchNo: orderDTO.batchNo,
+      failCategory,
+      disposition,
+    },
+    createdAt: new Date().toISOString(),
+  });
+
+  return mrbRecord;
 }

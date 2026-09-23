@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react';
 import { LogIn, RefreshCw, ShieldCheck, UserRound } from 'lucide-react';
-import logoIcon from '../../assets/logo_icon.png';
 import {
   fetchAuthUsers,
   loginAsDefault,
@@ -91,7 +90,9 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
         <div className="hidden md:flex w-[320px] shrink-0 bg-gradient-to-b from-[#203055] to-[#1E293B] text-white p-8 flex-col justify-between">
           <div>
             <div className="flex items-center gap-2.5">
-              <img src={logoIcon} alt="Logo" className="w-9 h-9 rounded shadow-sm object-contain" />
+              <span className="w-9 h-9 rounded-[9px] bg-gradient-to-br from-[#325CEE] to-[#5D64F0] shadow-sm flex items-center justify-center text-white text-[19px] font-bold leading-none select-none">
+                L
+              </span>
               <span className="text-lg font-semibold tracking-wide">乐天QMS</span>
             </div>
             <p className="text-[13px] text-slate-300/90 mt-6 leading-relaxed">

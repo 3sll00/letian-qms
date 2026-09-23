@@ -1,5 +1,5 @@
 import { ErrorCode, type ErrorCodeType, type MaterialPermission } from '@letian/contracts';
-import { PBACEvaluator } from '@letian/domain';
+import { PBACEvaluator, type SupplierDimensionMode } from '@letian/domain';
 import { ForbiddenError } from '../errors/application-error.js';
 
 /**
@@ -19,6 +19,7 @@ export interface ISecurityContext {
     targetCategory: string;
     targetMaterialCode: string;
     targetSupplierCode?: string;
+    supplierDimension?: SupplierDimensionMode;
   }): boolean;
 
   /**
@@ -28,6 +29,7 @@ export interface ISecurityContext {
     targetCategory: string;
     targetMaterialCode: string;
     targetSupplierCode?: string;
+    supplierDimension?: SupplierDimensionMode;
     operationName?: string;
   }): void;
 
@@ -38,6 +40,7 @@ export interface ISecurityContext {
     targetCategory: string;
     targetMaterialCode: string;
     targetSupplierCode?: string;
+    supplierDimension?: SupplierDimensionMode;
     operationName?: string;
   }): void;
 }
@@ -69,6 +72,7 @@ export class SecurityContext implements ISecurityContext {
     targetCategory: string;
     targetMaterialCode: string;
     targetSupplierCode?: string;
+    supplierDimension?: SupplierDimensionMode;
   }): boolean {
     return PBACEvaluator.hasPermission({
       permissions: this.permissions,
@@ -77,6 +81,9 @@ export class SecurityContext implements ISecurityContext {
       ...(target.targetSupplierCode !== undefined
         ? { targetSupplierCode: target.targetSupplierCode }
         : {}),
+      ...(target.supplierDimension !== undefined
+        ? { supplierDimension: target.supplierDimension }
+        : {}),
     });
   }
 
@@ -84,6 +91,7 @@ export class SecurityContext implements ISecurityContext {
     targetCategory: string;
     targetMaterialCode: string;
     targetSupplierCode?: string;
+    supplierDimension?: SupplierDimensionMode;
     operationName?: string;
   }): void {
     const allowed = this.hasPermission(target);
@@ -107,6 +115,7 @@ export class SecurityContext implements ISecurityContext {
     targetCategory: string;
     targetMaterialCode: string;
     targetSupplierCode?: string;
+    supplierDimension?: SupplierDimensionMode;
     operationName?: string;
   }): void {
     this.assertPermission(target);

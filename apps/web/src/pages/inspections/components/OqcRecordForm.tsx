@@ -13,6 +13,7 @@ import { useMatchedPlan } from "../../../hooks/useMatchedPlan";
 import {
   DECISION_LABEL,
   judgeIndicatorRow,
+  planSectionEmptyText,
   parseMeasuredNumber,
   splitIndicatorRows,
   summarizeJudgements,
@@ -370,10 +371,12 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
    *   ① POST /inspections/{id}/submit-measurements —— 只下发本单方案快照内、且已填写的指标项；
    *      存在空项时按草稿落库（isDraft:true），避免「未录入」被领域终判成不合格并汇入待审池；
    *   ② POST /inspections/{id}/status —— 终判：合格 -> PASSED(+judgment PASSED)、
-   *      不合格 -> FAILED(+judgment FAILED)、特采 -> FAILED（**不落 CONCESSION**）。
+   *      不合格 -> FAILED(+judgment FAILED)、特采 -> FAILED（**不落 CONCESSION**，
+   *      仅以 preliminaryDisposition 表达处置意图）。
    *      「特采放行」是 MRB 会签结论且领域要求客户签核凭证（CONCESSION 必带凭证），
-   *      检验员在录入表单里无权直接把单据判成特采放行；此处只把单据推进到不合格待审池，
-   *      由 MRB 决定特采 / 返工 / 结单，并把申请写进备注。
+   *      检验员在录入表单里无权直接把单据判成特采放行；判定不合格后服务端会**自动创建
+   *      MRB 评审单**（docs/43，无人工发起环节），由 MRB 会签决定特采 / 返工 / 退货 / 报废，
+   *      这里只把检验员的处置意图（拟定处置）与申请写进备注留痕。
    * 回执：绿字显示服务端返回的检验单号；失败按 ApiError 文案红字就地提示（不再 alert 假成功）。
    */
   const handleSubmitInternal = async () => {
@@ -419,6 +422,9 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
         decision === "特采"
           ? [conclusion.trim(), "检验员申请特采（让步放行），转 MRB 评审"].filter((part) => part !== "").join("；")
           : conclusion.trim();
+      // 拟定处置（docs/43 §4.4）：特采 / 让步接收 -> CONCESSION，作为自动创建的 MRB 单
+      // 「处置方式」列初值（终审时由处置决策覆盖；合格不下发）。
+      const preliminaryDisposition = decision === "特采" ? "CONCESSION" : undefined;
       const finished = await api.post<{ orderNo?: string }>(
         `/inspections/${encodeURIComponent(orderId)}/status`,
         {
@@ -427,12 +433,17 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
           failQty: decision === "合格" ? 0 : qty !== null ? qty : 0,
           ...(decision === "特采" ? {} : { judgment: targetStatus }),
           ...(note !== "" ? { remark: note, inspectionNotes: note } : {}),
+          ...(preliminaryDisposition !== undefined ? { preliminaryDisposition } : {}),
         }
       );
 
       const orderNo = finished.orderNo ?? certNo;
       setSubmitted({ orderId, orderNo });
-      setSubmitReceipt(`已保存并终判：${orderNo}（判定：${decision}）`);
+      setSubmitReceipt(
+        decision === "合格"
+          ? `已保存并终判：${orderNo}（判定：合格）`
+          : `已保存并终判：${orderNo}（判定：${decision}）· 已自动发起 MRB 评审，请到【MRB不合格品处置】查看`
+      );
     } catch (err) {
       setSubmitError(errorMessage(err));
     } finally {
@@ -618,7 +629,7 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
         <div className="p-4 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-8 gap-3 text-xs">
           {chemElements.length === 0 && (
             <div className="col-span-full text-center text-[11px] text-slate-400 py-3">
-              本单质检方案未包含化学成分类指标项，无需录入。
+              {planSectionEmptyText(planMatch.status, '化学成分')}
             </div>
           )}
           {chemElements.map((el, idx) => {
@@ -698,7 +709,7 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
             {mechProperties.length === 0 && (
               <tr>
                 <td colSpan={5} className="py-6 text-center text-[11px] text-slate-400">
-                  本单质检方案未包含力学与物理性能类指标项，无需录入。
+                  {planSectionEmptyText(planMatch.status, '力学与物理性能')}
                 </td>
               </tr>
             )}
@@ -767,7 +778,7 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
             {dimItems.length === 0 && (
               <tr>
                 <td colSpan={5} className="py-6 text-center text-[11px] text-slate-400">
-                  本单质检方案未包含尺寸与外观类指标项，无需录入。
+                  {planSectionEmptyText(planMatch.status, '尺寸与外观')}
                 </td>
               </tr>
             )}

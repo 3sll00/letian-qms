@@ -16,6 +16,8 @@
  *   5. **不得出现伪造值**：接口字段为空时页面必须是 `--`（尤其不允许把 sampleQty 当「数量」）；
  *   6. 「操作」列按状态分派：待检验 -> 检验；成品检「检验中」-> 继续；其余 -> 详情；
  *   7. 台账筛选参数真正落到 SQL（命中 > 0，且用不存在的值探测必须为 0）。
+ *   8. 总览看板（子页默认页）：管控总量汇总条与三工序卡片同为浅色白底、无深色渐变，5 项指标取值
+ *      = `GET /inspections/ipqc-overview` 的 `summary`（页头总量 = `summary.total` 批次）。
  *
  * 另含一条写路径往返断言（建单 -> 读回）：`POST /inspections` 透传的 inspectorId 必须落库，
  * 并由读侧按员工主数据补齐「检验人」姓名；跑完自动删除该验收单，可反复执行。
@@ -167,6 +169,8 @@ const PAGES = [
     ],
     hasInspector: false,
     hasStar: false,
+    /** 需求（docs/40）：仅下料 / 滚丝开放勾选列与【检视】批量判定；成品检不开放 */
+    bulk: true,
     probes: [
       { qs: (r) => `type=IPQC_CT&operatorName=${encodeURIComponent(r.operatorName)}`, ok: (t) => t > 0, label: 'operatorName 落到 SQL' },
       { qs: (r) => `type=IPQC_CT&equipmentCode=${encodeURIComponent(r.equipmentCode)}`, ok: (t) => t > 0, label: 'equipmentCode 落到 SQL' },
@@ -185,6 +189,7 @@ const PAGES = [
     ],
     hasInspector: true,
     hasStar: false,
+    bulk: true,
     probes: [
       { qs: (r) => `type=IPQC_RL&operatorName=${encodeURIComponent(r.operatorName)}`, ok: (t) => t > 0, label: 'operatorName 落到 SQL' },
       { qs: (r) => `type=IPQC_RL&equipmentCode=${encodeURIComponent(r.equipmentCode)}`, ok: (t) => t > 0, label: 'equipmentCode 落到 SQL' },
@@ -201,6 +206,7 @@ const PAGES = [
     specific: [{ col: '终检组', field: 'inspectionTeam', fmt: 'text' }],
     hasInspector: true,
     hasStar: true,
+    bulk: false,
     probes: [
       { qs: (r) => `type=IPQC_FN&inspectionTeam=${encodeURIComponent(r.inspectionTeam)}`, ok: (t) => t > 0, label: 'inspectionTeam 落到 SQL' },
       { qs: () => 'type=IPQC_FN&inspectionTeam=NOPE-ZZZ', ok: (t) => t === 0, label: '不存在的 inspectionTeam 命中 0' },
@@ -257,6 +263,12 @@ function resolvePg() {
       rows: rows.length,
     });
   }
+
+  const overviewRes = await httpJson(`${API_BASE}/inspections/ipqc-overview`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  const overviewApi = overviewRes.body || {};
+  log('baseline ipqc-overview summary:', overviewApi.summary);
 
   const userDataDir = path.join(OUT_DIR, 'chrome-profile-ipqc-ledger');
   fs.mkdirSync(userDataDir, { recursive: true });
@@ -329,17 +341,130 @@ function resolvePg() {
     return target.innerText.trim();
   })()`);
 
+  /**
+   * 读表：业务列口径见 docs/29 §2 / docs/30 §2（11 列）。
+   * 下料 / 滚丝两页最左侧新增「行选择列」（docs/40），页头是**无文本的复选框**、
+   * 行首是行复选框 —— 读表时先剥离该列，再按 11 列业务列逐列对账（勾选列不是业务列）。
+   */
   const readTable = () => evalJs(cdp, `(() => {
-    const heads = [...document.querySelectorAll('th')].map((t) => t.innerText.trim());
-    const rows = [...document.querySelectorAll('tbody tr')].map((tr) =>
-      [...tr.querySelectorAll('td')].map((td) => td.innerText.trim()));
+    const headCells = [...document.querySelectorAll('th')];
+    const hasSelectCol = headCells.length > 0 && !!headCells[0].querySelector('input[type="checkbox"]');
+    const heads = (hasSelectCol ? headCells.slice(1) : headCells).map((t) => t.innerText.trim());
+    const rows = [...document.querySelectorAll('tbody tr')].map((tr) => {
+      const cells = [...tr.querySelectorAll('td')];
+      const dropSelectCell = hasSelectCol && cells.length > 0 && !!cells[0].querySelector('input[type="checkbox"]');
+      return (dropSelectCell ? cells.slice(1) : cells).map((td) => td.innerText.trim());
+    });
     const text = document.body.innerText;
     const m = text.match(/共\\s*(\\d+)\\s*条记录/);
-    return { heads, rows, statedTotal: m ? Number(m[1]) : null };
+    return { heads, hasSelectCol, rows, statedTotal: m ? Number(m[1]) : null };
+  })()`);
+
+  /** 勾选框（页头全选 / 行选择）与表格右上角【检视】按钮的现场快照（docs/40 §3.1 §3.2） */
+  const readBulkControls = () => evalJs(cdp, `(() => {
+    const selectAll = document.querySelector('th input[type="checkbox"]');
+    const rowBoxes = [...document.querySelectorAll('tbody input[type="checkbox"]')];
+    const btn = [...document.querySelectorAll('button')].find((b) => b.innerText.trim() === '检视');
+    const card = btn ? btn.closest('div.bg-white') : null;
+    const table = document.querySelector('table');
+    const countText = [...document.querySelectorAll('span')]
+      .map((s) => s.innerText || '')
+      .find((t) => /已勾选\\s*\\d+\\s*条/.test(t)) || null;
+    return {
+      selectAll: !!selectAll,
+      selectAllIndeterminate: selectAll ? !!selectAll.indeterminate : null,
+      checkedRows: rowBoxes.filter((b) => b.checked).length,
+      rowBoxes: rowBoxes.length,
+      button: btn ? btn.innerText.trim() : null,
+      buttonDisabled: btn ? !!btn.disabled : null,
+      /** 表格右上角：按钮必须落在「包含该表格的卡片」内，且位于卡片右边界附近 */
+      buttonInTableCard: !!(card && table && card.contains(table)),
+      buttonAtRight: (() => {
+        if (!btn || !card) return false;
+        const b = btn.getBoundingClientRect();
+        const c = card.getBoundingClientRect();
+        return b.right <= c.right && c.right - b.right < 32 && b.top < c.top + 80;
+      })(),
+      countText,
+    };
+  })()`);
+
+  /** 点页头全选 / 行复选框（勾选态是纯前端状态，不落库） */
+  const clickSelectAll = () => evalJs(cdp, `(() => {
+    const box = document.querySelector('th input[type="checkbox"]');
+    if (!box) return null;
+    box.click();
+    return true;
   })()`);
 
   log('nav IPQC:', await clickByText('过程检验(IPQC)'));
   await sleep(4000);
+
+  // ============ 总览看板：汇总条浅色口径 + 取值来自接口 ============
+  const overview = await evalJs(cdp, `(() => {
+    const title = [...document.querySelectorAll('h2')].find((h) => h.innerText.includes('过程检验总览'));
+    const scope = title ? title.closest('div.space-y-5') || title.parentElement.parentElement : null;
+    const label = [...document.querySelectorAll('div')].find((d) => (d.innerText || '').trim() === '今日过程检验管控总量');
+    let banner = label;
+    let bannerBg = 'rgba(0, 0, 0, 0)';
+    let bannerImg = 'none';
+    while (banner && banner !== document.body) {
+      const cs = getComputedStyle(banner);
+      if (cs.backgroundColor && cs.backgroundColor !== 'rgba(0, 0, 0, 0)') {
+        bannerBg = cs.backgroundColor;
+        bannerImg = cs.backgroundImage;
+        break;
+      }
+      banner = banner.parentElement;
+    }
+    const totalEl = banner
+      ? [...banner.querySelectorAll('div')].find((d) => /^\\d+ 批次$/.test((d.innerText || '').trim()))
+      : null;
+    const metrics = {};
+    if (banner) {
+      for (const cell of banner.querySelectorAll('div')) {
+        const spans = cell.querySelectorAll(':scope > span');
+        if (spans.length === 2) metrics[spans[0].innerText.trim()] = spans[1].innerText.trim();
+      }
+    }
+    // 浅色校验只针对过程检验页面自身子树（侧边栏/顶栏是应用外壳）
+    const darkEls = scope
+      ? [...scope.querySelectorAll('div,section,table,thead,tr,td,th')]
+          .filter((el) => {
+            const c = getComputedStyle(el).backgroundColor || '';
+            const m = c.match(/rgba?\((\d+), (\d+), (\d+)(?:, ([\d.]+))?\)/);
+            if (!m) return false;
+            const alpha = m[4] === undefined ? 1 : Number(m[4]);
+            if (alpha === 0) return false;
+            const lum = (Number(m[1]) + Number(m[2]) + Number(m[3])) / 3;
+            return lum < 140 && el.clientHeight > 30;
+          })
+          .slice(0, 3)
+          .map((el) => ({ cls: el.className.toString().slice(0, 80), bg: getComputedStyle(el).backgroundColor }))
+      : [];
+    return { hasTitle: title !== undefined, bannerBg, bannerImg, total: totalEl ? totalEl.innerText.trim() : null, metrics, darkEls };
+  })()`);
+  log('overview snapshot:', overview);
+  await shot('ipqc-overview-board.png');
+
+  const summaryApi = overviewApi.summary || {};
+  const expectedMetrics = {
+    待检排队: String(summaryApi.pending),
+    检验中: String(summaryApi.inspecting),
+    合格放行: String(summaryApi.passed),
+    不合格拦截: String(summaryApi.failed),
+    综合合格率: `${summaryApi.passRate}%`,
+  };
+  check('总览看板：页头「过程检验总览 (IPQC)」', overview.hasTitle === true);
+  check(
+    '总览看板：管控总量汇总条为浅色白底（与三工序卡片同底色口径）',
+    overview.bannerBg === 'rgb(255, 255, 255)' && overview.bannerImg === 'none',
+    { bg: overview.bannerBg, img: overview.bannerImg }
+  );
+  check('总览看板：汇总条 5 项指标齐全且顺序一致', JSON.stringify(Object.keys(overview.metrics)) === JSON.stringify(Object.keys(expectedMetrics)), overview.metrics);
+  check('总览看板：汇总条取值 = 接口 summary', JSON.stringify(overview.metrics) === JSON.stringify(expectedMetrics), { page: overview.metrics, api: expectedMetrics });
+  check('总览看板：页头总量 = 接口 summary.total 批次', overview.total === `${summaryApi.total} 批次`, { page: overview.total, api: summaryApi.total });
+  check('浅色主题：过程检验总览子树无深色容器', overview.darkEls.length === 0, overview.darkEls);
 
   for (let p = 0; p < PAGES.length; p++) {
     const page = PAGES[p];
@@ -369,6 +494,88 @@ function resolvePg() {
       legacy.every((h) => !table.heads.includes(h)),
       table.heads
     );
+
+    // ============ 勾选列 + 表格右上角【检视】按钮（需求口径：docs/40 §3.1 §3.2 §3.6） ============
+    const bulk0 = await readBulkControls();
+    log(`[${page.name}] bulk controls:`, bulk0);
+    check(
+      `${page.name}：表左侧${page.bulk ? '有' : '无'}行选择列 + 页头全选复选框（每行一个）`,
+      table.hasSelectCol === page.bulk &&
+        bulk0.selectAll === page.bulk &&
+        (!page.bulk || bulk0.rowBoxes === table.rows.length),
+      { hasSelectCol: table.hasSelectCol, selectAll: bulk0.selectAll, rowBoxes: bulk0.rowBoxes, rows: table.rows.length }
+    );
+    check(
+      `${page.name}：表格右上角${page.bulk ? '有' : '无'}【检视】按钮（初始未勾选 -> 禁用）`,
+      page.bulk
+        ? bulk0.button === '检视' &&
+            bulk0.buttonInTableCard === true &&
+            bulk0.buttonAtRight === true &&
+            bulk0.buttonDisabled === true &&
+            bulk0.countText === null
+        : bulk0.button === null,
+      bulk0
+    );
+
+    if (page.bulk) {
+      // 全选 / 取消全选（纯前端勾选态，不落库）
+      await clickSelectAll();
+      await sleep(700);
+      const bulkAll = await readBulkControls();
+      check(
+        `${page.name}：点页头复选框「全选本页」（N/N 行勾选 + 「已勾选 N 条」+ 按钮可用）`,
+        bulkAll.checkedRows === table.rows.length &&
+          bulkAll.checkedRows > 0 &&
+          bulkAll.buttonDisabled === false &&
+          bulkAll.countText !== null &&
+          new RegExp(`已勾选\\s*${table.rows.length}\\s*条`).test(bulkAll.countText),
+        bulkAll
+      );
+      await clickSelectAll();
+      await sleep(700);
+      const bulkNone = await readBulkControls();
+      check(
+        `${page.name}：再点一次「取消全选」（0 勾选 + 【检视】回到禁用）`,
+        bulkNone.checkedRows === 0 && bulkNone.buttonDisabled === true && bulkNone.countText === null,
+        bulkNone
+      );
+      // 行级勾选：勾第 1 行 -> 1 勾选（多行台账须呈页头半选态，单行台账即"已全选"）
+      await evalJs(cdp, `(() => {
+        const box = document.querySelector('tbody input[type="checkbox"]');
+        if (box) box.click();
+        return !!box;
+      })()`);
+      await sleep(600);
+      const bulkOne = await readBulkControls();
+      const singleRow = table.rows.length === 1;
+      check(
+        `${page.name}：行复选框可单选（勾 1 行 -> 1 勾选 + 【检视】可用${singleRow ? '' : ' + 页头半选态'}）`,
+        bulkOne.checkedRows === 1 &&
+          bulkOne.buttonDisabled === false &&
+          (singleRow ? bulkOne.selectAllIndeterminate === false : bulkOne.selectAllIndeterminate === true),
+        { ...bulkOne, rows: table.rows.length }
+      );
+      if (!singleRow) {
+        // 半选态下点页头 = 全选（并入已有勾选，不误清空）
+        await clickSelectAll();
+        await sleep(700);
+        const bulkMerged = await readBulkControls();
+        check(
+          `${page.name}：半选态下点页头复选框 = 全选（并入已有勾选，不误清空）`,
+          bulkMerged.checkedRows === table.rows.length,
+          bulkMerged
+        );
+      }
+      // 收尾：清空勾选，避免影响后续断言的初始态
+      await clickSelectAll();
+      await sleep(700);
+      const bulkClean = await readBulkControls();
+      check(
+        `${page.name}：勾选可完全清空（0 勾选 + 【检视】禁用 + 无「已勾选」文案）`,
+        bulkClean.checkedRows === 0 && bulkClean.buttonDisabled === true && bulkClean.countText === null,
+        bulkClean
+      );
+    }
 
     // ============ 条数口径 ============
     check(`${page.name}：页面条数 = 接口命中总数`, table.statedTotal === apiTotal, {
@@ -501,12 +708,216 @@ function resolvePg() {
       const { Client } = resolvePg();
       const db = new Client({ connectionString: DB_URL });
       await db.connect();
+      // 判定不合格即自动建 MRB 单（docs/43）：mrb_reviews 只存检验单号、无外键级联，
+      // 必须在检验单删除前按单号回溯清理，否则留下「源单已删」的孤儿评审工单污染 MRB 列表。
+      const mrbDel = await db.query(
+        'DELETE FROM mrb_reviews WHERE source_order_no IN (SELECT order_no FROM inspection_orders WHERE batch_no = $1)',
+        [batchNo]
+      );
       const del = await db.query('DELETE FROM inspection_orders WHERE batch_no = $1', [batchNo]);
       await db.query('DELETE FROM outbox_events WHERE aggregate_id = $1', [createdId ?? '']);
       await db.end();
-      log('cleanup: deleted inspection_orders rows =', del.rowCount);
+      log('cleanup: deleted inspection_orders rows =', del.rowCount, '/ mrb_reviews rows =', mrbDel.rowCount);
     } catch (err) {
       log('cleanup FAILED（请手工清理 batch_no=' + batchNo + '）:', String(err && err.message ? err.message : err));
+    }
+  }
+
+  // ============ 6. 批量勾选 +【检视】统一判定写路径往返（docs/40） ============
+  //
+  // 现场：滚丝台账按「生产工单」筛出验收批 -> 页头全选 -> 表格右上角【检视】-> 合格 / 不合格 -> 确定。
+  // 断言：勾选两单统一落库（status / judgment / 数量），判不合格两单全部自动汇入不合格待审核池（docs/39 §4.1）；
+  // 跑完自动清理验收单与池条目，可反复执行。
+  const uiSetInputByPlaceholder = (placeholder, value) =>
+    evalJs(cdp, `(() => {
+      const input = [...document.querySelectorAll('input')].find((i) => i.placeholder === ${JSON.stringify(placeholder)});
+      if (!input) return null;
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(input, ${JSON.stringify(value)});
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return input.value;
+    })()`);
+
+  /** 只在最上层弹窗内点按钮（避免命中台账里的同名文字 / 被遮挡元素） */
+  const clickModalButton = (label) =>
+    evalJs(cdp, `(() => {
+      const modal = [...document.querySelectorAll('div.fixed.inset-0')].pop();
+      if (!modal) return null;
+      const btn = [...modal.querySelectorAll('button')].find((b) => (b.innerText || '').trim().startsWith(${JSON.stringify(label)}));
+      if (!btn || btn.disabled) return null;
+      btn.click();
+      return btn.innerText.trim();
+    })()`);
+
+  const createVerifyOrder = async (batch) => {
+    const res = await httpJson(`${API_BASE}/inspections`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        inspectionType: 'IPQC_RL',
+        materialCode: 'MAT-THRD-M6-25',
+        batchNo: batch,
+        sampleQty: 32,
+        totalQty: 800,
+        operatorName: '批量检视验收',
+        equipmentCode: 'EQ-RL-98',
+        processStep: '手工滚牙',
+      }),
+    });
+    return { status: res.status, id: res.body?.id ?? null, orderNo: res.body?.orderNo ?? null };
+  };
+
+  /** 台账按「生产工单」（= work_order_no，为空按 batch_no 兜底）筛出验收批 */
+  const readBatchLedger = async (batch) => {
+    const res = await apiGet(`type=IPQC_RL&workOrderNo=${encodeURIComponent(batch)}&page=1&pageSize=10`);
+    return { total: res.body.total, items: res.body.items ?? [] };
+  };
+
+  const waitForStatuses = async (batch, expected, timeoutMs = 25000) => {
+    const deadline = Date.now() + timeoutMs;
+    let last = { total: 0, items: [] };
+    while (Date.now() < deadline) {
+      last = await readBatchLedger(batch);
+      if (last.total === 2 && last.items.every((row) => row.status === expected)) return last;
+      await sleep(700);
+    }
+    return last;
+  };
+
+  /** 一轮完整 UI 操作：筛选 -> 全选 -> 检视 -> 选结论 -> 确定 */
+  const runBulkInspect = async (batch, verdictLabel) => {
+    const steps = {};
+    steps.filter = await uiSetInputByPlaceholder('MES生产工单号', batch);
+    await sleep(300);
+    steps.search = await clickByText('查询');
+    await sleep(4000);
+    steps.rows = (await readTable()).rows.length;
+    steps.selectAll = await clickSelectAll();
+    await sleep(600);
+    steps.selected = (await readBulkControls()).checkedRows;
+    steps.openModal = await evalJs(cdp, `(() => {
+      const btn = [...document.querySelectorAll('button')].find((b) => b.innerText.trim() === '检视');
+      if (!btn || btn.disabled) return null;
+      btn.click();
+      return true;
+    })()`);
+    await sleep(700);
+    steps.verdict = await clickModalButton(verdictLabel);
+    await sleep(300);
+    steps.confirm = await clickModalButton('确定');
+    return steps;
+  };
+
+  const bulkPassBatch = `VERIFY-IPQC-BULK-PASS-${Date.now()}`;
+  const bulkFailBatch = `VERIFY-IPQC-BULK-FAIL-${Date.now()}`;
+  let bulkCreatedIds = [];
+  let bulkCleanupBatchNos = [];
+  try {
+    const passOrders = [await createVerifyOrder(bulkPassBatch), await createVerifyOrder(bulkPassBatch)];
+    const failOrders = [await createVerifyOrder(bulkFailBatch), await createVerifyOrder(bulkFailBatch)];
+    bulkCreatedIds = [...passOrders, ...failOrders].map((o) => o.id).filter((id) => id !== null);
+    bulkCleanupBatchNos = [bulkPassBatch, bulkFailBatch];
+    check(
+      '批量检视：验收单建单成功（合格批 2 单 + 不合格批 2 单）',
+      [...passOrders, ...failOrders].every((o) => o.status === 201 && o.id !== null) && bulkCreatedIds.length === 4,
+      [...passOrders, ...failOrders].map((o) => ({ status: o.status, orderNo: o.orderNo }))
+    );
+    check(
+      '批量检视：新建单初始状态为「待检验」（未判定前不得凭空合格）',
+      (await readBatchLedger(bulkPassBatch)).items.every((row) => row.status === 'PENDING'),
+      (await readBatchLedger(bulkPassBatch)).items.map((row) => row.status)
+    );
+
+    // 上一段逐页对账停在「成品检」页，先回到总览再进滚丝台账
+    await clickByText('返回总览');
+    await sleep(2500);
+    await clickByText('进入滚丝台账');
+    await sleep(4000);
+
+    // ---- 统一合格 ----
+    const passSteps = await runBulkInspect(bulkPassBatch, '合格');
+    log('bulk PASS steps:', passSteps);
+    const passRows = await waitForStatuses(bulkPassBatch, 'PASSED');
+    check(
+      '批量检视【合格】：全选 2 条 -> 统一判定为合格并逐条落库（status / judgment）',
+      passSteps.rows === 2 && passSteps.selected === 2 && passRows.total === 2 &&
+        passRows.items.every((row) => row.status === 'PASSED' && row.overallDecision === 'PASSED'),
+      { steps: passSteps, rows: passRows.items.map((r) => ({ orderNo: r.orderNo, status: r.status, overallDecision: r.overallDecision })) }
+    );
+    check(
+      '批量检视【合格】：数量按本单抽样数落库（passQty=32 / failQty=0）',
+      passRows.items.every((row) => row.passQty === 32 && row.failQty === 0),
+      passRows.items.map((r) => ({ orderNo: r.orderNo, passQty: r.passQty, failQty: r.failQty }))
+    );
+    const passNotice = await evalJs(cdp, `(() => {
+      const el = [...document.querySelectorAll('div')].find((d) => /^已将勾选的\\s*2\\s*条/.test((d.innerText || '').trim()));
+      return el ? el.innerText.trim().split('\\n')[0] : null;
+    })()`);
+    check('批量检视【合格】：台账给出绿色结果提示条', passNotice !== null, passNotice);
+
+    // ---- 统一不合格 ----
+    const failSteps = await runBulkInspect(bulkFailBatch, '不合格');
+    log('bulk FAIL steps:', failSteps);
+    const failRows = await waitForStatuses(bulkFailBatch, 'FAILED');
+    check(
+      '批量检视【不合格】：全选 2 条 -> 统一判定为不合格并逐条落库（status / judgment）',
+      failSteps.rows === 2 && failSteps.selected === 2 && failRows.total === 2 &&
+        failRows.items.every((row) => row.status === 'FAILED' && row.overallDecision === 'FAILED'),
+      { steps: failSteps, rows: failRows.items.map((r) => ({ orderNo: r.orderNo, status: r.status, overallDecision: r.overallDecision })) }
+    );
+    check(
+      '批量检视【不合格】：数量按本单抽样数落库（passQty=0 / failQty=32）',
+      failRows.items.every((row) => row.passQty === 0 && row.failQty === 32),
+      failRows.items.map((r) => ({ orderNo: r.orderNo, passQty: r.passQty, failQty: r.failQty }))
+    );
+
+    const { Client } = resolvePg();
+    const db = new Client({ connectionString: DB_URL });
+    await db.connect();
+    const pooled = await db.query(
+      'SELECT count(*)::int AS n FROM pending_mrb_items WHERE source_order_id = ANY($1::uuid[])',
+      [failOrders.map((o) => o.id)]
+    );
+    const notPooled = await db.query(
+      'SELECT count(*)::int AS n FROM pending_mrb_items WHERE source_order_id = ANY($1::uuid[])',
+      [passOrders.map((o) => o.id)]
+    );
+    const audited = await db.query(
+      // 物理列口径：audit_logs.entity_name / entity_id（资源类型与资源 ID 的映射见 audit-log-repository）
+      "SELECT count(*)::int AS n FROM audit_logs WHERE entity_name = 'INSPECTION_ORDER' AND action = 'STATUS_CHANGE' AND entity_id = ANY($1::text[])",
+      [bulkCreatedIds]
+    );
+    await db.end();
+    check(
+      '批量检视【不合格】：2 单全部自动汇入不合格待审核池（docs/39 §4.1），合格批不入池',
+      pooled.rows[0].n === 2 && notPooled.rows[0].n === 0,
+      { pooled: pooled.rows[0].n, passedPooled: notPooled.rows[0].n }
+    );
+    check('批量检视：4 条终判各留一条审计记录（逐单可追溯）', audited.rows[0].n === 4, audited.rows[0]);
+  } catch (err) {
+    check('批量检视：写路径往返用例执行完成', false, String(err && err.message ? err.message : err));
+  } finally {
+    try {
+      const { Client } = resolvePg();
+      const db = new Client({ connectionString: DB_URL });
+      await db.connect();
+      if (bulkCreatedIds.length > 0) {
+        const mrbDel = await db.query(
+          'DELETE FROM mrb_reviews WHERE source_order_no IN (SELECT order_no FROM inspection_orders WHERE id = ANY($1::uuid[]))',
+          [bulkCreatedIds]
+        );
+        await db.query('DELETE FROM pending_mrb_items WHERE source_order_id = ANY($1::uuid[])', [bulkCreatedIds]);
+        // outbox_events.aggregate_id 是 varchar（不是 uuid），必须按 text 比较
+        await db.query('DELETE FROM outbox_events WHERE aggregate_id = ANY($1::text[])', [bulkCreatedIds]);
+        const del = await db.query('DELETE FROM inspection_orders WHERE id = ANY($1::uuid[])', [bulkCreatedIds]);
+        log('bulk cleanup: deleted inspection_orders rows =', del.rowCount, '/ mrb_reviews rows =', mrbDel.rowCount);
+      }
+      await db.end();
+    } catch (err) {
+      log(
+        'bulk cleanup FAILED（请手工清理 batch_no=' + bulkCleanupBatchNos.join(' / ') + '）:',
+        String(err && err.message ? err.message : err)
+      );
     }
   }
 

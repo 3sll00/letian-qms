@@ -61,6 +61,10 @@ export interface CreateInspectionOrderCommand extends Partial<CreateInspectionOr
   processType?: string;
   returnDate?: string;
   vendorName?: string;
+  /** 030 委外检验录入页业务事实字段（docs/36）：材质牌号 / 执行技术标准 / 检验日期 */
+  materialGrade?: string;
+  techStandard?: string;
+  inspectedDate?: string;
   mandatoryGate?: boolean;
   planId?: string;
   planVersionNo?: string;
@@ -256,6 +260,11 @@ export class CreateInspectionOrderUseCase {
         processType: cmd.processType,
         returnDate: cmd.returnDate,
         vendorName: cmd.vendorName,
+        // 030 委外检验录入页业务事实字段：空串/纯空白一律视作「未提供」（nonBlank），
+        // 不落 NULL 覆盖既有值（与同文件 specification / unit 的归一化口径一致）
+        materialGrade: nonBlank(cmd.materialGrade),
+        techStandard: nonBlank(cmd.techStandard),
+        inspectedDate: nonBlank(cmd.inspectedDate),
         // 台账「检验人」列（inspection_orders.inspector_id / inspector_name）：契约可传，缺省保持 undefined，
         // 由读侧按员工主数据补齐；此处不做任何推导（见 docs/30 §3）
         inspectorId: cmd.inspectorId,

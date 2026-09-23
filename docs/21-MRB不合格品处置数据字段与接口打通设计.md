@@ -11,7 +11,9 @@
 
 ## 1. 背景与业务目标
 
-PRD（`01-PRD.md` §3.7）与原型 `prototypes/WPS图片(13).png` 要求 MRB 不合格品处置是「不合格判定 → 待审核池 → 多方会签评审 → 最终处置闭环」的单一入口。上一阶段已把原【不合格待审核池】与【MRB评审工单】两个独立页面合并为单页（见 `19-MRB不合格品处置页整合设计.md`），但合并只解决了**界面层**的入口收敛。
+> **口径变更（2026-09-23）**：本文档 §1~§11 成文于「两阶段（统一待审核池 + 逐条人工发起）」时期；客户确认「不合格判定后不需要人工发起环节」后，已改为**判定不合格即同事务自动创建 MRB 评审单**，详见 `43-不合格判定自动发起MRB评审设计.md`。本文档的**字段、列、接口与权限口径全部继续有效**，仅「池状态停留在 `PENDING_INITIATE` 等待人工发起」这一环节被取消（自动建单后条目即时转 `INITIATED`）。
+
+PRD（`01-PRD.md` §3.6）与原型 `prototypes/WPS图片(13).png` 要求 MRB 不合格品处置是「不合格判定 → 不合格台账 → 多方会签评审 → 最终处置闭环」的单一入口。上一阶段已把原【不合格待审核池】与【MRB评审工单】两个独立页面合并为单页（见 `19-MRB不合格品处置页整合设计.md`），但合并只解决了**界面层**的入口收敛。
 
 本方案解决**数据层**问题：界面每个字段、每个交互参数字段，是否真的落到 PostgreSQL 物理列、并由 Fastify 接口读写。凡「界面有、链路断」的字段一次性改造打通，交付物包含：数据库迁移脚本、`@letian/contracts` 契约、Fastify API、Kysely 仓储、用例编排、种子数据与 OpenAPI 文档。
 
@@ -137,14 +139,18 @@ PRD（`01-PRD.md` §3.7）与原型 `prototypes/WPS图片(13).png` 要求 MRB �
 ### 6.1 池状态机（与 `PendingDefectStatusEnum` 严格一致）
 
 ```
-检验单判定 FAILED ──(自动汇入)──▶ PENDING_INITIATE ──(POST /mrb/pending-pool/initiate)──▶ INITIATED
+检验单判定 FAILED ──(自动汇入)──▶ PENDING_INITIATE ──(自动建 MRB 单，同事务)──▶ INITIATED
                                         │
                                         └──(误判撤销/免审)──▶ DISMISSED
+
+※ 2026-09-23 起（docs/43）：`PENDING_INITIATE` 在真实链路中**不再停留** ——
+   终判事务内先 upsert 台账条目，紧接着自动创建 MRB 单并把条目转为 `INITIATED`；
+   该中间态只对历史数据与 `POST /mrb/pending-pool/initiate` 补发起通道有意义。
 ```
 
 - 入池幂等键：`source_order_id` 唯一索引，重复汇入按 upsert 更新（不产生重复条目）；
-- 发起评审后：池记录 `status = INITIATED`、`mrb_review_id` 回填、`review_started_at/by` 记录操作人；
-- 「已发起评审」不回退：同一检验单重复发起由 `mrb_reviews.mrb_no` 与检验单 `IN_MRB_REVIEW` 双重拦截。
+- 建单后：池记录 `status = INITIATED`、`mrb_review_id` 回填、`review_started_at/by` 记录操作人（自动建单时记录终判操作人）；
+- 「已发起评审」不回退：同一检验单重复建单由 `mrb_reviews.source_order_no` 幂等复用与检验单 `IN_MRB_REVIEW` 双重拦截。
 
 ### 6.2 特采（让步接收）硬规则
 
@@ -380,3 +386,56 @@ PRD（`01-PRD.md` §3.7）与原型 `prototypes/WPS图片(13).png` 要求 MRB �
 | 代码审计 | `node scripts/testing/audit_check.js` | ✅ 通过（`any` 133/138 预算内、`@ts-ignore` 0） |
 | OpenAPI 校验 | `node scripts/logs/openapi-check.cjs` | ✅ 24 路径 / 54 ref / 断链 0，YAML 解析 OK |
 | 走查截图重跑 | `node scripts/testing/cdp-runner.js`（`:5200` 真实前后端联动） | ✅ **7/7 PASS，未捕获运行时异常 0 条**；`docs/screenshots/` 6 张 PNG 整体重新捕获（`screenshot_04_mrb.png` 等），实测列日期同步为 2026-09-22 |
+
+---
+
+## 12. 终判入池与供应商维度换算（2026-09-23 第五轮）
+
+本轮由用户实测反馈触发：「【来料检验】把单子判为不合格后，在【MRB不合格品处置】页看不到记录」。
+完整现象 / 复现步骤 / 四条根因 / 口径定稿见 `39-不合格判定自动入池与MRB页可见性打通设计.md`，
+本节只登记**落在 MRB 域的改动**（池的写入方 + 池 / MRB 两侧的读权限换算 + 页面计数）。
+
+### 12.1 断链清单（D1~D4）
+
+| # | 断链点 | 现网现象 | 根因 |
+|:---:|:---|:---|:---|
+| **D1** | 终判写路径不入池 | 检验表单判「不合格 / 退货」后，池内没有该单条目，MRB 页自然什么都看不到 | `POST /inspections/:id/status` 在控制器里**直接调读侧仓储**写入（既无事务、也无审计），绕过了用例层；「自动入池」此前只写在 `RecordMeasurementsAndJudgeUseCase`（`submit-measurements`）里 |
+| **D2** | 池读侧 PBAC 供应商维度失效 | 三维限定（分类 + 编码 + 供应商）的检验员 `GET /mrb/pending-pool` 恒 `total = 0`，同一账号在检验台账却能看到该单 | 池表**没有 `supplier_code` 列**，PBAC 翻译器对「限定供应商」的规则**整条 `continue` 跳过**（`hasSupplierColumn:false`），不是过滤松、而是过滤到 0 行 |
+| **D3** | 页面无「待发起」计数入口 | 判不合格后页面「看起来什么都没有」 | `GET /mrb/records` 的 5 项 KPI 全部来自 `mrb_reviews`；池条目按两阶段口径**不进处置列表也不进 KPI**，也没有按钮角标 |
+| **D4** | MRB 处置列表同 D2 | 检验员**发起评审后，自己发起的 MRB 单在处置列表里也看不到** | `mrb_reviews` 同样无 `supplier_code` 列，翻译器同样整条跳过供应商维度 |
+
+### 12.2 改造清单
+
+| 层 | 文件 | 改造内容 |
+|:---|:---|:---|
+| 用例 | `packages/application/src/use-cases/inspections/finalize-inspection-status.ts`（新增） | 终判唯一写入口：同一事务内 `updateStatus` -> `updateStatsAndVerdict` -> 回读单据 -> **判不合格即 `collectPendingDefect` 入池** -> 审计留痕（`diffPatch.pendingDefectCollected`）；排他锁 `LOCK_ORDER_{batchNo}` 与实测录入同源 |
+| 用例 | `packages/application/src/use-cases/mrb/collect-pending-defect.ts` | `buildPendingDefectDraft` / `collectPendingDefect` 增可选 `fallbackReason`：终判备注与超差项都为空时按**如实描述**「检验判定不合格（未录入具体超差项）」写入 `fail_reason`，不再写「实测超出公差判定不合格」这类与事实不符的兜底 |
+| 端口 | `packages/domain/src/ports/repositories.ts` | `InspectionOrderRepository` 补 `updateStatsAndVerdict`（此前只有实现类有，控制器只能拿读侧仓储硬写）；池查询注释明确「供应商维度经源检验单换算」 |
+| 仓储 | `packages/infrastructure/src/repositories/pbac-sql-translator.ts` | `PbacWhereOptions` 增 `supplierCodeExpr`：允许无 `supplier_code` 列的业务表**经关联子查询**提供供应商上下文（默认仍取 `${targetRef}.supplier_code`）；未给表达式时维持原 fail-closed 语义 |
+| 仓储 | `.../repositories/pending-defect-pool-repository.ts` | 池查询传 `supplierCodeExpr` = `(SELECT src.supplier_code FROM inspection_orders AS src WHERE src.id = pending_mrb_items.source_order_id)` |
+| 仓储 | `.../repositories/mrb-review-repository.ts` | MRB 列表 / KPI 同法：`supplierCodeExpr` = `(SELECT src.supplier_code FROM inspection_orders AS src WHERE src.order_no = mrb_reviews.source_order_no)` |
+| 接口 | `apps/api/src/controllers/mrb.controller.ts` | `GET /mrb/records` 返回值新增 `pendingPoolCount`（池内 `PENDING_INITIATE` 条数，与列表同一套 PBAC 规则） |
+| 契约 | `packages/contracts/src/schemas/mrb.ts` | `PaginatedMRBRecordsSchema` 增 `pendingPoolCount` |
+| 前端 | `apps/web/src/pages/mrb/index.tsx` | ~~页头「待发起评审 N 条」红色胶囊（点击开抽屉）+ 【+ 发起评审】按钮数量角标~~ **2026-09-23 已移除（`docs/43`）** |
+| 前端 | `apps/web/src/mocks/handlers.ts` | 离线 Mock 同步 `pendingPoolCount`（与接口同名同义） |
+| 验收 | `apps/api/test/integration/inspection-finalize-pool-link.test.ts`（新增）、`packages/infrastructure/src/__tests__/pbac-translator.test.ts` | 前者 7 组断言：终判入池 / 池字段（含供应商快照与 `fail_reason`）/ `pendingPoolCount` / 重复终判幂等 / 合格不入池 / 三维限定用户可见性与他人不可见 / 非法值 400（跑完清理探针单）；后者新增「无供应商列 + 传 `supplierCodeExpr` ⇒ 生成供应商 `IN` 子查询而非 `1 = 0`」用例 |
+| 文档 / 契约规范 | `docs/api/letian-qms-openapi.yaml`（`info.version` 2.14.0 -> 2.15.0：新增路径 `/inspections/{id}/status` 与组件 `FinalizeInspectionStatusRequest`，`PaginatedMRBRecords` 增 `pendingPoolCount`）、`docs/39-…md`（新增）、`docs/03` §2.3 / §2.4、`docs/19` §3 / §4.2 / §6.1、`docs/README.md`（索引 39）、`docs/实施进度.md` |
+
+### 12.3 口径决策
+
+1. **「判为不合格」判定式**（唯一口径）：终判后 `status = 'FAILED'` **或** `judgment = 'FAILED'`。覆盖 IQC 退货、委外不合格、OQC 特采（转 MRB 评审）、IPQC 快速终判不合格四种表单口径；`RE_INSPECTING`（返工回边）与 `COMPLETED`（归档终态）**不触发**入池。
+2. **同事务 + 幂等**：状态写入与入池在同一事务提交（要么都成立、要么都回滚），入池按 `source_order_id` 唯一键 upsert；已 `INITIATED` 的条目不被回改。
+3. **供应商维度换算 fail-closed**：池 / MRB 表没有供应商列，供应商维度统一经**源检验单**换算（池按 `source_order_id`、MRB 按 `source_order_no = order_no`）；源单缺失即该规则不匹配，**不放大**可见范围。
+4. ~~**两阶段机制不变**：不合格只**自动入池**，MRB 评审工单仍由质检主管在页面【+ 发起评审】逐条发起~~ **已于 2026-09-23 废止（`docs/43`）**：现在判定不合格即自动建单，无人工发起环节。本轮（§12）**不动状态机、不加数据库迁移**（池表 22 列、MRB 表 24 列均无增减）这一条仍然成立。
+
+### 12.4 验收结果（2026-09-23）
+
+| 验证 | 命令 / 操作 | 结果 |
+|:---|:---|:---|
+| 类型检查 | `pnpm -r run typecheck` | ✅ 7/7 包通过 |
+| 全量测试 | `pnpm --filter @letian/infrastructure test`、`pnpm --filter @letian/api test`、`pnpm --filter @letian/web test` | ✅ 全绿（含新增 `inspection-finalize-pool-link.test.ts` 7 组断言与 PBAC 翻译器新用例） |
+| 真实 HTTP 探针 | 临时进程 `PORT=3121 pnpm --filter @letian/api run dev`（**不占用户常驻端口**）：建单 -> `POST /inspections/{id}/status {status:'FAILED'}` | ✅ 池内命中该单（含 `supplier_name` 快照、`fail_reason` = 终判备注）、`GET /mrb/records` 的 `pendingPoolCount` 同步 +1 |
+| 权限对比探针 | 同一库、同一 `GET /mrb/pending-pool` 分别以 `陈静`（三维限定）与 `刘芳`（无该维度）登录 | ✅ 陈静可见 = 池内该单命中；刘芳可见 = 0（修复前：陈静恒 0 行 —— 与 `:3100` 旧代码实例并排比对确认） |
+| 真实前后端浏览器走查 | 临时 Vite（`VITE_API_TARGET=http://127.0.0.1:3121`，不占用户常驻端口）+ CDP 驱动 Chromium | ✅ 页头显示「待发起评审 2 条」、按钮文案带数量角标、抽屉内可见已判定不合格单（不良率 100%、供应商「江苏大明不锈钢特钢有限公司」），控制台异常 0 条 |
+| 走查截图 | `logs/ui-probe-01-mrb-header.png`、`logs/ui-probe-02-pool-drawer.png` | ✅ 页头计数与抽屉内容各一张（临时探针产物，正式固化为 `scripts/testing/` 断言见 `docs/39` §7 遗留 R1） |
+| 库回基线 | 探针单 / 池条目 / MRB 单清理 | ✅ `pending_mrb_items` 6 -> 4、`mrb_reviews` 7 -> 6、`INS-20260923-%` 残留 0（`audit_logs` 为 append-only 红线，探针审计留痕按设计**保留**） |

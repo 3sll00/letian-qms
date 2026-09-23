@@ -271,47 +271,77 @@ async function runIntegrationTests() {
       'FAILED',
       `实测值 ${outOfSpecValue} 超出标准上限应判定不合格`
     );
-    assert.equal(failBody.status, 'FAILED', '存在不合格指标时工单应推进为 FAILED');
+    assert.equal(
+      failBody.status,
+      'IN_MRB_REVIEW',
+      '存在不合格指标时工单应判定不合格并**自动进入 MRB 评审**（docs/43：取消人工发起闸门）'
+    );
     assert.equal(failBody.overallDecision, 'FAILED', '综合结论应同步为 FAILED');
     const failPersisted = await db
       .selectFrom('inspectionOrders')
       .select(['status', 'judgment'])
       .where('id', '=', failOrder.id)
       .executeTakeFirst();
-    assert.equal(failPersisted?.status, 'FAILED', '不合格结论必须落库为 FAILED');
+    assert.equal(failPersisted?.status, 'IN_MRB_REVIEW', '不合格结论必须落库并同事务进入 MRB 评审');
+    assert.equal(failPersisted?.judgment, 'FAILED', '综合结论必须落库为 FAILED');
 
-    // 2.3.1 验证不合格待审核池查询与独立发起评审闭环
-    const pendingPoolRes = await app.inject({
-      method: "GET",
-      url: "/api/v1/mrb/pending-pool",
-      headers: authHeader,
-    });
-    assert.equal(pendingPoolRes.statusCode, 200, "待审核池查询应返回 200");
-    const pendingPoolBody = JSON.parse(pendingPoolRes.body) as { items: Array<{ id: string; inspectionOrderId: string; orderNo: string }> };
-    const poolItem = pendingPoolBody.items.find((item) => item.inspectionOrderId === failOrder.id || item.id === failOrder.id);
-    assert.ok(poolItem, "判定为 FAILED 的工单必须进入待审核池");
+    // 2.3.1 判定不合格 -> 自动创建 MRB 评审单 + 台账留痕（docs/43：页面无人工发起入口）
+    const autoMrb = await db
+      .selectFrom('mrbReviews')
+      .select(['id', 'mrbNo', 'status', 'sourceType'])
+      .where('sourceOrderNo', '=', failOrder.orderNo)
+      .executeTakeFirst();
+    assert.ok(autoMrb, '判定不合格必须自动创建 MRB 评审单');
+    assert.ok(autoMrb.mrbNo.startsWith('MRB-'), '应生成规范的 MRB 工单编号');
+    assert.equal(autoMrb.status, 'PENDING_REVIEW', '自动创建的 MRB 评审状态应为 PENDING_REVIEW');
+    assert.ok(
+      ['INCOMING_FAIL', 'PROCESS_FAIL', 'SHIPMENT_FAIL', 'SUBCONTRACT_FAIL'].includes(autoMrb.sourceType),
+      '不合格来源类型必须落在契约 4 类枚举内（驱动评审流程自动路由）'
+    );
+    const autoPoolRow = await db
+      .selectFrom('pendingMrbItems')
+      .select(['status', 'mrbReviewId'])
+      .where('sourceOrderId', '=', failOrder.id)
+      .executeTakeFirst();
+    assert.ok(autoPoolRow, '判定为 FAILED 的工单必须进入不合格台账');
+    assert.equal(autoPoolRow.status, 'INITIATED', '台账条目必须即时转「已入评审」，不停留在待发起态');
+    assert.equal(autoPoolRow.mrbReviewId, autoMrb.id, '台账必须回填实际创建的那张 MRB 单');
 
-    const initiateRes = await app.inject({
-      method: "POST",
-      url: "/api/v1/mrb/pending-pool/initiate",
+    // 保留接口的边界（docs/43 §4.6）：接口保留给历史数据 / 外部集成，但已被自动送入评审的单
+    // **不得**再被人工发起一次 —— 否则会凭空多出第二张 MRB 单，把「无人工发起闸门」重新打开。
+    const duplicateInitiateRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/mrb/pending-pool/initiate',
       headers: authHeader,
       payload: {
         pendingDefectId: failOrder.id,
-        urgencyLevel: "URGENT",
-        reviewNotes: "E2E集成测试发起评审",
+        urgencyLevel: 'NORMAL',
+        reviewNotes: 'E2E：自动建单后重复人工发起应被拒绝',
       },
     });
-    assert.equal(initiateRes.statusCode, 201, "待审核池发起评审应返回 201");
-    const initiateBody = JSON.parse(initiateRes.body) as { mrbNo: string; status: string };
-    assert.ok(initiateBody.mrbNo.startsWith("MRB-"), "应生成规范的 MRB 工单编号");
-    assert.equal(initiateBody.status, "PENDING_REVIEW", "新发起的 MRB 评审状态应为 PENDING_REVIEW");
-
-    const afterInitiateOrder = await db
-      .selectFrom("inspectionOrders")
-      .select(["status"])
-      .where("id", "=", failOrder.id)
-      .executeTakeFirst();
-    assert.equal(afterInitiateOrder?.status, "IN_MRB_REVIEW", "发起评审后原工单状态应转为 IN_MRB_REVIEW");
+    assert.equal(
+      duplicateInitiateRes.statusCode,
+      409,
+      `已在 MRB 评审中的检验单再次人工发起必须 409，实际: ${duplicateInitiateRes.body}`
+    );
+    assert.equal(
+      (JSON.parse(duplicateInitiateRes.body) as { code: string }).code,
+      ErrorCode.CONFLICT,
+      '重复发起应给出 conflict 原因码'
+    );
+    const mrbRowsAfterDuplicate = await db
+      .selectFrom('mrbReviews')
+      .select(['id'])
+      .where('sourceOrderNo', '=', failOrder.orderNo)
+      .execute();
+    assert.equal(
+      mrbRowsAfterDuplicate.length,
+      1,
+      '重复发起被拒后，同一检验单仍只允许存在一张 MRB 评审单'
+    );
+    console.log(
+      `✔ 判定不合格：台账转 INITIATED 并回填 ${autoMrb.mrbNo}；重复人工发起被 409 拒绝且 MRB 单仍为 1 张`
+    );
 
     // 2.3.2 MRB 返工处置 -> 复检单：单据标识快照必须整体沿承原单（docs/26 §5.2）
     //       回归点：复检单此前只透传物料名称 / 供应商名称，入库单号 / 入库日期等台账列在复检行上
@@ -355,39 +385,17 @@ async function runIntegrationTests() {
     assert.equal(reinspectFailRes.statusCode, 200, `越界录入应被受理，实际: ${reinspectFailRes.body}`);
     assert.equal(
       (JSON.parse(reinspectFailRes.body) as { status: string }).status,
-      'FAILED',
-      '越界录入后返工源单应判定为 FAILED'
+      'IN_MRB_REVIEW',
+      '越界录入后返工源单应判定不合格并自动进入 MRB 评审（docs/43）'
     );
 
-    const reinspectPoolRes = await app.inject({
-      method: 'GET',
-      url: '/api/v1/mrb/pending-pool',
-      headers: authHeader,
-    });
-    assert.equal(reinspectPoolRes.statusCode, 200, '待审核池查询应返回 200');
-    const reinspectPoolItem = (
-      JSON.parse(reinspectPoolRes.body) as {
-        items: Array<{ id: string; inspectionOrderId: string }>;
-      }
-    ).items.find((item) => item.inspectionOrderId === reinspectOrder.id);
-    assert.ok(reinspectPoolItem, '判定为 FAILED 的返工源单必须进入待审核池');
-
-    const reinspectInitiateRes = await app.inject({
-      method: 'POST',
-      url: '/api/v1/mrb/pending-pool/initiate',
-      headers: authHeader,
-      payload: {
-        pendingDefectId: reinspectOrder.id,
-        urgencyLevel: 'NORMAL',
-        reviewNotes: '复检单快照沿承回归',
-      },
-    });
-    assert.equal(
-      reinspectInitiateRes.statusCode,
-      201,
-      `发起评审应返回 201，实际: ${reinspectInitiateRes.body}`
-    );
-    const reinspectMrb = JSON.parse(reinspectInitiateRes.body) as { id: string; mrbNo: string };
+    // 判定不合格即自动建单（docs/43），返工处置直接取该单，无需人工发起
+    const reinspectMrb = await db
+      .selectFrom('mrbReviews')
+      .select(['id', 'mrbNo'])
+      .where('sourceOrderNo', '=', reinspectOrder.orderNo)
+      .executeTakeFirst();
+    assert.ok(reinspectMrb, '判定为 FAILED 的返工源单必须自动创建 MRB 评审单');
 
     const reworkRes = await app.inject({
       method: 'POST',
@@ -546,8 +554,8 @@ async function runIntegrationTests() {
     );
     assert.equal(
       pendingBody.status,
-      'FAILED',
-      '存在未录入指标时工单状态应为 FAILED（阻断而非放行）'
+      'IN_MRB_REVIEW',
+      '存在未录入指标时工单应判不合格并自动进入 MRB 评审（阻断而非放行，docs/43）'
     );
 
     // 2.5 草稿暂存：只落库实测值，不做整单终判

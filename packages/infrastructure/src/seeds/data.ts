@@ -616,14 +616,21 @@ export interface SeedMetric {
   metricCategory: MetricCategory;
   /** 规格描述 */
   standardText: string;
-  nominalValue: number;
+  /**
+   * 定性 / 文本型指标的「可接受值清单」（契约 `InspectionPlanItemSchema.acceptableValues`）。
+   * 判标唯一权威（`docs/17` §7.6 TBD-06）：非空时领域层只认清单成员，不再回落
+   * `standardText` 的 `, ， / |` 分隔符约定。数值型指标不使用该字段。
+   */
+  acceptableValues?: string[];
+  // 数值判定基准：仅 `dataType = NUMERIC` 的指标携带（定性指标不写，避免落下没有依据的公差）
+  nominalValue?: number;
   /** 上公差（正数量值） */
-  upperTolerance: number;
+  upperTolerance?: number;
   /** 下公差（正数量值） */
-  lowerTolerance: number;
-  sampleSize: number;
-  unit: string;
-  measurementTool: string;
+  lowerTolerance?: number;
+  sampleSize?: number;
+  unit?: string;
+  measurementTool?: string;
   isMandatory: boolean;
 }
 
@@ -639,7 +646,10 @@ export interface SeedPlanVersion {
 export interface SeedPlan {
   planCode: string;
   planName: string;
+  /** 专属物料编码；**空串 = 该存货分类的通用方案**（分类级兜底匹配依据，见 docs/17 §7.3 与 docs/37） */
   materialCode: string;
+  /** 方案分类归属；分类通用方案（materialCode 为空串）必须显式给出，否则定位不到兜底分类 */
+  categoryCode?: string;
   inspectionType: InspectionType;
   versions: SeedPlanVersion[];
 }
@@ -1202,6 +1212,293 @@ export const seedPlans: SeedPlan[] = [
             sampleSize: 20,
             unit: 'mm',
             measurementTool: '影像测量仪',
+            isMandatory: false,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    planCode: 'QP-OQC-SH-FAMILY',
+    planName: '成品螺栓族出货检验与客户放行通用规范',
+    // 空串 = 分类通用方案：承载「判标不依赖具体规格」的族内通用检项，作为出货检验的族级兜底
+    // （件专有尺寸/装箱项仍在物料专属方案 QP-OQC-SH，命中优先级高于本方案，见 docs/37）
+    materialCode: '',
+    categoryCode: 'CAT-FIN-BOLT',
+    inspectionType: 'OQC_SH',
+    versions: [
+      {
+        id: '27000000-0000-4000-8000-000000000002',
+        versionNo: 'v1.0',
+        status: 'ACTIVE',
+        createdBy: EMPLOYEE_IDS.liuFang,
+        items: [
+          {
+            itemCode: 'THR-003',
+            name: '通规通过率',
+            dataType: 'NUMERIC',
+            metricCategory: 'DIMENSION',
+            standardText: '100%',
+            nominalValue: 100,
+            upperTolerance: 1,
+            lowerTolerance: 0,
+            sampleSize: 200,
+            unit: '%',
+            measurementTool: '螺纹通止规',
+            isMandatory: true,
+          },
+          {
+            itemCode: 'MAR-001',
+            name: '标识印记高度',
+            dataType: 'NUMERIC',
+            metricCategory: 'APPEARANCE',
+            standardText: '0.5±0.1mm',
+            nominalValue: 0.5,
+            upperTolerance: 0.1,
+            lowerTolerance: 0.1,
+            sampleSize: 20,
+            unit: 'mm',
+            measurementTool: '影像测量仪',
+            isMandatory: false,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    planCode: 'QP-OQC-MACH-FAMILY',
+    planName: '机加工件委外回厂通用验收规范',
+    // 空串 = 分类通用方案：只承载「判标不依赖具体件号规格」的工艺级要求，作为机加工委外的族级兜底。
+    // 尺寸 / 螺纹 / 粗糙度等依图纸的特性留在物料专属方案（命中优先级更高），见 docs/36 §9。
+    materialCode: '',
+    categoryCode: 'CAT-FIN-MACH',
+    inspectionType: 'OQC_MACH',
+    versions: [
+      {
+        id: '26000000-0000-4000-8000-000000000201',
+        versionNo: 'v1.0',
+        status: 'ACTIVE',
+        createdBy: EMPLOYEE_IDS.liWei,
+        items: [
+          {
+            itemCode: 'VIS-001',
+            name: '外观与棱边质量',
+            dataType: 'QUALITATIVE',
+            metricCategory: 'APPEARANCE',
+            standardText: '无毛刺、无磕碰划伤、无锈蚀，棱边倒角完整',
+            acceptableValues: ['合格'],
+            sampleSize: 20,
+            unit: '',
+            measurementTool: '目视 / 手感',
+            isMandatory: true,
+          },
+          {
+            itemCode: 'PRT-001',
+            name: '表面防护与包装',
+            dataType: 'QUALITATIVE',
+            metricCategory: 'APPEARANCE',
+            standardText: '加工面防锈处理有效、无锈蚀；随件防护包装完好',
+            acceptableValues: ['合格'],
+            sampleSize: 5,
+            unit: '',
+            measurementTool: '目视',
+            isMandatory: false,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    planCode: 'QP-OQC-HEAT-FAMILY-BOLT',
+    planName: '紧固件（螺栓）热处理委外回厂通用验收规范',
+    // 热处理属特殊过程（IATF 16949 §8.5.1.1 / CQI-9）：族级只承载「过程记录可追溯性 + 外观」这类
+    // 与件号无关的工艺级要求；硬度 / 力学性能依材料牌号，必须留在物料专属方案，见 docs/36 §9.3。
+    materialCode: '',
+    categoryCode: 'CAT-FIN-BOLT',
+    inspectionType: 'OQC_HEAT',
+    versions: [
+      {
+        id: '26000000-0000-4000-8000-000000000202',
+        versionNo: 'v1.0',
+        status: 'ACTIVE',
+        createdBy: EMPLOYEE_IDS.sunDeSheng,
+        items: [
+          {
+            itemCode: 'TRC-001',
+            name: '热处理过程记录可追溯性',
+            dataType: 'QUALITATIVE',
+            metricCategory: 'APPEARANCE',
+            standardText: '炉号 / 装炉记录 / 工艺曲线随单归档并可追溯（CQI-9 特殊过程确认）',
+            acceptableValues: ['合格'],
+            sampleSize: 1,
+            unit: '',
+            measurementTool: '记录核查',
+            isMandatory: true,
+          },
+          {
+            itemCode: 'VIS-002',
+            name: '热处理外观',
+            dataType: 'QUALITATIVE',
+            metricCategory: 'APPEARANCE',
+            standardText: '无氧化皮、无裂纹、无过烧、无碰伤',
+            acceptableValues: ['合格'],
+            sampleSize: 20,
+            unit: '',
+            measurementTool: '目视',
+            isMandatory: true,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    planCode: 'QP-OQC-HEAT-FAMILY-NUT',
+    planName: '紧固件（螺母 / 垫圈）热处理委外回厂通用验收规范',
+    // 与 QP-OQC-HEAT-FAMILY-BOLT 同款指标（同一工艺级要求），分类不同故独立一行
+    // —— 两级匹配按 category_code 兜底，一个分类一行（plan_code + version 唯一约束）
+    materialCode: '',
+    categoryCode: 'CAT-FIN-NUT',
+    inspectionType: 'OQC_HEAT',
+    versions: [
+      {
+        id: '26000000-0000-4000-8000-000000000203',
+        versionNo: 'v1.0',
+        status: 'ACTIVE',
+        createdBy: EMPLOYEE_IDS.sunDeSheng,
+        items: [
+          {
+            itemCode: 'TRC-001',
+            name: '热处理过程记录可追溯性',
+            dataType: 'QUALITATIVE',
+            metricCategory: 'APPEARANCE',
+            standardText: '炉号 / 装炉记录 / 工艺曲线随单归档并可追溯（CQI-9 特殊过程确认）',
+            acceptableValues: ['合格'],
+            sampleSize: 1,
+            unit: '',
+            measurementTool: '记录核查',
+            isMandatory: true,
+          },
+          {
+            itemCode: 'VIS-002',
+            name: '热处理外观',
+            dataType: 'QUALITATIVE',
+            metricCategory: 'APPEARANCE',
+            standardText: '无氧化皮、无裂纹、无过烧、无碰伤',
+            acceptableValues: ['合格'],
+            sampleSize: 20,
+            unit: '',
+            measurementTool: '目视',
+            isMandatory: true,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    planCode: 'QP-OQC-SF-FAMILY-BOLT',
+    planName: '成品螺栓族表面处理委外回厂通用验收规范',
+    // 空串 = 分类通用方案：表面处理族级只承载「判标不依赖具体件号规格」的工艺级要求
+    //（镀覆层外观 / 附着力 / 防护包装）；镀层厚度、色差、盐雾小时数、扭矩系数依规格，
+    //  留在物料专属方案 QP-OQC-SF（命中优先级更高），见 docs/36 §9。
+    materialCode: '',
+    categoryCode: 'CAT-FIN-BOLT',
+    inspectionType: 'OQC_SF',
+    versions: [
+      {
+        id: '26000000-0000-4000-8000-000000000301',
+        versionNo: 'v1.0',
+        status: 'ACTIVE',
+        createdBy: EMPLOYEE_IDS.zhouHaiBo,
+        items: [
+          {
+            itemCode: 'VIS-003',
+            name: '镀覆层外观',
+            dataType: 'QUALITATIVE',
+            metricCategory: 'APPEARANCE',
+            standardText: '镀覆层均匀完整，无漏镀、无起泡、无剥落、无烧焦、无锈蚀',
+            acceptableValues: ['合格'],
+            sampleSize: 20,
+            unit: '',
+            measurementTool: '目视',
+            isMandatory: true,
+          },
+          {
+            itemCode: 'ADH-001',
+            name: '镀覆层附着力',
+            dataType: 'QUALITATIVE',
+            metricCategory: 'APPEARANCE',
+            standardText: '划格 / 弯曲试验后镀覆层无剥落、无起皮（GB/T 5270）',
+            acceptableValues: ['合格'],
+            sampleSize: 3,
+            unit: '',
+            measurementTool: '划格器 / 弯曲试验',
+            isMandatory: true,
+          },
+          {
+            itemCode: 'PRT-002',
+            name: '表面防护与包装',
+            dataType: 'QUALITATIVE',
+            metricCategory: 'APPEARANCE',
+            standardText: '经防潮、防碰伤包装，随件标识完整、运输后无锈蚀',
+            acceptableValues: ['合格'],
+            sampleSize: 5,
+            unit: '',
+            measurementTool: '目视',
+            isMandatory: false,
+          },
+        ],
+      },
+    ],
+  },
+  {
+    planCode: 'QP-OQC-SF-FAMILY-NUT',
+    planName: '成品螺母 / 垫圈族表面处理委外回厂通用验收规范',
+    // 与 QP-OQC-SF-FAMILY-BOLT 同款工艺级要求（同一表面处理工序族），分类不同故独立一行
+    // —— 两级匹配按 category_code 兜底，一个分类一行（plan_code + version 唯一约束）
+    materialCode: '',
+    categoryCode: 'CAT-FIN-NUT',
+    inspectionType: 'OQC_SF',
+    versions: [
+      {
+        id: '26000000-0000-4000-8000-000000000302',
+        versionNo: 'v1.0',
+        status: 'ACTIVE',
+        createdBy: EMPLOYEE_IDS.zhouHaiBo,
+        items: [
+          {
+            itemCode: 'VIS-003',
+            name: '镀覆层外观',
+            dataType: 'QUALITATIVE',
+            metricCategory: 'APPEARANCE',
+            standardText: '镀覆层均匀完整，无漏镀、无起泡、无剥落、无烧焦、无锈蚀',
+            acceptableValues: ['合格'],
+            sampleSize: 20,
+            unit: '',
+            measurementTool: '目视',
+            isMandatory: true,
+          },
+          {
+            itemCode: 'ADH-001',
+            name: '镀覆层附着力',
+            dataType: 'QUALITATIVE',
+            metricCategory: 'APPEARANCE',
+            standardText: '划格 / 弯曲试验后镀覆层无剥落、无起皮（GB/T 5270）',
+            acceptableValues: ['合格'],
+            sampleSize: 3,
+            unit: '',
+            measurementTool: '划格器 / 弯曲试验',
+            isMandatory: true,
+          },
+          {
+            itemCode: 'PRT-002',
+            name: '表面防护与包装',
+            dataType: 'QUALITATIVE',
+            metricCategory: 'APPEARANCE',
+            standardText: '经防潮、防碰伤包装，随件标识完整、运输后无锈蚀',
+            acceptableValues: ['合格'],
+            sampleSize: 5,
+            unit: '',
+            measurementTool: '目视',
             isMandatory: false,
           },
         ],

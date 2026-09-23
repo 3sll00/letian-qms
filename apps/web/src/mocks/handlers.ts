@@ -181,6 +181,12 @@ function buildReinspectionOrder(source: InspectionOrder, round: number): Inspect
     ...(source.erpStatus !== undefined ? { erpStatus: source.erpStatus } : {}),
     ...(source.processType !== undefined ? { processType: source.processType } : {}),
     ...(source.vendorName !== undefined ? { vendorName: source.vendorName } : {}),
+    // 委外台账字段与 030 录入页字段（docs/36）：批次来源凭证与工件事实，复检单沿承原单
+    // （检验日期不沿承：复检是新的检验周期）
+    ...(source.outsourceNo !== undefined ? { outsourceNo: source.outsourceNo } : {}),
+    ...(source.returnDate !== undefined ? { returnDate: source.returnDate } : {}),
+    ...(source.materialGrade !== undefined ? { materialGrade: source.materialGrade } : {}),
+    ...(source.techStandard !== undefined ? { techStandard: source.techStandard } : {}),
     sampleQty: source.sampleQty,
     passQty: 0,
     failQty: 0,
@@ -461,6 +467,15 @@ export const handlers = [
       batchNo: validatedDto.batchNo,
       supplierCode: validatedDto.supplierCode,
       customerCode: validatedDto.customerCode,
+      // 委外台账字段与 030 录入页字段（docs/36）：与真实后端 POST /inspections 同口径透传，
+      // 否则离线 Mock 新建的委外单在台账上「委外加工单号 / 加工类型 / 加工商 / 回厂日期」全为空
+      ...(validatedDto.outsourceNo !== undefined ? { outsourceNo: validatedDto.outsourceNo } : {}),
+      ...(validatedDto.processType !== undefined ? { processType: validatedDto.processType } : {}),
+      ...(validatedDto.returnDate !== undefined ? { returnDate: validatedDto.returnDate } : {}),
+      ...(validatedDto.vendorName !== undefined ? { vendorName: validatedDto.vendorName } : {}),
+      ...(validatedDto.materialGrade !== undefined ? { materialGrade: validatedDto.materialGrade } : {}),
+      ...(validatedDto.techStandard !== undefined ? { techStandard: validatedDto.techStandard } : {}),
+      ...(validatedDto.inspectedDate !== undefined ? { inspectedDate: validatedDto.inspectedDate } : {}),
       sampleQty: validatedDto.sampleQty,
       passQty: 0,
       failQty: 0,
@@ -533,6 +548,7 @@ export const handlers = [
       failQty?: number;
       remark?: string;
       inspectionNotes?: string;
+      preliminaryDisposition?: string;
     };
     const index = inspectionOrdersList.findIndex((r) => r.id === params.id);
     if (index < 0) {
@@ -556,7 +572,55 @@ export const handlers = [
       updatedAt: new Date().toISOString(),
     });
     inspectionOrdersList[index] = updated;
-    return HttpResponse.json(updated);
+
+    // 判定不合格 -> **自动创建 MRB 评审单**并推进到 IN_MRB_REVIEW（docs/43：无人工发起环节）。
+    // Mock 与真实后端同形：同一检验单幂等复用（sourceOrderNo 为天然键），
+    // 台账条目（若存在）同步转 INITIATED —— 离线演示与真实环境表现一致。
+    const nonconforming = updated.status === 'FAILED' || updated.overallDecision === 'FAILED';
+    if (!nonconforming) {
+      return HttpResponse.json(updated);
+    }
+
+    if (mrbList.every((m) => m.sourceOrderNo !== updated.orderNo)) {
+      const now = new Date().toISOString();
+      const poolItem = pendingPoolList.find((row) => row.orderNo === updated.orderNo);
+      const created: MRBReview = {
+        id: crypto.randomUUID(),
+        mrbNo: `MRB-${now.slice(0, 10).replace(/-/g, '')}-${String(mrbList.length + 1).padStart(3, '0')}`,
+        sourceType: failCategoryOfInspectionType(updated.inspectionType),
+        sourceOrderNo: updated.orderNo,
+        ...(poolItem !== undefined ? { pendingDefectId: poolItem.id } : {}),
+        batchNo: updated.batchNo,
+        materialCode: updated.materialCode,
+        materialName: updated.materialName,
+        defectDescription: notes ?? `检验单 [${updated.orderNo}] 判定不合格，自动触发 MRB 评审`,
+        defectQty: updated.failQty ?? 0,
+        status: 'PENDING_REVIEW',
+        // 拟定处置（docs/43 §4.4）：缺省 REWORK，终审时由处置决策覆盖
+        disposition:
+          body.preliminaryDisposition !== undefined && isMrbDisposition(body.preliminaryDisposition)
+            ? body.preliminaryDisposition
+            : 'REWORK',
+        urgencyLevel: 'NORMAL',
+        approvers: [],
+        createdAt: now,
+        updatedAt: now,
+        ...(notes !== undefined ? { reviewNotes: notes } : {}),
+      };
+      mrbList.unshift(created);
+      if (poolItem !== undefined) {
+        poolItem.status = 'INITIATED';
+        poolItem.mrbId = created.id;
+      }
+    }
+
+    const inMrb = InspectionOrderSchema.parse({
+      ...updated,
+      status: 'IN_MRB_REVIEW',
+      updatedAt: new Date().toISOString(),
+    });
+    inspectionOrdersList[index] = inMrb;
+    return HttpResponse.json(inMrb);
   }),
 
   // 质量负责人签核（docs/35 §5）：Mock 只搬数据，不替服务端下结论。
@@ -734,6 +798,8 @@ export const handlers = [
       page,
       pageSize,
       pendingCount: mrbList.filter((m) => m.status === 'PENDING_REVIEW').length,
+      // 待发起评审的池条目数（与接口同名同义，docs/39 §2 D3）
+      pendingPoolCount: pendingPoolList.filter((item) => item.status === 'PENDING_INITIATE').length,
       underReviewCount: mrbList.filter((m) => m.status === 'UNDER_REVIEW').length,
       totalReviewedCount: mrbList.filter(
         (m) => m.status === 'UNDER_REVIEW' || m.status === 'DISPOSED' || m.status === 'REJECTED'

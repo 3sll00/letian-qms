@@ -5,7 +5,6 @@ import { cn } from '../lib/utils';
 import type { SessionUser } from '../lib/api';
 
 // Import exact cropped sidebar icons
-import logoIcon from '../assets/logo_icon.png';
 import bellIcon from '../assets/bell_icon.png';
 import helpIcon from '../assets/help_icon.png';
 
@@ -186,17 +185,11 @@ export function AppLayout({ currentKey, onSelectKey, user, onLogout, children }:
     return () => clearInterval(timer);
   }, [refreshBadges, currentKey]);
 
-  // Find current breadcrumb
-  let activeGroup = '';
-  let activeItemLabel = '';
-  for (const group of NAV_GROUPS) {
-    const item = group.items.find((i) => i.key === currentKey);
-    if (item) {
-      activeGroup = group.groupName;
-      activeItemLabel = item.label;
-      break;
-    }
-  }
+  // 面包屑定位：分组节点（分组名 + 分组入口页 = 该分组第一个菜单项）与当前菜单节点
+  // 口径见 docs/38-导航菜单与面包屑跳转交互设计.md §3.2：分组在系统内不是页面，一律落到分组入口页
+  const activeGroup = NAV_GROUPS.find((group) => group.items.some((i) => i.key === currentKey));
+  const activeItemLabel = activeGroup?.items.find((i) => i.key === currentKey)?.label ?? '';
+  const groupEntryItem = activeGroup?.items[0];
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#F5F7FA] text-[#1E293B] font-sans antialiased">
@@ -204,7 +197,9 @@ export function AppLayout({ currentKey, onSelectKey, user, onLogout, children }:
       <aside className="w-[195px] min-w-[195px] max-w-[195px] bg-[#1E293B] flex flex-col h-full border-r border-slate-800 select-none z-20 shrink-0">
         {/* Brand Logo Header */}
         <div className="h-[58px] flex items-center px-4 gap-2.5 border-b border-slate-800/80 shrink-0">
-          <img src={logoIcon} alt="Logo" className="w-7 h-7 rounded shadow-sm object-contain" />
+          <span className="w-7 h-7 rounded-[7px] bg-gradient-to-br from-[#325CEE] to-[#5D64F0] shadow-sm flex items-center justify-center text-white text-[15px] font-bold leading-none select-none">
+            L
+          </span>
           <span className="text-white text-[15px] font-semibold tracking-wide">乐天QMS</span>
         </div>
 
@@ -222,6 +217,7 @@ export function AppLayout({ currentKey, onSelectKey, user, onLogout, children }:
                     <button
                       key={item.key}
                       onClick={() => onSelectKey(item.key)}
+                      title={isActive ? `${item.label}（点击返回初始界面）` : item.label}
                       className={cn(
                         'w-full flex items-center justify-between px-2.5 py-2 rounded text-[13px] transition-colors group text-left relative',
                         isActive
@@ -261,9 +257,27 @@ export function AppLayout({ currentKey, onSelectKey, user, onLogout, children }:
         <header className="h-[58px] bg-white border-b border-[#E2E8F0] px-6 flex items-center justify-between shrink-0 z-10">
           {/* Breadcrumb */}
           <div className="flex items-center gap-2 text-[13px] text-slate-500">
-            <span>{activeGroup}</span>
-            <span>/</span>
-            <span className="text-slate-900 font-bold">{activeItemLabel}</span>
+            {activeGroup && groupEntryItem && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => onSelectKey(groupEntryItem.key)}
+                  title={`进入「${activeGroup.groupName}」分组入口：${groupEntryItem.label}`}
+                  className="transition-colors hover:text-blue-600 hover:underline underline-offset-2"
+                >
+                  {activeGroup.groupName}
+                </button>
+                <span className="text-slate-300">/</span>
+              </>
+            )}
+            <button
+              type="button"
+              onClick={() => onSelectKey(currentKey)}
+              title={`点击返回「${activeItemLabel}」初始界面`}
+              className="font-bold text-slate-900 transition-colors hover:text-blue-600 hover:underline underline-offset-2"
+            >
+              {activeItemLabel}
+            </button>
           </div>
 
           {/* Right Action Icons & User */}
@@ -285,7 +299,7 @@ export function AppLayout({ currentKey, onSelectKey, user, onLogout, children }:
               title="通知"
               className="relative w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-100 transition-colors"
             >
-              <img src={bellIcon} alt="通知" className="w-4 h-4 object-contain" />
+              <img src={bellIcon} alt="通知" className="w-5 h-5 object-contain" draggable={false} />
             </button>
 
             {/* Help Icon */}
@@ -293,7 +307,7 @@ export function AppLayout({ currentKey, onSelectKey, user, onLogout, children }:
               title="帮助"
               className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-100 transition-colors"
             >
-              <img src={helpIcon} alt="帮助" className="w-4 h-4 object-contain" />
+              <img src={helpIcon} alt="帮助" className="w-5 h-5 object-contain" draggable={false} />
             </button>
 
             {/* User Profile Avatar */}

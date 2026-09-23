@@ -1,79 +1,17 @@
-import type {
-  InspectionOrder,
-  InspectionStatus,
-  InspectionType,
-  OverallDecision,
-  TraceNodeStatus,
-  TraceOrderChainResponse,
-  TraceOrderChainStage,
-} from '@letian/contracts';
+import type { InspectionOrder, TraceOrderChainResponse, TraceOrderChainStage } from '@letian/contracts';
 import { ApplicationError } from '../../errors/application-error.js';
 import type { ISecurityContext } from '../../security/security-context.js';
 import type { IUnitOfWork } from '../../tx/unit-of-work.js';
+import { ORDER_TYPE_STAGE, resolveInspectionSourceDocNo, toTraceNodeStatus } from './inspection-stage.js';
 
 export interface GetOrderTraceChainCommand {
   /** 订单标识：客户采购订单号 / 销售出库单号 / 工单号 / 检验单号 */
   orderNo: string;
 }
 
-/**
- * 检验类型 → 工艺序位 + 环节简称。
- *
- * 用 `Record<InspectionType, ...>` 而不是松散对象：契约新增检验类型时此处编译期报错，
- * 不会静默漏掉一个环节。序位按**工艺先后**排，不按时间排 —— 现场的时间戳可能因补录而乱序。
- */
-const ORDER_TYPE_STAGE: Readonly<Record<InspectionType, { seq: number; stageName: string }>> = {
-  IQC: { seq: 1, stageName: '来料检验' },
-  IPQC_CT: { seq: 2, stageName: '下料检' },
-  IPQC_RL: { seq: 3, stageName: '滚丝检' },
-  IPQC_FN: { seq: 4, stageName: '成品检' },
-  OQC_SF: { seq: 5, stageName: '委外表面处理检' },
-  OQC_HEAT: { seq: 5, stageName: '委外热处理检' },
-  OQC_BLACK: { seq: 5, stageName: '委外发黑检' },
-  OQC_ZINC: { seq: 5, stageName: '委外镀锌检' },
-  OQC_NICKEL: { seq: 5, stageName: '委外镀镍检' },
-  OQC_PHOSPH: { seq: 5, stageName: '委外磷化检' },
-  OQC_DACRO: { seq: 5, stageName: '委外达克罗检' },
-  OQC_MACH: { seq: 5, stageName: '委外机加工检' },
-  OQC_SH: { seq: 6, stageName: '出货检验' },
-};
-
-/**
- * 检验单状态 + 终判 → 追溯节点状态。
- *
- * 终判优先：`CONCESSION`（特采）必须如实呈现，不得被压成 `PASSED`。
- * 已结单却没有终判属于口径异常：按「检验中」展示，**不冒充合格**。
- */
-function toNodeStatus(status: InspectionStatus, judgment: OverallDecision | undefined): TraceNodeStatus {
-  if (judgment === 'CONCESSION') return 'CONCESSION';
-  if (judgment === 'FAILED') return 'FAILED';
-  if (judgment === 'PASSED') return 'PASSED';
-
-  switch (status) {
-    case 'FAILED':
-      return 'FAILED';
-    case 'PASSED':
-      return 'PASSED';
-    case 'PENDING':
-      return 'PENDING';
-    default:
-      // INSPECTING / DRAFT / RE_INSPECTING / IN_MRB_REVIEW / COMPLETED(无终判)
-      return 'INSPECTING';
-  }
-}
-
-/** 来源单据号：按环节类型取该环节真正对应的上游单据，避免把批次号当单据号展示 */
+/** 来源单据号：真实上游单据优先，缺失时回落批次号（本视图的既有展示口径；节点登记侧不回落） */
 function resolveSourceDocNo(order: InspectionOrder): string | undefined {
-  if (order.inspectionType === 'OQC_SH') {
-    return order.salesOrderNo ?? order.batchNo;
-  }
-  if (order.inspectionType.startsWith('OQC_')) {
-    return order.outsourceNo ?? order.batchNo;
-  }
-  if (order.inspectionType === 'IQC') {
-    return order.inboundNo ?? order.batchNo;
-  }
-  return order.workOrderNo ?? order.batchNo;
+  return resolveInspectionSourceDocNo(order) ?? order.batchNo;
 }
 
 /** 耗时：仅在既有建单时间又有终检时间时给出，否则留空（界面显示 —），不拿状态值占位 */
@@ -149,7 +87,7 @@ export class GetOrderTraceChainUseCase {
             orderNo: order.orderNo,
             orderType: order.inspectionType,
             batchNo: order.batchNo,
-            status: toNodeStatus(order.status, order.overallDecision),
+            status: toTraceNodeStatus(order.status, order.overallDecision),
             ...(sourceDocNo !== undefined ? { sourceDocNo } : {}),
             ...(order.overallDecision !== undefined ? { judgment: order.overallDecision } : {}),
             ...(order.inspectorName !== undefined ? { inspectorName: order.inspectorName } : {}),

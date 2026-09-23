@@ -393,6 +393,23 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
   /** 提交失败文案（docs/35 §4 M3：失败就地红字提示，不再 alert 弹窗打断） */
   const [inspectError, setInspectError] = useState('');
 
+  /**
+   * 台账批量勾选与统一检视（口径：docs/40-过程检验下料与滚丝台账批量勾选与统一检视设计.md）。
+   *
+   * 勾选**以当前页为口径**：换子页 / 翻页 / 提交查询 / 重置筛选一律清空勾选，保证「已勾选 N 条」与
+   * 当前页可见行一一对应，批量检视绝不会对页面上看不见的行下手。批量写路径**复用**单行检视的
+   * 终判唯一写入口（`POST /inspections/{id}/status`，docs/39 §2 D1），逐条各自一事务，
+   * 判不合格即自动汇入不合格待审核池。
+   */
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [bulkModalOpen, setBulkModalOpen] = useState(false);
+  const [bulkVerdict, setBulkVerdict] = useState<'PASSED' | 'FAILED'>('PASSED');
+  const [bulkSubmitting, setBulkSubmitting] = useState(false);
+  const [bulkError, setBulkError] = useState('');
+  const [bulkFailures, setBulkFailures] = useState<Array<{ orderNo: string; message: string }>>([]);
+  /** 批量检视成功后的绿色结果提示（重新勾选 / 清空选择即清除，不弹 alert 打断台账浏览） */
+  const [bulkNotice, setBulkNotice] = useState('');
+
   // 判定依据来源（口径：docs/17-检验录入界面说明与质检方案匹配口径.md §7）：按物料 + 检验类型匹配当前生效方案
   const inspectPlanMatch = useMatchedPlan(
     inspectingOrder?.materialCode ?? null,
@@ -496,9 +513,18 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
     }
   }, [page, pageSize, fetchTableData, sub]);
 
+  /**
+   * 勾选清空时机（docs/40 §3.5）：换子页 / 翻页即清空 —— 勾选范围严格等于「当前页可见行」。
+   * 提交查询（handleSearch）与重置筛选（handleReset）各自显式清空：二者可能不引起 page / sub 变化。
+   */
+  useEffect(() => {
+    setSelectedIds([]);
+  }, [sub, page]);
+
   const handleSearch = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setPage(1);
+    setSelectedIds([]);
     fetchTableData();
   };
 
@@ -508,6 +534,7 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
     setFilterMaterial('');
     setFilterStatus('全部');
     setPage(1);
+    setSelectedIds([]);
   };
 
   /**
@@ -601,6 +628,108 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
     } finally {
       setInspectSubmitting(false);
     }
+  };
+
+  // ==================== 台账批量勾选与统一检视（docs/40） ====================
+
+  /** 勾选列与【检视】按钮**仅**在下料 / 滚丝两页开放；成品检是 ★ 入库关卡页，保持逐单录入（docs/40 §3.6） */
+  const bulkInspectEnabled = sub === 'blanking' || sub === 'rolling';
+
+  const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  /** 已勾选且**在当前页**的行：批量目标一律取自页面数据，绝不拿缺字段的陈旧行去提交 */
+  const selectedRows = useMemo(
+    () => items.filter((row) => selectedIdSet.has(row.id)),
+    [items, selectedIdSet]
+  );
+  const allRowsOnPageSelected = items.length > 0 && selectedRows.length === items.length;
+  const someRowsOnPageSelected = selectedRows.length > 0 && !allRowsOnPageSelected;
+
+  const toggleSelectRow = (id: string) => {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
+    setBulkNotice('');
+  };
+
+  /** 列头复选框：未全选 -> 全选本页；已全选 -> 取消本页勾选（半选态由 indeterminate 呈现） */
+  const toggleSelectAllOnPage = () => {
+    setSelectedIds((prev) => {
+      const pageIds = items.map((row) => row.id);
+      const pageIdSet = new Set(pageIds);
+      const selectedOnPage = prev.filter((id) => pageIdSet.has(id));
+      return pageIds.length > 0 && selectedOnPage.length === pageIds.length
+        ? prev.filter((id) => !pageIdSet.has(id))
+        : Array.from(new Set([...prev, ...pageIds]));
+    });
+    setBulkNotice('');
+  };
+
+  const clearSelection = () => {
+    setSelectedIds([]);
+    setBulkNotice('');
+  };
+
+  const handleOpenBulkInspect = () => {
+    if (selectedRows.length === 0) return;
+    setBulkVerdict('PASSED');
+    setBulkError('');
+    setBulkFailures([]);
+    setBulkModalOpen(true);
+  };
+
+  /**
+   * 批量统一终判：逐条调 `POST /inspections/{id}/status`（docs/39 §2 D1 终判唯一写入口）。
+   *
+   * 每条单据各自一事务 —— 一单失败不影响其它单，失败行逐条回报（红字）并**保留勾选**便于就地重试；
+   * 判不合格同样会经该用例自动汇入不合格待审核池并留下逐单审计记录（与单行检视完全同源）。
+   */
+  const handleSubmitBulkInspect = async () => {
+    const targets = selectedRows;
+    if (targets.length === 0) return;
+    setBulkSubmitting(true);
+    setBulkError('');
+    setBulkFailures([]);
+
+    const failures: Array<{ orderNo: string; message: string }> = [];
+    const succeededIds: string[] = [];
+    for (const row of targets) {
+      // 数量口径与单行快速终判一致（docs/40 §5.1）：只有本单存在真实抽样数才下发数量，
+      // 没有就不下发（由终判用例保留库中原值）—— 绝不用 `sampleQty || 32` 这类演示值顶替。
+      const sampleQty =
+        typeof row.sampleQty === 'number' && Number.isFinite(row.sampleQty) ? row.sampleQty : undefined;
+      const qtyPatch =
+        sampleQty === undefined
+          ? {}
+          : bulkVerdict === 'PASSED'
+            ? { passQty: sampleQty, failQty: 0 }
+            : { passQty: 0, failQty: sampleQty };
+      try {
+        await api.post(`/inspections/${row.id}/status`, {
+          status: bulkVerdict,
+          judgment: bulkVerdict,
+          ...qtyPatch,
+        });
+        succeededIds.push(row.id);
+      } catch (err) {
+        failures.push({ orderNo: row.orderNo, message: errorMessage(err) });
+      }
+    }
+
+    setBulkFailures(failures);
+    // 已成功的行取消勾选；失败的行保留勾选，用户可就地重试而不必重新挑一遍
+    setSelectedIds((prev) => prev.filter((id) => !succeededIds.includes(id)));
+    if (failures.length === 0) {
+      setBulkModalOpen(false);
+      setBulkNotice(
+        `已将勾选的 ${succeededIds.length} 条过程检验单统一判定为${bulkVerdict === 'PASSED' ? '合格' : '不合格'}`
+      );
+    } else {
+      setBulkError(
+        `已判定 ${succeededIds.length} 条，${failures.length} 条失败：${failures
+          .map((item) => `${item.orderNo}（${item.message}）`)
+          .join('；')}`
+      );
+    }
+    await fetchTableData();
+    setBulkSubmitting(false);
   };
 
   // OVERVIEW VIEW
@@ -785,41 +914,41 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
         </div>
 
         {/* Global Summary Banner */}
-        <div className="bg-gradient-to-r from-slate-900 to-slate-800 rounded-xl p-4 text-white shadow-sm flex flex-wrap items-center justify-between gap-4">
+        <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-white/10 flex items-center justify-center">
-              <ShieldCheck className="w-5 h-5 text-emerald-400" />
+            <div className="w-10 h-10 rounded-lg bg-emerald-50 flex items-center justify-center">
+              <ShieldCheck className="w-5 h-5 text-emerald-600" />
             </div>
             <div>
-              <div className="text-xs text-slate-400">今日过程检验管控总量</div>
-              <div className="text-xl font-bold">{summary.total} 批次</div>
+              <div className="text-xs text-slate-500">今日过程检验管控总量</div>
+              <div className="text-xl font-bold text-slate-800">{summary.total} 批次</div>
             </div>
           </div>
 
           <div className="flex items-center gap-6 text-xs">
             <div>
-              <span className="text-slate-400 block">待检排队</span>
-              <span className="text-base font-bold text-amber-400">{summary.pending}</span>
+              <span className="text-slate-500 block">待检排队</span>
+              <span className="text-base font-bold text-amber-600">{summary.pending}</span>
             </div>
-            <div className="w-px h-8 bg-slate-700" />
+            <div className="w-px h-8 bg-slate-200" />
             <div>
-              <span className="text-slate-400 block">检验中</span>
-              <span className="text-base font-bold text-sky-400">{summary.inspecting}</span>
+              <span className="text-slate-500 block">检验中</span>
+              <span className="text-base font-bold text-blue-600">{summary.inspecting}</span>
             </div>
-            <div className="w-px h-8 bg-slate-700" />
+            <div className="w-px h-8 bg-slate-200" />
             <div>
-              <span className="text-slate-400 block">合格放行</span>
-              <span className="text-base font-bold text-emerald-400">{summary.passed}</span>
+              <span className="text-slate-500 block">合格放行</span>
+              <span className="text-base font-bold text-emerald-600">{summary.passed}</span>
             </div>
-            <div className="w-px h-8 bg-slate-700" />
+            <div className="w-px h-8 bg-slate-200" />
             <div>
-              <span className="text-slate-400 block">不合格拦截</span>
-              <span className="text-base font-bold text-rose-400">{summary.failed}</span>
+              <span className="text-slate-500 block">不合格拦截</span>
+              <span className="text-base font-bold text-rose-600">{summary.failed}</span>
             </div>
-            <div className="w-px h-8 bg-slate-700" />
+            <div className="w-px h-8 bg-slate-200" />
             <div>
-              <span className="text-slate-400 block">综合合格率</span>
-              <span className="text-base font-bold text-emerald-400">{summary.passRate}%</span>
+              <span className="text-slate-500 block">综合合格率</span>
+              <span className="text-base font-bold text-emerald-600">{summary.passRate}%</span>
             </div>
           </div>
         </div>
@@ -928,6 +1057,8 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
     onOpenInspect: handleOpenInspect,
     onOpenCert: handleOpenCert,
   });
+  /** 实际渲染列数 = 业务 11 列 + （下料 / 滚丝）行选择列（空态与加载态行的 colSpan 必须同源） */
+  const ledgerColumnCount = ledgerColumns.length + (bulkInspectEnabled ? 1 : 0);
 
   return (
     <div className="space-y-4">
@@ -1055,12 +1186,77 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
         </div>
       )}
 
+      {/* 批量检视结果提示（成功）：绿色提示条，点【关闭】或重新勾选即消失 */}
+      {bulkNotice && (
+        <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs rounded-lg flex items-center justify-between">
+          <span>{bulkNotice}</span>
+          <button onClick={() => setBulkNotice('')} className="underline hover:text-emerald-900 ml-2">
+            关闭
+          </button>
+        </div>
+      )}
+
       {/* Main Table */}
       <div className="bg-white border border-slate-200 rounded-lg overflow-hidden shadow-sm">
+        {/* 批量检视工具条（表格右上角）：仅下料 / 滚丝两页出现，成品检保持逐单关卡语义（docs/40 §3.6） */}
+        {bulkInspectEnabled && (
+          <div className="px-4 py-2.5 border-b border-slate-100 flex items-center justify-between gap-3">
+            <span className="text-xs text-slate-500">
+              {selectedRows.length > 0 ? (
+                <>
+                  已勾选 <span className="font-semibold text-blue-600">{selectedRows.length}</span> 条 · 检视后统一判定
+                </>
+              ) : (
+                '勾选左侧复选框后可批量检视（支持全选）'
+              )}
+            </span>
+            <div className="flex items-center gap-3">
+              {selectedRows.length > 0 && (
+                <button
+                  type="button"
+                  onClick={clearSelection}
+                  className="text-xs text-slate-500 hover:text-slate-700 underline"
+                >
+                  清空选择
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleOpenBulkInspect}
+                disabled={selectedRows.length === 0}
+                title={
+                  selectedRows.length === 0
+                    ? '请先勾选需要检视的记录'
+                    : `对已勾选的 ${selectedRows.length} 条记录批量检视`
+                }
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded bg-blue-600 text-white text-xs font-medium shadow-sm hover:bg-blue-700 transition-colors disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none disabled:cursor-not-allowed"
+              >
+                <ShieldCheck className="w-3.5 h-3.5" />
+                检视
+              </button>
+            </div>
+          </div>
+        )}
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs border-collapse">
             <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 font-medium select-none">
               <tr>
+                {bulkInspectEnabled && (
+                  <th className={`${LEDGER_TH_CLASS} w-10 text-center`}>
+                    <input
+                      type="checkbox"
+                      aria-label="全选本页过程检验单"
+                      checked={allRowsOnPageSelected}
+                      ref={(el) => {
+                        if (el) el.indeterminate = someRowsOnPageSelected;
+                      }}
+                      onChange={toggleSelectAllOnPage}
+                      disabled={items.length === 0}
+                      title="全选 / 取消全选本页"
+                      className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 disabled:opacity-40"
+                    />
+                  </th>
+                )}
                 {ledgerColumns.map((col) => (
                   <th key={col.key} className={`${LEDGER_TH_CLASS} ${col.thClass ?? ''}`}>
                     {col.title}
@@ -1071,20 +1267,31 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
             <tbody className="divide-y divide-slate-100 text-slate-700">
               {tableLoading ? (
                 <tr>
-                  <td colSpan={ledgerColumns.length} className="py-12 text-center text-slate-400">
+                  <td colSpan={ledgerColumnCount} className="py-12 text-center text-slate-400">
                     <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2 text-blue-600" />
                     正在连接数据库获取过程检验数据...
                   </td>
                 </tr>
               ) : items.length === 0 ? (
                 <tr>
-                  <td colSpan={ledgerColumns.length} className="py-12 text-center text-slate-400">
+                  <td colSpan={ledgerColumnCount} className="py-12 text-center text-slate-400">
                     暂无符合条件的过程检验数据
                   </td>
                 </tr>
               ) : (
                 items.map((row) => (
                   <tr key={row.id} className="hover:bg-slate-50/70 transition-colors">
+                    {bulkInspectEnabled && (
+                      <td className={`${LEDGER_TD_CLASS} text-center`}>
+                        <input
+                          type="checkbox"
+                          aria-label={`勾选检验单 ${row.orderNo}`}
+                          checked={selectedIdSet.has(row.id)}
+                          onChange={() => toggleSelectRow(row.id)}
+                          className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                        />
+                      </td>
+                    )}
                     {ledgerColumns.map((col) => (
                       <td key={col.key} className={`${LEDGER_TD_CLASS} ${col.tdClass ?? ''}`}>
                         {col.render(row)}
@@ -1336,6 +1543,119 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
                 className="px-4 py-1.5 rounded-lg bg-slate-800 text-white hover:bg-slate-900 text-xs font-medium transition-colors"
               >
                 关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* BULK INSPECT MODAL（批量检视：统一合格 / 统一不合格，docs/40 §3.3） */}
+      {bulkModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="px-5 py-3.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-sm text-slate-800">
+                  批量检视：已勾选 {selectedRows.length} 条过程检验单
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  统一判定后逐条落库 · 判不合格自动汇入不合格待审核池 (MRB)
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setBulkModalOpen(false)}
+                disabled={bulkSubmitting}
+                className="p-1 rounded text-slate-400 hover:text-slate-600 hover:bg-slate-200/50 disabled:opacity-50"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 text-xs">
+              <div>
+                <label className="block text-slate-600 font-medium mb-1.5">检视结论（应用到全部勾选记录）</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setBulkVerdict('PASSED')}
+                    className={`py-2 rounded border text-xs font-semibold flex items-center justify-center gap-1 transition-all ${
+                      bulkVerdict === 'PASSED'
+                        ? 'bg-emerald-50 border-emerald-500 text-emerald-700 shadow-sm'
+                        : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                    }`}
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                    合格
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBulkVerdict('FAILED')}
+                    className={`py-2 rounded border text-xs font-semibold flex items-center justify-center gap-1 transition-all ${
+                      bulkVerdict === 'FAILED'
+                        ? 'bg-rose-50 border-rose-500 text-rose-700 shadow-sm'
+                        : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+                    }`}
+                  >
+                    <XCircle className="w-3.5 h-3.5 text-rose-600" />
+                    不合格
+                  </button>
+                </div>
+              </div>
+
+              <div className="bg-slate-50 border border-slate-100 rounded p-3 space-y-1">
+                <div className="flex justify-between">
+                  <span className="text-slate-400">勾选条数:</span>
+                  <span className="font-semibold text-slate-800">{selectedRows.length} 条</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">统一结论:</span>
+                  <span className={`font-semibold ${bulkVerdict === 'PASSED' ? 'text-emerald-600' : 'text-rose-600'}`}>
+                    {bulkVerdict === 'PASSED' ? '合格' : '不合格'}
+                  </span>
+                </div>
+                <div className="text-[11px] text-slate-400 pt-0.5">
+                  检验单号: {selectedRows.slice(0, 6).map((row) => row.orderNo).join('、')}
+                  {selectedRows.length > 6 ? ` 等 ${selectedRows.length} 条` : ''}
+                </div>
+              </div>
+
+              {bulkError && (
+                <div className="p-2.5 bg-rose-50 border border-rose-200 rounded text-rose-700">{bulkError}</div>
+              )}
+
+              {bulkFailures.length > 0 && (
+                <div className="p-2.5 bg-rose-50 border border-rose-200 rounded text-rose-700 space-y-1">
+                  <div className="font-medium">以下记录判定失败（已保留勾选，可直接重试）:</div>
+                  <ul className="list-disc pl-4 space-y-0.5">
+                    {bulkFailures.map((failure) => (
+                      <li key={failure.orderNo}>
+                        <span className="font-mono">{failure.orderNo}</span>：{failure.message}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+
+            <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setBulkModalOpen(false)}
+                disabled={bulkSubmitting}
+                className="px-3.5 py-1.5 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-100 text-xs font-medium disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={handleSubmitBulkInspect}
+                disabled={bulkSubmitting || selectedRows.length === 0}
+                className="px-4 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-xs font-medium disabled:bg-slate-300 disabled:cursor-not-allowed"
+              >
+                {bulkSubmitting
+                  ? '提交中…'
+                  : `确定（统一判定为${bulkVerdict === 'PASSED' ? '合格' : '不合格'}）`}
               </button>
             </div>
           </div>

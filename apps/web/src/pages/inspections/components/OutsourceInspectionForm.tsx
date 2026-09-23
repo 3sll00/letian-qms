@@ -130,19 +130,24 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
   const [spec, setSpec] = useState(fromList(initialItem?.specification ?? initialItem?.spec));
   const [materialGrade, setMaterialGrade] = useState(fromList(initialItem?.materialGrade ?? initialItem?.material));
   const [batchNo, setBatchNo] = useState(fromList(initialItem?.batchNo));
+  // 回厂日期（inspection_orders.return_date，docs/36 §1.2）：物理列 / 契约 / 接口自 009 起就已就绪，
+  // 但此前表单没有该输入 —— 新建单该列恒为 NULL，台账「回厂日期」恒显示「—」。
+  const [returnDate, setReturnDate] = useState(fromList(initialItem?.returnDate));
   const [quantity, setQuantity] = useState(
     initialItem?.qty !== undefined && initialItem?.qty !== null && initialItem?.qty !== ''
       ? `${initialItem.qty}${initialItem.unit ? ` ${initialItem.unit}` : ''}`
       : ''
   );
-  // 执行技术标准在检验单与列表行上都没有真实字段，留空由录入人按本单方案填写（不编造标准号）
-  const [techStandard, setTechStandard] = useState('');
+  // 执行技术标准自 030 起有物理列 inspection_orders.tech_standard（docs/36）：
+  // 初始值只取列表行真实值，无来源即留空（不编造标准号）；历史口径「无真实字段」已废止
+  const [techStandard, setTechStandard] = useState(fromList(initialItem?.techStandard));
   // 综合判定**不预置结论**（docs/34 §6.2）：未选择前保持空串，三选一无人勾选，提交时强制显式选择。
   // 历史实现默认 `合格`，会把尚未检验的单据判成合格并写进制造证书与检验单状态。
   const [decision, setDecision] = useState<'' | '合格' | '不合格' | '返工'>('');
   const [inspector, setInspector] = useState(fromList(initialItem?.inspector));
   // 检验日期默认「今天」：录入动作真实发生日；历史默认值 `2026-07-06` 是编造的固定日期
-  const [inspectDate, setInspectDate] = useState(todayIsoDate());
+  // 存量单优先取本单落库值（inspection_orders.inspected_date，docs/36），无值才默认「今天」
+  const [inspectDate, setInspectDate] = useState(fromList(initialItem?.inspectedDate) || todayIsoDate());
   // 判定评语不预置演示结论文案（原默认值是一段"判定合格"的文字，会让尚未检验的空白单据
   // 看起来已经判过并被打印进制造证书）
   const [conclusion, setConclusion] = useState('');
@@ -368,6 +373,10 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
     if (order === null) return;
     setDocNo(order.orderNo);
     setOutsourceNo(order.outsourceNo ?? '');
+    setReturnDate(order.returnDate ?? '');
+    // 030 委外录入页业务事实字段（docs/36）：只认本单物理列，无值即留空（不推导、不预置）
+    setMaterialGrade(order.materialGrade ?? '');
+    setTechStandard(order.techStandard ?? '');
     setPartName(order.materialName);
     const specText = order.specification ?? order.spec;
     if (specText !== undefined && specText !== '') setSpec(specText);
@@ -377,8 +386,10 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
     setBatchNo(order.batchNo);
     setQuantity(`${order.sampleQty}${order.unit !== undefined ? ` ${order.unit}` : ''}`);
     if (order.inspectorName !== undefined && order.inspectorName !== '') setInspector(order.inspectorName);
-    const stamp = order.completedAt ?? order.createdAt;
-    if (stamp !== undefined) setInspectDate(stamp.slice(0, 10));
+    // 检验日期：本单落库的 inspected_date 优先；只有历史行（该列为空）才回落
+    // completedAt ?? createdAt（docs/36 §6，已下发的录入值不再被推导值覆盖）
+    const inspectedStamp = order.inspectedDate ?? order.completedAt ?? order.createdAt;
+    if (inspectedStamp !== undefined) setInspectDate(inspectedStamp.slice(0, 10));
     if (order.inspectionNotes !== undefined) setConclusion(order.inspectionNotes);
     // 物料编码与签核人：只认本单真实落库值（物料编码仅回读展示，不参与改写历史单据）
     if (order.materialCode !== undefined && order.materialCode !== '') setMaterialCode(order.materialCode);
@@ -549,6 +560,12 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
           ...(outsourceNo.trim() !== '' ? { outsourceNo } : {}),
           ...(processType.trim() !== '' ? { processType } : {}),
           ...(vendorName.trim() !== '' ? { vendorName } : {}),
+          // 回厂日期：物理列 / 契约自 009 起就绪，此前表单没有该输入（docs/36 §1.2）
+          ...(returnDate.trim() !== '' ? { returnDate } : {}),
+          // 030 委外录入页业务事实字段（docs/36）：空串不下发，避免把既有值覆盖成空
+          ...(materialGrade.trim() !== '' ? { materialGrade } : {}),
+          ...(techStandard.trim() !== '' ? { techStandard } : {}),
+          ...(inspectDate.trim() !== '' ? { inspectedDate: inspectDate } : {}),
           ...(inspector.trim() !== '' ? { inspectorName: inspector } : {}),
           // 命中的方案版本 ID 原样回传，服务端按该版本固化 planSnapshot 快照
           ...(planVersionId !== null ? { planVersionId } : {}),
@@ -833,6 +850,18 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
               className="w-full bg-slate-50/50 border border-slate-200 rounded px-2.5 py-1.5 text-slate-800 focus:bg-white focus:outline-none focus:border-blue-500"
             />
           </div>
+          <div>
+            <label className="block text-slate-500 mb-1">回厂日期 (Return Date)</label>
+            {/* inspection_orders.return_date（009 起物理列已就绪）：台账「回厂日期」列的唯一写入口，
+                此前表单缺失导致新建单该列恒为 NULL（docs/36 §1.2） */}
+            <input
+              type="text"
+              value={returnDate}
+              onChange={(e) => setReturnDate(e.target.value)}
+              placeholder="委外件回厂登记日 YYYY-MM-DD（无则留空）"
+              className="w-full bg-slate-50/50 border border-slate-200 rounded px-2.5 py-1.5 text-slate-800 font-mono focus:bg-white focus:outline-none focus:border-blue-500"
+            />
+          </div>
           <div className="md:col-span-2">
             <label className="block text-slate-500 mb-1">产品名称及规格 (Description & Size)</label>
             <input
@@ -859,7 +888,7 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
               type="text"
               value={materialGrade}
               onChange={(e) => setMaterialGrade(e.target.value)}
-              placeholder="按物料主数据 / 本单方案填写"
+              placeholder="如 10.9级 / 35CrMo（本单录入值，随检验单落库）"
               className="w-full bg-slate-50/50 border border-slate-200 rounded px-2.5 py-1.5 text-slate-800 focus:bg-white focus:outline-none focus:border-blue-500"
             />
           </div>
@@ -889,7 +918,7 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
               type="text"
               value={techStandard}
               onChange={(e) => setTechStandard(e.target.value)}
-              placeholder="按本单方案的标准要求填写"
+              placeholder="如 GB/T 3098.1-2010（本单录入值，落库并打印到制造证书）"
               className="w-full bg-slate-50/50 border border-slate-200 rounded px-2.5 py-1.5 text-slate-800 focus:bg-white focus:outline-none focus:border-blue-500"
             />
           </div>

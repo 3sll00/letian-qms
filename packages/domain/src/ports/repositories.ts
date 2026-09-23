@@ -52,6 +52,23 @@ export interface InspectionOrderRepository {
   save(order: InspectionOrder): Promise<void>;
   updateStatus(id: string, status: string, remark?: string): Promise<void>;
   /**
+   * 终判的数量 / 结论落库（合格数、不合格数、综合判定、终判时间、终判备注）。
+   *
+   * 此前该方法只存在于 Kysely 实现类上、未进入端口，控制器只能绕过用例层直接拿读侧仓储写入
+   * （`POST /inspections/:id/status`），导致终判路径**无法在事务内入池**（docs/39 §2 D1）。
+   * 进入端口后由 `FinalizeInspectionStatusUseCase` 在事务内调用。
+   */
+  updateStatsAndVerdict(
+    id: string,
+    data: {
+      passQty?: number;
+      failQty?: number;
+      judgment?: string;
+      completedAt?: Date;
+      inspectionNotes?: string;
+    }
+  ): Promise<void>;
+  /**
    * 质量负责人签核（docs/35 §5）：写入真实签核动作的产物（签核人 id / 姓名 / 时间）。
    * 签核人由调用方从会话取，仓储不校验身份；未签核时该行三列为 NULL。
    */
@@ -91,8 +108,9 @@ export interface ReviewFlowRepository {
  *
  * PBAC 三维行级过滤随查询一并下推 SQL（`permissions`）：
  * - 分类维度由 `materials.category_code` 子查询换算（池表只有 `material_code`，不需要冗余列）；
- * - 供应商维度按 fail-closed 处理 —— 池表没有供应商编码列，限定供应商的规则不匹配任何行，
- *   与 `GET /mrb/records` 的既有口径一致（docs/21 §6.5）。
+ * - 供应商维度**经源检验单换算**（池表无 `supplier_code` 列，按 `source_order_id` 关联
+ *   `inspection_orders.supplier_code`）；源单缺失即不命中该规则（fail-closed）。
+ *   此前对限定供应商的规则整条跳过，导致三维限定用户「台账看得到、池里看不到」（docs/39 §2 D2）。
  * `total` 必须是**同一套条件过滤后**的总数，不得用当页数据推算。
  */
 export interface PendingDefectQuery {

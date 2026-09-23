@@ -8,6 +8,7 @@ import {
   InspectionTypeEnum,
   InspectionStatusEnum,
   ApproveInspectionOrderRequestSchema,
+  FinalizeInspectionStatusRequestSchema,
   type InspectionOrder,
 } from '@letian/contracts';
 import { NotFoundError, ValidationFailedError } from '@letian/application';
@@ -349,6 +350,11 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
           ...(body.processType !== undefined ? { processType: body.processType } : {}),
           ...(body.returnDate !== undefined ? { returnDate: body.returnDate } : {}),
           ...(body.vendorName !== undefined ? { vendorName: body.vendorName } : {}),
+          // 030 委外检验录入页业务事实字段（docs/36）：材质牌号 / 执行技术标准 / 检验日期。
+          // 契约已声明，控制器必须透传 —— 否则与 006/008 同型：调用方传了也被静默丢弃。
+          ...(body.materialGrade !== undefined ? { materialGrade: body.materialGrade } : {}),
+          ...(body.techStandard !== undefined ? { techStandard: body.techStandard } : {}),
+          ...(body.inspectedDate !== undefined ? { inspectedDate: body.inspectedDate } : {}),
           // 台账「检验人」列（inspection_orders.inspector_id / inspector_name）：契约早已声明 inspectorName，
           // 但此前控制器两条都没透传，建单传入的检验人被静默丢弃 -> 台账「检验人」恒为 --（见 docs/30 §3）
           ...(body.inspectorId !== undefined ? { inspectorId: body.inspectorId } : {}),
@@ -470,48 +476,45 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
   );
 
   // 5. 更新检验单状态与判定 (status & verdict)
+  //
+  //   终判唯一写入口（docs/39 §2 D1）：走 useCases.finalizeInspectionStatus，在同一事务内完成
+  //   状态流转、数量 / 结论 / 终判时间落库、**判不合格自动汇入不合格待审核池**与审计留痕。
+  //   此前这里直接调读侧仓储写入（无事务、无审计、无入池），导致「判定不合格 -> 入池」
+  //   （PRD §3.7）在这条路径上从未发生，MRB 页面自然看不到记录。
   fastify.post(
     "/:id/status",
     {
       schema: {
         params: InspectionParamsSchema,
+        body: FinalizeInspectionStatusRequestSchema,
       },
     },
     async (request, reply) => {
       const { id } = request.params as z.infer<typeof InspectionParamsSchema>;
-      const body = request.body as {
-        status: string;
-        remark?: string;
-        judgment?: string;
-        passQty?: number;
-        failQty?: number;
-        sampleQty?: number;
-        inspectionNotes?: string;
-      };
+      const body = request.body as z.infer<typeof FinalizeInspectionStatusRequestSchema>;
+      const operator = operatorOf(request);
+      const securityCtx = await buildRequestSecurityContext(request, container);
 
-      const order = await orders.findById(id);
-      if (!order) {
-        throw new NotFoundError("检验单不存在: " + id);
-      }
+      // 逐字段条件展开：exactOptionalPropertyTypes 下不能显式传 undefined
+      const updated = await container.useCases.finalizeInspectionStatus.execute(
+        {
+          orderId: id,
+          status: body.status,
+          ...(body.judgment !== undefined ? { judgment: body.judgment } : {}),
+          ...(body.passQty !== undefined ? { passQty: body.passQty } : {}),
+          ...(body.failQty !== undefined ? { failQty: body.failQty } : {}),
+          ...(body.sampleQty !== undefined ? { sampleQty: body.sampleQty } : {}),
+          ...(body.remark !== undefined ? { remark: body.remark } : {}),
+          ...(body.inspectionNotes !== undefined ? { inspectionNotes: body.inspectionNotes } : {}),
+          ...(body.preliminaryDisposition !== undefined
+            ? { preliminaryDisposition: body.preliminaryDisposition }
+            : {}),
+          operatorId: operator.userId,
+          operatorName: operator.userName,
+        },
+        securityCtx
+      );
 
-      if (body.status) {
-        await orders.updateStatus(id, body.status, body.remark || body.inspectionNotes);
-      }
-
-      const isFinished = ["PASSED", "COMPLETED", "FAILED"].includes(body.status);
-      const updatePayload: { passQty?: number; failQty?: number; judgment?: string; completedAt?: Date; inspectionNotes?: string } = {};
-      if (body.passQty !== undefined) updatePayload.passQty = body.passQty;
-      if (body.failQty !== undefined) updatePayload.failQty = body.failQty;
-      if (body.judgment !== undefined) updatePayload.judgment = body.judgment;
-      const note = body.inspectionNotes ?? body.remark;
-      if (note !== undefined) {
-        updatePayload.inspectionNotes = note;
-      }
-      if (isFinished) updatePayload.completedAt = new Date();
-
-      await orders.updateStatsAndVerdict(id, updatePayload);
-
-      const updated = await orders.findById(id);
       return reply.status(200).send(updated);
     }
   );

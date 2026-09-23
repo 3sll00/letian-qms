@@ -11,19 +11,20 @@
 ```bash
 node scripts/testing/oqc-verify.cjs           # 出货检验（OQC）台账
 node scripts/testing/inspections-verify.cjs  # 来料检验（IQC）+ 委外检验台账
-node scripts/testing/ipqc-ledger-verify.cjs  # 过程检验（IPQC）下料 / 滚丝 / 成品检三页台账
+node scripts/testing/ipqc-ledger-verify.cjs  # 过程检验（IPQC）总览看板 + 下料 / 滚丝 / 成品检三页台账
 node scripts/testing/mrb-verify.cjs          # MRB 不合格品处置（离线 Mock 模式）
 node scripts/testing/mrb-wiring-verify.cjs   # MRB 字段 / 契约 / API 打通验收（真实库 + 真实 HTTP）
 node scripts/testing/audit_check.js          # 源码静态审计
 node scripts/testing/leftovers2-probe.cjs     # docs/35 遗留项二轮收口（真实库 + 真实页面读写，跑完需 db:seed 复位）
 node scripts/testing/leftovers2-mock-probe.cjs # 同一批收口的离线 Mock 冒烟（需 dev:mock 跑在 :5200）
 node scripts/testing/eol-check.cjs             # 仓库行尾（EOL）门禁：读 git ls-files --eol，不碰业务代码
+node scripts/testing/plan-match-ui-probe.cjs    # 质检方案匹配界面级验收：陈静「录入表单为空」的正例 / 负例（只读）
 ```
 
 前三个脚本需要后端 `:3100` 与前端 `:5200` 已启动；`mrb-wiring-verify.cjs` 需要**后端 API 已启动**（默认 `:3101`，
 用 `PORT=3101 pnpm --filter @letian/api run dev` 另起一个实例，勿指向常驻 `:3100`）且数据库已迁移到最新并执行过
 `pnpm db:seed`（脚本按演示数据断言，跑完会还原数据；自建来源单的验收行亦同批清理）。
-根脚本入口：`pnpm run verify:oqc` / `verify:inspections` / `verify:ipqc-ledger` / `verify:mrb` / `verify:mrb-wiring` / `verify:outsource-no` / `verify:leftovers2` / `verify:leftovers2:mock` / `verify:eol` / `audit:code`。
+根脚本入口：`pnpm run verify:oqc` / `verify:inspections` / `verify:ipqc-ledger` / `verify:mrb` / `verify:mrb-wiring` / `verify:plan-match` / `verify:outsource-no` / `verify:leftovers2` / `verify:leftovers2:mock` / `verify:eol` / `audit:code`。
 
 退出码 `0` = 通过，非 `0` = 存在 FAIL / 超预算（明细见输出与 `scripts/logs/`，该目录已 gitignore）。
 
@@ -39,7 +40,7 @@ node scripts/testing/eol-check.cjs             # 仓库行尾（EOL）门禁：�
 |:---|:---|:---|
 | `oqc-verify.cjs` | 出货检验台账 | 8 |
 | `inspections-verify.cjs` | 来料检验 + 委外检验台账 | 18 |
-| `ipqc-ledger-verify.cjs` | 过程检验**三页**台账（下料 / 滚丝 / 成品检；11 列列集 + 逐列对账 + 无伪造值守门 + 筛选落 SQL + 建单写路径往返） | 29 |
+| `ipqc-ledger-verify.cjs` | 过程检验**总览看板 + 三页**台账（下料 / 滚丝 / 成品检；总览汇总条浅色口径与取值对接口 + 11 列列集 + 逐列对账 + 无伪造值守门 + 筛选落 SQL + 建单写路径往返） | 35 |
 | `mrb-verify.cjs` | MRB 不合格品处置单页 + 并列菜单「评审流程设置」子页 + 返工处置回吐复检单号（离线 Mock） | 23 |
 
 ## 输出
@@ -50,6 +51,7 @@ node scripts/testing/eol-check.cjs             # 仓库行尾（EOL）门禁：�
 | `iqc-list-after-wiring.png` | 来料检验台账截图 |
 | `outsource-list-after-wiring.png` | 委外检验台账截图 |
 | `ipqc-blanking-ledger.png` / `ipqc-rolling-ledger.png` / `ipqc-finished-ledger.png` | 过程检验三页台账截图（下料 / 滚丝 / 成品检，各 11 列） |
+| `ipqc-overview-board.png` | 过程检验总览看板截图（三工序卡片 + 今日管控总量汇总条，浅色口径） |
 | `oqc-verify.log` / `inspections-verify.log` | 逐条 PASS / FAIL 明细 |
 | `mrb-list-light.png` / `mrb-list-under-review.png` / `mrb-pool-drawer.png` / `mrb-review-drawer.png` / `mrb-disposition-rework.png` / `mrb-workflow-light.png` | MRB 页面、两个抽屉、**返工处置成功横幅（复检单号）**与「评审流程设置」子页截图 |
 | `mrb-mock-verify.log` | MRB 逐条 PASS / FAIL 明细 |
@@ -288,3 +290,52 @@ pnpm verify:eol            # 等价 node scripts/testing/eol-check.cjs
 改本机配置对已跟踪文本文件不起作用。
 
 退出码：`0` = 收敛；`1` = 存在违规（明细见输出与 `scripts/logs/eol-check.log`）；`2` = 非 git 仓库 / git 不可用。
+
+---
+
+# 七、质检方案匹配界面级验收（`plan-match-ui-probe.cjs`）
+
+（等价入口：`pnpm run verify:plan-match`）
+
+对应 `docs/42-质检方案域PBAC供应商维度错配修复设计.md`：把用户实测现象「**陈静的检验填写内容为空**」固化成
+**界面级**可重跑断言。接口级断言在同篇文档登记的 `apps/api/test/integration/plan-match-pbac-link.test.ts` 里，
+两侧缺一不可 —— 接口全绿但界面仍空，正是这次用户踩到的那种割裂。
+
+| 项 | 内容 |
+|:---|:---|
+| 环境 | 前端 `:5200` + 后端 `:3100` **都必须已启动**；任一不可达直接以退出码 `3` FATAL 退出，不让 Chrome 空等到超时 |
+| 前置数据 | 演示基线（`pnpm db:seed`）：`INS-20231013-0001` 必须是 `PENDING`（界面「待检验」）—— 只有待检验 / 检验中的行才带行内【检验】按钮，也就是**按当前方案录入**（MATCH）的入口 |
+| 断言数 | 20 |
+| 是否写库 | **否**（只导航 + 读 DOM + 调只读接口 + 浏览器内请求替身） |
+
+## 两条用例
+
+| 用例 | 做法 | 判定 |
+|:---|:---|:---|
+| P1 正例 | 以 `陈静`（`IQC_INSPECTOR`，三维限定规则）身份打开 `INS-20231013-0001` 的录入表单 | 横幅 `data-status=ready`、命中 `QP-IQC-304SS`、指标条「检验项总数 **4** 项」、三分区渲染 直径 / 抗拉强度 / 碳含量 / 表面粗糙度，且**不出现**「无需录入」「清单未就绪」空态 |
+| P2 负例 | `Fetch.enable` 拦截 `/api/v1/plans/match*`，回放服务端**真实 403 响应体**（`pbac-permission-denied`） | 横幅 `data-status=error`、`data-permission-denied=true`、标题「无该物料的数据权限」、副文案指向「系统管理 - 物料权限」而**不再**引导去找质量工程师配方案、分区空态改说「未就绪」 |
+
+**P2 为什么用请求替身，而不是"找一单真正越权的"**：陈静的台账被行级过滤约束在管辖范围内，界面上不存在能自然
+点出 403 的行；强行造库又会写数据。替身只替换**响应字节**，不伪造字段、不碰库，验证的正是「403 该渲染成哪一支
+分支、文案指向哪里」这一件事（这正是 D2 修的 Bug：把权限拦截说成"方案没配"，把人引去找质量工程师）。
+
+## 输出
+
+| 文件 | 说明 |
+|:---|:---|
+| `plan-match-chenjing-fixed.png` | 修复后录入页（横幅「已匹配质检方案」+ 4 项待检指标） |
+| `plan-match-chenjing-403.png` | 403 分支（标题「无该物料的数据权限」+ 三分区「未就绪」空态） |
+| `plan-match-ui-probe.log` | 逐条 PASS / FAIL 明细 |
+
+截图同时落在 `docs/screenshots/`（入库，作验收证据）与 `scripts/logs/`（已 gitignore）。
+
+退出码：`0` = 20 条断言全通过；`1` = 存在失败项或探针异常；`3` = 环境不可用。
+
+## 两个已踩的坑（都写进脚本了）
+
+1. **`Chrome CDP not reachable` 不是"Chrome 起不来"**：探针最初复用固定 `user-data-dir`，而该 profile 正被别的
+   Chrome 占用时，新进程会把命令行**转交给旧实例后自己退出**，调试端口永远不监听。现在每次都用带 `pid + 时间戳`
+   的全新 profile（跑完连同 profile 一起删除，免得 `scripts/logs/` 攒一堆浏览器用户目录），并把 Chrome 的
+   stderr 落到 `scripts/logs/plan-match-ui-probe.chrome.err.log` 便于定位。
+2. **固定 `sleep` 赌加载时间会偶发假失败**：页面加载 / 点击 / 请求返回都是异步的，改成轮询「目标行出现 / 提示条
+   出现 / `data-status` 变成期望值」后，探针从 51s 压到 5s，且连续多次运行结果一致。

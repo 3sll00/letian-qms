@@ -373,6 +373,10 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
         ...(order.processType !== undefined ? { processType: order.processType } : {}),
         ...(order.returnDate !== undefined ? { returnDate: order.returnDate } : {}),
         ...(order.vendorName !== undefined ? { vendorName: order.vendorName } : {}),
+        // 030 委外检验录入页业务事实字段（docs/36）：同样仅在显式传入时写入
+        ...(order.materialGrade !== undefined ? { materialGrade: order.materialGrade } : {}),
+        ...(order.techStandard !== undefined ? { techStandard: order.techStandard } : {}),
+        ...(order.inspectedDate !== undefined ? { inspectedDate: order.inspectedDate } : {}),
         // 007 过程检验工序字段：此前 save() 只写入 work_order_no，其余 9 列（断料长度 / 操作员 /
         // 设备 / 螺纹规格 / 终检组 / 工序阶段 / 完成时间）一列都没写，而读路径 mapRow 一直在读，
         // 属「读得出、写不进」的断链（见 docs/24 §6 D4、docs/29 §3 断链 ②）。
@@ -427,6 +431,11 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
         ...(order.processType !== undefined ? { processType: order.processType } : {}),
         ...(order.returnDate !== undefined ? { returnDate: order.returnDate } : {}),
         ...(order.vendorName !== undefined ? { vendorName: order.vendorName } : {}),
+        // 030 委外检验录入页业务事实字段：与 insert 同一「显式传入才写」口径，
+        // 避免重建型用例把已有值抹成 NULL
+        ...(order.materialGrade !== undefined ? { materialGrade: order.materialGrade } : {}),
+        ...(order.techStandard !== undefined ? { techStandard: order.techStandard } : {}),
+        ...(order.inspectedDate !== undefined ? { inspectedDate: order.inspectedDate } : {}),
         // 007 过程检验工序字段：与 insert 同一「显式传入才写」口径。
         // 这些值来自仓储读侧的 DTO 回吐（见 mapRow），因此重建型用例（暂存草稿 / 录入实测值 /
         // 复检）不会把已有值抹成 NULL。
@@ -893,6 +902,13 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
         : resolvedSupplierName
           ? { vendorName: resolvedSupplierName }
           : {}),
+      // 030 委外检验录入页业务事实字段（docs/36）：只取物理列，为空即不输出该键（界面留空），
+      // 绝不从物料名称 / 方案号 / 建单时间推导（历史行三列均为 NULL 属既定口径）
+      ...((row as any).materialGrade ? { materialGrade: (row as any).materialGrade } : {}),
+      ...((row as any).techStandard ? { techStandard: (row as any).techStandard } : {}),
+      ...((row as any).inspectedDate
+        ? { inspectedDate: String((row as any).inspectedDate).slice(0, 10) }
+        : {}),
       // 029 质量负责人签核（docs/35 §5）：只输出物理列的真实值；未签核即不输出该键，
       // 制造证书 / 质量证书据此留白，绝不用「签核人」这类键冒充已发生的签核动作。
       ...((row as any).approverId ? { approverId: (row as any).approverId } : {}),

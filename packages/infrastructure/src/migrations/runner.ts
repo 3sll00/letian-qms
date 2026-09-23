@@ -29,6 +29,10 @@ import * as unifyMaterialCodesMigration from './026_unify_material_codes.js';
 import * as unifyMachinedMaterialCategoryMigration from './027_unify_machined_material_category.js';
 import * as unifyOutsourceReferencesMigration from './028_unify_outsource_references.js';
 import * as companyProfileAndOrderApprovalMigration from './029_company_profile_and_order_approval.js';
+import * as outsourceEntryFieldsMigration from './030_add_outsource_entry_fields.js';
+import * as oqcFamilyInspectionPlanMigration from './031_add_oqc_family_inspection_plan.js';
+import * as outsourceMachHeatPlansMigration from './032_add_outsource_mach_heat_plans.js';
+import * as outsourceSfFamilyPlansMigration from './033_add_outsource_sf_family_plans.js';
 
 class DynamicMigrationProvider implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -62,6 +66,10 @@ class DynamicMigrationProvider implements MigrationProvider {
       '027_unify_machined_material_category': unifyMachinedMaterialCategoryMigration,
       '028_unify_outsource_references': unifyOutsourceReferencesMigration,
       '029_company_profile_and_order_approval': companyProfileAndOrderApprovalMigration,
+      '030_add_outsource_entry_fields': outsourceEntryFieldsMigration,
+      '031_add_oqc_family_inspection_plan': oqcFamilyInspectionPlanMigration,
+      '032_add_outsource_mach_heat_plans': outsourceMachHeatPlansMigration,
+      '033_add_outsource_sf_family_plans': outsourceSfFamilyPlansMigration,
     };
   }
 }

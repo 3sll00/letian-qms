@@ -213,6 +213,10 @@ export interface InspectionOrdersTable {
   processType?: string | null;
   returnDate?: string | null;
   vendorName?: string | null;
+  // 030 委外检验录入页业务事实字段（docs/36）：材质牌号 / 执行技术标准 / 检验日期
+  materialGrade?: string | null;
+  techStandard?: string | null;
+  inspectedDate?: string | null;
   // 029 质量负责人签核（docs/35 §5）：由 POST /inspections/{id}/approve 写入**真实签核动作**
   // （签核人 = 当前登录用户）。三列为 NULL 表示尚未签核 —— 证书留白，不打印任何人名。
   approverId?: string | null;

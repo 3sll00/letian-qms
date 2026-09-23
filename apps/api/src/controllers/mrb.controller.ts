@@ -238,8 +238,20 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
           : {}),
       });
 
+      // 不合格待审核池「待发起评审」计数（docs/39 §2 D3）：
+      // 池条目按两阶段口径不进 MRB 处置列表，页面若没有这个计数，
+      // 「判不合格后看不到记录」就与「根本没入池」无法区分。
+      // 与列表同一套 PBAC 规则过滤（分类经 materials、供应商经源检验单换算）。
+      const pendingPool = await container.repositories.pendingDefects.list({
+        status: 'PENDING_INITIATE',
+        permissions,
+        page: 1,
+        pageSize: 1,
+      });
+
       return reply.status(200).send({
         ...result,
+        pendingPoolCount: pendingPool.total,
         page: query.page,
         pageSize: query.pageSize,
         // 兼容别名：早期契约消费方使用 list，与 items 指向同一份当页数据

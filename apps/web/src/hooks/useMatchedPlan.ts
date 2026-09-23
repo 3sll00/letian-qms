@@ -14,6 +14,7 @@ import type { InspectionType } from '@letian/contracts';
 import {
   fetchInspectionOrder,
   fetchMatchedPlan,
+  isPermissionDeniedError,
   isPlanNotFoundError,
   orderItemsToIndicatorRows,
   planMatchErrorText,
@@ -25,11 +26,12 @@ import type {
   MatchedPlan,
   PlanDisplayMeta,
   PlanIndicatorRow,
+  PlanMatchStatus,
   PlanRowSource,
 } from '../lib/planMatch';
 
-/** ready = 方案已命中 / 快照已加载，指标行可渲染 */
-export type PlanMatchStatus = 'idle' | 'loading' | 'ready' | 'not-found' | 'error';
+/** 状态类型唯一真相在 `lib/planMatch.ts`（表单分区空态文案与提示条共用同一枚举） */
+export type { PlanMatchStatus };
 
 export interface MatchedPlanState {
   status: PlanMatchStatus;
@@ -50,6 +52,8 @@ export interface MatchedPlanState {
   order: InspectionOrder | null;
   /** 未命中/失败原因（status = not-found | error 时有值） */
   error: string | null;
+  /** 是否为 PBAC 数据权限拦截（403）：提示条据此走"权限"分支，不引导去配置方案 */
+  permissionDenied: boolean;
   /** 未发起匹配的说明（如缺物料编码），便于页面直白提示 */
   message: string | null;
   /** 人工重试 */
@@ -82,6 +86,7 @@ export function useMatchedPlan(
   const [plan, setPlan] = useState<MatchedPlan | null>(null);
   const [order, setOrder] = useState<InspectionOrder | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [permissionDenied, setPermissionDenied] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
 
@@ -93,6 +98,7 @@ export function useMatchedPlan(
     setPlan(null);
     setOrder(null);
     setError(null);
+    setPermissionDenied(false);
     setMessage(null);
 
     // ---------- 模式一：只读回看，读本单方案快照 ----------
@@ -108,6 +114,7 @@ export function useMatchedPlan(
         } catch (caught) {
           if (cancelled) return;
           setError(planMatchErrorText(caught, 'SNAPSHOT'));
+          setPermissionDenied(isPermissionDeniedError(caught));
           setStatus(isPlanNotFoundError(caught) ? 'not-found' : 'error');
         }
       })();
@@ -141,6 +148,7 @@ export function useMatchedPlan(
       } catch (caught) {
         if (cancelled) return;
         setError(planMatchErrorText(caught));
+        setPermissionDenied(isPermissionDeniedError(caught));
         setStatus(isPlanNotFoundError(caught) ? 'not-found' : 'error');
       }
     })();
@@ -183,6 +191,7 @@ export function useMatchedPlan(
     matchSource: order !== null ? null : (plan?.matchSource ?? null),
     order,
     error,
+    permissionDenied,
     message,
     reload,
   };

@@ -536,6 +536,9 @@ export const rawInspectionOrders = [
     processType: '镀锌',
     returnDate: '2026-07-06',
     vendorName: '东莞表面处理厂',
+    // 030 委外录入页业务事实字段（docs/36）：与真实库同口径，演示值仅供离线 Mock
+    materialGrade: '8.8级',
+    techStandard: 'GB/T 3098.1-2010 / ISO 10683',
     sampleQty: 500,
     passQty: 0,
     failQty: 0,
@@ -604,6 +607,8 @@ export const rawInspectionOrders = [
     processType: '机加工',
     returnDate: '2026-07-06',
     vendorName: '苏州机加工厂',
+    materialGrade: '45# 钢',
+    techStandard: 'GB/T 699-2015',
     sampleQty: 100,
     passQty: 0,
     failQty: 0,
@@ -672,6 +677,8 @@ export const rawInspectionOrders = [
     processType: '热处理',
     returnDate: '2026-07-06',
     vendorName: '上海热处理厂',
+    materialGrade: '10.9级',
+    techStandard: 'GB/T 3098.1-2010',
     sampleQty: 500,
     passQty: 0,
     failQty: 0,
@@ -2034,6 +2041,50 @@ const rawMaterials: MaterialDisplay[] = [
     createdAt: '2023-01-01T08:00:00.000Z',
     updatedAt: '2023-01-01T08:00:00.000Z',
   },
+  {
+    id: 'd4e5f6a1-b2c3-4d4e-9f5a-6b7c8d9e0f1a',
+    materialCode: 'MAT-BLT-88-M10',
+    materialName: '六角螺栓M10',
+    specModel: 'M10×30 / 8.8级 / 蓝白锌',
+    categoryCode: 'CAT-FIN-BOLT',
+    category: '成品紧固件 / 高强度螺栓类',
+    unit: 'PCS',
+    stock: '5,000 / 8,000 PCS',
+    inspectionPlan: 'QP-OQC-SH-FAMILY',
+    status: 'ACTIVE',
+    createdAt: '2023-01-01T08:00:00.000Z',
+    updatedAt: '2023-01-01T08:00:00.000Z',
+  },
+  // 委外台账内已出现的料号（机加工件 / 热处理回厂件）：此前只存在于台账行、不在存货主数据里，
+  // 导致离线演示在委外录入页「选不到该物料 → 匹配不到方案」。此处补齐，与真实库同口径。
+  {
+    id: 'a7b8c9d0-e1f2-4a3b-8c4d-5e6f7a8b9c0d',
+    materialCode: 'MAT-SLV-45-20-30',
+    materialName: '精密轴套',
+    specModel: 'Φ20×30mm / 45# 钢 / 精磨外圆',
+    categoryCode: 'CAT-FIN-MACH',
+    category: '机加工成品件',
+    unit: 'PCS',
+    stock: '260 / 500 PCS',
+    inspectionPlan: 'QP-OQC-MACH-FAMILY',
+    status: 'ACTIVE',
+    createdAt: '2023-01-01T08:00:00.000Z',
+    updatedAt: '2023-01-01T08:00:00.000Z',
+  },
+  {
+    id: 'b8c9d0e1-f2a3-4b4c-8d5e-6f7a8b9c0d1e',
+    materialCode: 'MAT-BLT-109-M10-HT',
+    materialName: '高强度螺栓',
+    specModel: 'M10×45 / 10.9级 / 热处理回厂',
+    categoryCode: 'CAT-FIN-BOLT',
+    category: '成品紧固件 / 高强度螺栓类',
+    unit: 'PCS',
+    stock: '5,400 / 8,000 PCS',
+    inspectionPlan: 'QP-OQC-HEAT-FAMILY-BOLT',
+    status: 'ACTIVE',
+    createdAt: '2023-01-01T08:00:00.000Z',
+    updatedAt: '2023-01-01T08:00:00.000Z',
+  },
 ];
 
 export const mockMaterials: MaterialDisplay[] = rawMaterials.map((m) => {
@@ -2137,6 +2188,16 @@ const rawCategoryNodes: RawCategoryNode[] = [
     materialCount: 18,
     createdAt: '2023-01-01T08:00:00.000Z',
   },
+  {
+    id: '3c4d5e6f-7a8b-4c3d-94e5-f6a7b8c9d0e1',
+    displayId: 'cat-finished-mach',
+    categoryCode: 'CAT-FIN-MACH',
+    categoryName: '机加工成品件',
+    parentCode: 'CAT-FINISH',
+    level: 2,
+    materialCount: 6,
+    createdAt: '2023-01-01T08:00:00.000Z',
+  },
 ];
 
 // 分类节点单一来源：每个节点先过契约校验，接口返回的树即由校验后的节点构建。
@@ -2231,6 +2292,9 @@ const MOCK_PLAN_CREATORS = {
   zhangQiang: 'b2c3d4e5-f6a1-4b2c-9d3e-4f5a6b7c8d9e',
   liWei: 'c3d4e5f6-a1b2-4c3d-ae4f-5a6b7c8d9e0f',
   liuFang: 'f6a1b2c3-d4e5-4f6a-b17c-8d9e0f1a2b3c',
+  // 委外族级方案的作者与真实库一致（库内 created_by 就是员工主数据里的这两位）
+  sunDeSheng: '11000000-0000-4000-8000-000000000006',
+  zhouHaiBo: '11000000-0000-4000-8000-000000000007',
 } as const;
 
 interface PlanSeed {
@@ -2238,6 +2302,8 @@ interface PlanSeed {
   planName: string;
   inspectionType: InspectionType;
   materialCode: string;
+  /** 分类通用方案（materialCode 为空串）必须显式给出，供分类级兜底匹配（见 docs/37） */
+  categoryCode?: string;
   versionNo: string;
   status: PlanVersionStatus;
   createdBy: string;
@@ -2246,7 +2312,117 @@ interface PlanSeed {
   items: InspectionPlanItem[];
 }
 
-/** 12 条方案（首屏 6 条 + 第二页 6 条）：10 已启用 / 1 待审批草稿 / 1 已停用 */
+/**
+ * 委外族级（分类通用）方案的工艺级定性指标：与库内 `QP-OQC-MACH-FAMILY` /
+ * `QP-OQC-HEAT-FAMILY-*` / `QP-OQC-SF-FAMILY-*` **同款指标**（docs/36 §9）。
+ * 判标只认 `acceptableValues` 清单（TBD-06），不携带任何依规格而变的数值公差 ——
+ * 硬度 / 尺寸 / 镀层厚度 / 盐雾小时数依件号，必须留在物料专属方案。
+ */
+const MACH_FAMILY_ITEMS: InspectionPlanItem[] = [
+  {
+    seq: 1,
+    itemCode: 'VIS-001',
+    name: '外观与棱边质量',
+    dataType: 'QUALITATIVE',
+    metricCategory: 'APPEARANCE',
+    standardText: '无毛刺、无磕碰划伤、无锈蚀，棱边倒角完整',
+    acceptableValues: ['合格'],
+    sampleSize: 20,
+    unit: '—',
+    measurementTool: '目视 / 手感',
+    isMandatory: true,
+  },
+  {
+    seq: 2,
+    itemCode: 'PRT-001',
+    name: '表面防护与包装',
+    dataType: 'QUALITATIVE',
+    metricCategory: 'APPEARANCE',
+    standardText: '加工面防锈处理有效、无锈蚀；随件防护包装完好',
+    acceptableValues: ['合格'],
+    sampleSize: 5,
+    unit: '—',
+    measurementTool: '目视',
+    isMandatory: false,
+  },
+];
+
+const HEAT_FAMILY_ITEMS: InspectionPlanItem[] = [
+  {
+    seq: 1,
+    itemCode: 'TRC-001',
+    name: '热处理过程记录可追溯性',
+    dataType: 'QUALITATIVE',
+    metricCategory: 'APPEARANCE',
+    standardText: '炉号 / 装炉记录 / 工艺曲线随单归档并可追溯（CQI-9 特殊过程确认）',
+    acceptableValues: ['合格'],
+    sampleSize: 1,
+    unit: '—',
+    measurementTool: '记录核查',
+    isMandatory: true,
+  },
+  {
+    seq: 2,
+    itemCode: 'VIS-002',
+    name: '热处理外观',
+    dataType: 'QUALITATIVE',
+    metricCategory: 'APPEARANCE',
+    standardText: '无氧化皮、无裂纹、无过烧、无碰伤',
+    acceptableValues: ['合格'],
+    sampleSize: 20,
+    unit: '—',
+    measurementTool: '目视',
+    isMandatory: true,
+  },
+];
+
+const SF_FAMILY_ITEMS: InspectionPlanItem[] = [
+  {
+    seq: 1,
+    itemCode: 'VIS-003',
+    name: '镀覆层外观',
+    dataType: 'QUALITATIVE',
+    metricCategory: 'APPEARANCE',
+    standardText: '镀覆层均匀完整，无漏镀、无起泡、无剥落、无烧焦、无锈蚀',
+    acceptableValues: ['合格'],
+    sampleSize: 20,
+    unit: '—',
+    measurementTool: '目视',
+    isMandatory: true,
+  },
+  {
+    seq: 2,
+    itemCode: 'ADH-001',
+    name: '镀覆层附着力',
+    dataType: 'QUALITATIVE',
+    metricCategory: 'APPEARANCE',
+    standardText: '划格 / 弯曲试验后镀覆层无剥落、无起皮（GB/T 5270）',
+    acceptableValues: ['合格'],
+    sampleSize: 3,
+    unit: '—',
+    measurementTool: '划格器 / 弯曲试验',
+    isMandatory: true,
+  },
+  {
+    seq: 3,
+    itemCode: 'PRT-002',
+    name: '表面防护与包装',
+    dataType: 'QUALITATIVE',
+    metricCategory: 'APPEARANCE',
+    standardText: '经防潮、防碰伤包装，随件标识完整、运输后无锈蚀',
+    acceptableValues: ['合格'],
+    sampleSize: 5,
+    unit: '—',
+    measurementTool: '目视',
+    isMandatory: false,
+  },
+];
+
+/**
+ * 18 条方案：16 已启用 / 1 待审批草稿 / 1 已停用
+ *（追加 QP-OQC-SH-FAMILY 成品螺栓族分类通用出货检验方案，见 docs/37；
+ *  追加 QP-OQC-{MACH,HEAT,SF}-FAMILY* 委外三页签族级通用方案，见 docs/36 §9）
+ */
 const rawPlans: PlanSeed[] = [
   { planCode: 'QP-20260706-001', planName: '六角螺栓M10-来料检验', inspectionType: 'IQC', materialCode: 'MAT-BLT-109-M10', versionNo: 'v1.2', status: 'ACTIVE', createdBy: MOCK_PLAN_CREATORS.zhangQiang, updatedAt: '2026-07-06T02:30:00.000Z', items: planItems('QP-001', { appearance: 6, dimension: 15 }) },
   { planCode: 'QP-20260706-002', planName: '六角螺栓M10-过程检验', inspectionType: 'IPQC_RL', materialCode: 'MAT-BLT-109-M10', versionNo: 'v1.1', status: 'ACTIVE', createdBy: MOCK_PLAN_CREATORS.liWei, updatedAt: '2026-07-05T08:00:00.000Z', items: planItems('QP-002', { performance: 9 }) },
@@ -2260,6 +2436,14 @@ const rawPlans: PlanSeed[] = [
   { planCode: 'QP-20260706-010', planName: '螺纹尺寸-过程检验', inspectionType: 'IPQC_RL', materialCode: 'MAT-SCR-M6-25', versionNo: 'v1.2', status: 'ACTIVE', createdBy: MOCK_PLAN_CREATORS.liWei, updatedAt: '2026-06-27T06:55:00.000Z', items: planItems('QP-010', { dimension: 12 }) },
   { planCode: 'QP-20260706-011', planName: '旧版法兰螺栓-来料检验', inspectionType: 'IQC', materialCode: 'MAT-BLT-109-M10', versionNo: 'v0.9', status: 'INACTIVE', createdBy: MOCK_PLAN_CREATORS.zhangQiang, updatedAt: '2026-06-26T01:20:00.000Z', items: planItems('QP-011', { appearance: 3, dimension: 7 }) },
   { planCode: 'QP-20260706-012', planName: '精密轴套-成品终检', inspectionType: 'IPQC_FN', materialCode: 'MAT-BLT-109-M10', versionNo: 'v1.0', status: 'ACTIVE', createdBy: MOCK_PLAN_CREATORS.liuFang, updatedAt: '2026-06-25T08:35:00.000Z', items: planItems('QP-012', { dimension: 9, performance: 6 }) },
+  { planCode: 'QP-OQC-SH-FAMILY', planName: '成品螺栓族出货检验与客户放行通用规范', inspectionType: 'OQC_SH', materialCode: '', categoryCode: 'CAT-FIN-BOLT', versionNo: 'v1.0', status: 'ACTIVE', createdBy: MOCK_PLAN_CREATORS.liuFang, updatedAt: '2026-07-01T00:00:00.000Z', items: planItems('QP-013', { appearance: 1, dimension: 1 }) },
+  // 委外三页签（表面处理 / 机加工 / 热处理）的族级通用方案：material_code 为空串 = 分类通用兜底
+  //（与库内 QP-OQC-MACH-FAMILY / QP-OQC-HEAT-FAMILY-* / QP-OQC-SF-FAMILY-* 同码同分类，见 docs/36 §9）
+  { planCode: 'QP-OQC-MACH-FAMILY', planName: '机加工件委外回厂通用验收规范', inspectionType: 'OQC_MACH', materialCode: '', categoryCode: 'CAT-FIN-MACH', versionNo: 'v1.0', status: 'ACTIVE', createdBy: MOCK_PLAN_CREATORS.liWei, updatedAt: '2026-07-01T00:00:00.000Z', items: MACH_FAMILY_ITEMS },
+  { planCode: 'QP-OQC-HEAT-FAMILY-BOLT', planName: '紧固件（螺栓）热处理委外回厂通用验收规范', inspectionType: 'OQC_HEAT', materialCode: '', categoryCode: 'CAT-FIN-BOLT', versionNo: 'v1.0', status: 'ACTIVE', createdBy: MOCK_PLAN_CREATORS.sunDeSheng, updatedAt: '2026-07-01T00:00:00.000Z', items: HEAT_FAMILY_ITEMS },
+  { planCode: 'QP-OQC-HEAT-FAMILY-NUT', planName: '紧固件（螺母 / 垫圈）热处理委外回厂通用验收规范', inspectionType: 'OQC_HEAT', materialCode: '', categoryCode: 'CAT-FIN-NUT', versionNo: 'v1.0', status: 'ACTIVE', createdBy: MOCK_PLAN_CREATORS.sunDeSheng, updatedAt: '2026-07-01T00:00:00.000Z', items: HEAT_FAMILY_ITEMS },
+  { planCode: 'QP-OQC-SF-FAMILY-BOLT', planName: '成品螺栓族表面处理委外回厂通用验收规范', inspectionType: 'OQC_SF', materialCode: '', categoryCode: 'CAT-FIN-BOLT', versionNo: 'v1.0', status: 'ACTIVE', createdBy: MOCK_PLAN_CREATORS.zhouHaiBo, updatedAt: '2026-07-01T00:00:00.000Z', items: SF_FAMILY_ITEMS },
+  { planCode: 'QP-OQC-SF-FAMILY-NUT', planName: '成品螺母 / 垫圈族表面处理委外回厂通用验收规范', inspectionType: 'OQC_SF', materialCode: '', categoryCode: 'CAT-FIN-NUT', versionNo: 'v1.0', status: 'ACTIVE', createdBy: MOCK_PLAN_CREATORS.zhouHaiBo, updatedAt: '2026-07-01T00:00:00.000Z', items: SF_FAMILY_ITEMS },
 ];
 
 export const mockPlans: InspectionPlan[] = rawPlans.map((seed, index) => {
@@ -2271,6 +2455,8 @@ export const mockPlans: InspectionPlan[] = rawPlans.map((seed, index) => {
     planName: seed.planName,
     inspectionType: seed.inspectionType,
     materialCode: seed.materialCode,
+    // 分类归属：物料专属方案由 withPlanDisplayFields 按物料派生；分类通用方案必须显式给出
+    ...(seed.categoryCode !== undefined ? { categoryCode: seed.categoryCode } : {}),
     versions: [
       {
         id: `28000000-0000-4000-8000-${suffix}`,

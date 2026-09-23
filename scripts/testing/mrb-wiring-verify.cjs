@@ -4,7 +4,8 @@
  * 覆盖 docs/21-MRB不合格品处置数据字段与接口打通设计.md §7 的验收口径：
  * 池表新增列回吐、发起评审四参数落库、池条目状态机回填、会签、特采凭证强制校验、
  * 处置响应形态（裸 MRBRecord）与闭环时间/裁决人落库；§11 的「返工处置响应回吐复检单标识」
- * （自建来源单走完整链路：建单 -> 越界判定 -> 入池 -> 发起 -> REWORK 处置 -> 库内复检行逐字段核对）。
+ * （自建来源单走完整链路：建单 -> 越界判定 -> 自动入池并自动建 MRB 单（docs/43，无人工发起环节）
+ *  -> REWORK 处置 -> 库内复检行逐字段核对）。
  *
  * 前置条件：
  *   1. 数据库已迁移到 019 且 `pnpm db:seed` 已执行（脚本按演示数据断言，末尾会还原）；
@@ -221,12 +222,34 @@ const check = (name, ok, extra) => {
   );
 
   // 3. MRB 列表新字段 + 派生检验人
-  const recs = await req('GET', '/mrb/records?page=1&pageSize=5');
-  const withInspector = (recs.body.items ?? []).filter((r) => r.inspectorName !== undefined);
-  check('列表回吐派生检验人', withInspector.length >= 1, withInspector.map((r) => r.inspectorName));
+  //    「派生检验人」由 source_order_no 关联 inspection_orders 带出；列表窗口里可能混入其它用例 /
+  //    探针跑完后遗留的「源单已删」历史行（派生值天然为空），所以断言口径按库内可回溯的那条评审
+  //    工单对齐，而不是赌列表前 N 条。
+  const recs = await req('GET', '/mrb/records?page=1&pageSize=100');
+  const traceableMrb = (
+    await db.query(
+      `select m.mrb_no, io.inspector_name
+         from mrb_reviews m
+         join inspection_orders io on io.order_no = m.source_order_no
+        where io.inspector_name is not null
+        order by m.created_at desc
+        limit 1`
+    )
+  ).rows[0];
+  const tracedItem = (recs.body.items ?? []).find((r) => r.mrbNo === traceableMrb?.mrb_no);
+  check(
+    '列表回吐派生检验人（与 inspection_orders.inspector_name 对齐）',
+    traceableMrb !== undefined && tracedItem?.inspectorName === traceableMrb.inspector_name,
+    {
+      mrbNo: traceableMrb?.mrb_no,
+      expected: traceableMrb?.inspector_name,
+      got: tracedItem?.inspectorName,
+    }
+  );
   check(
     '列表回吐 urgencyLevel/reviewFlowId',
-    (recs.body.items ?? []).every((r) => r.urgencyLevel !== undefined),
+    (recs.body.items ?? []).length >= 1 &&
+      (recs.body.items ?? []).every((r) => r.urgencyLevel !== undefined),
     (recs.body.items ?? []).map((r) => [r.mrbNo, r.urgencyLevel, r.reviewFlowId !== undefined])
   );
 
@@ -368,30 +391,26 @@ const check = (name, ok, extra) => {
     ),
     isDraft: false,
   });
-  const reworkPool = await req('GET', '/mrb/pending-pool?status=PENDING_INITIATE&page=1&pageSize=100');
-  const reworkPoolItem = (reworkPool.body?.items ?? []).find(
-    (it) => it.inspectionOrderId === reworkOrder.id
-  );
-  const reworkInit = reworkPoolItem
-    ? await req('POST', '/mrb/pending-pool/initiate', {
-        pendingDefectId: reworkPoolItem.id,
-        urgencyLevel: 'NORMAL',
-        reviewNotes: '返工链路验收：DisposeMRBResponse 回吐',
-      })
-    : { status: 0, body: null };
-  const reworkMrb = reworkInit.body ?? {};
+  // 判定不合格即自动建单（docs/43：无人工发起环节）—— 直接取终判事务内生成的 MRB 单，
+  // 旧口径「入池 -> 人工发起」已废止，验收口径同步为「自动入池 + 自动建单」。
+  const reworkMrbRow = (
+    await db.query('select id, mrb_no, status from mrb_reviews where source_order_no=$1', [
+      reworkOrder.orderNo,
+    ])
+  ).rows[0];
+  const reworkMrb = reworkMrbRow ?? {};
   check(
-    '返工链路前置：建单 201 / 越界判定 FAILED / 入池命中 / 发起评审 201',
+    '返工链路前置：建单 201 / 越界判定不合格并自动进入 MRB 评审 / 自动建单命中 PENDING_REVIEW',
     reworkCreate.status === 201 &&
       reworkFail.status === 200 &&
-      reworkFail.body?.status === 'FAILED' &&
-      reworkPoolItem !== undefined &&
-      reworkInit.status === 201,
+      reworkFail.body?.status === 'IN_MRB_REVIEW' &&
+      reworkMrbRow !== undefined &&
+      reworkMrbRow.status === 'PENDING_REVIEW',
     {
       create: reworkCreate.status,
       judge: reworkFail.body?.status,
-      pool: reworkPoolItem !== undefined,
-      initiate: reworkInit.status,
+      mrbNo: reworkMrbRow?.mrb_no,
+      mrbStatus: reworkMrbRow?.status,
     }
   );
 

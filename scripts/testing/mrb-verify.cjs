@@ -6,7 +6,8 @@
  *   2. 十列表头与页签（全部/待评审/评审中/已评审/已处置）齐备；
  *   3. KPI 取值来自 GET /mrb/records（Mock 层计算，非写死）；
  *   4. 浅色主题：页面容器/KPI 卡片/表头背景均为浅色，无深色残留；
- *   5. 「+ 发起评审」抽屉 = 不合格待审核池（GET /mrb/pending-pool）真实取数；
+ *   5. 页头口径（docs/43）：判定不合格自动进入评审，**无人工发起入口** ——
+ *      不存在【+ 发起评审】按钮与「待发起评审」计数胶囊，副标题为「判定不合格自动进入评审」；
  *   6. 行内「评审」抽屉渲染会签席位与真实 approvers 记录。
  *   7. 并列菜单「评审流程设置」子页：流程说明与节点四列真实回吐（docs/21 §10 E1/E2），
  *      点「停用此流程」必须真实调用 POST /review-flows/:id/toggle-active 并被重载读回（E3）。
@@ -273,7 +274,7 @@ const check = (name, ok, detail) => {
 
   const expectedHeads = ['MRB单号','来源检验单','物料编码','物料名称','不合格原因','不合格数量','检验人','发现日期','评审状态','操作'];
   check('页头标题「MRB不合格品处置」', snapshot.hasTitle === true);
-  check('副标题「不合格品评审与处置 · 支持多级评审流程」', snapshot.hasSubtitle === true, snapshot.hasSubtitle);
+  check('副标题「不合格品评审与处置 · 判定不合格自动进入评审」', snapshot.hasSubtitle === true, snapshot.hasSubtitle);
   check('十列表头与原型一致（第5列为「不合格原因」）', JSON.stringify(snapshot.heads) === JSON.stringify(expectedHeads), snapshot.heads);
   check('4 个状态页签（不含「全部」，与原型一致）', JSON.stringify(snapshot.tabLabels) === JSON.stringify(['待评审','评审中','已评审','已处置']), snapshot.tabLabels);
   check('默认选中「待评审」页签', JSON.stringify(snapshot.activeTab) === JSON.stringify(['待评审']), snapshot.activeTab);
@@ -300,35 +301,23 @@ const check = (name, ok, detail) => {
   check('「评审中」页签取到 2 条 Mock 记录', reviewing.rowCount === 2, reviewing.rowCount);
   check('「检验人」列由 sourceOrderNo 联表派生（非空且非占位）', reviewing.inspectors.every((n) => n && n !== '-'), reviewing.inspectors);
 
-  // ---- 发起评审抽屉（不合格待审核池）----
-  const opened = await evalJs(cdp, `(() => {
-    const btn = [...document.querySelectorAll('button')].find((b) => b.innerText.trim() === '发起评审');
-    if (!btn) return false; btn.click(); return true;
+  // ---- 页头口径（docs/43）：判定不合格自动进入评审，**无人工发起入口** ----
+  const header = await evalJs(cdp, `(() => {
+    const buttons = [...document.querySelectorAll('button')].map((b) => b.innerText.trim());
+    const subtitle = [...document.querySelectorAll('p')].map((p) => p.innerText.trim())
+      .find((t) => t.includes('不合格品评审与处置')) ?? '';
+    return {
+      initiateButtons: buttons.filter((t) => t.startsWith('发起评审')).length,
+      pendingCapsules: buttons.filter((t) => t.includes('待发起评审')).length,
+      subtitle,
+      exportButton: buttons.includes('导出报表'),
+    };
   })()`);
-  await sleep(4000);
-  await shot('mrb-pool-drawer.png');
-  const pool = await evalJs(cdp, `(() => {
-    const drawer = document.querySelector('.fixed.inset-0');
-    if (!drawer) return { opened: false, rowCount: 0, orders: [], poolStates: [], flowOptions: [] };
-    const rows = [...drawer.querySelectorAll('tbody tr')].map((tr) =>
-      [...tr.querySelectorAll('td')].map((td) => td.innerText.trim()));
-    return { opened: drawer.innerText.includes('不合格待审核池'), rowCount: rows.length,
-      drawerWidth: Math.round(drawer.getBoundingClientRect().width),
-      tableWidth: Math.round((drawer.querySelector('table') || { getBoundingClientRect: () => ({ width: 0 }) }).getBoundingClientRect().width),
-      scrollWidth: (drawer.querySelector('.overflow-x-auto') || { scrollWidth: 0, clientWidth: 0 }).scrollWidth,
-      clientWidth: (drawer.querySelector('.overflow-x-auto') || { scrollWidth: 0, clientWidth: 0 }).clientWidth,
-      orders: rows.map((r) => (r[0] || '').split('\\n')[0]),
-      poolStates: rows.map((r) => r[6] || ''),
-      flowOptions: [...drawer.querySelectorAll('select')].map((s) => [...s.options].map((o) => o.text.trim())) };
-  })()`);
-  log('pool drawer:', { opened: opened, ...pool });
-  check('「+ 发起评审」打开不合格待审核池抽屉', pool.opened === true);
-  check('待审核池取到接口数据（默认筛选「待发起评审」= 3 条）', pool.rowCount === 3, { count: pool.rowCount, orders: pool.orders });
-  check('待审核池环节筛选含 IQC/IPQC/FQC/OQC', JSON.stringify(pool.flowOptions).includes('来料检验 (IQC)'), pool.flowOptions.length);
-
-  // 关闭抽屉（点击遮罩）
-  await evalJs(cdp, `(() => { const m = document.querySelector('.absolute.inset-0'); if (m) { m.click(); return true; } return false; })()`);
-  await sleep(1500);
+  log('mrb header:', header);
+  check('页头无【+ 发起评审】按钮（判定不合格自动进入评审，docs/43）', header.initiateButtons === 0, header.initiateButtons);
+  check('页头无「待发起评审」计数胶囊', header.pendingCapsules === 0, header.pendingCapsules);
+  check('副标题为「不合格品评审与处置 · 判定不合格自动进入评审」', header.subtitle.includes('判定不合格自动进入评审'), header.subtitle);
+  check('导出报表按钮保留', header.exportButton === true);
 
   // ---- 行内「评审」抽屉 ----
   const openedReview = await evalJs(cdp, `(() => {

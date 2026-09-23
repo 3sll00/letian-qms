@@ -1,6 +1,20 @@
 import { MaterialPermission } from '@letian/contracts';
 
 /**
+ * 供应商维度判定模式
+ *
+ * - `ENFORCE`（默认，全仓既有行为）：规则限定了具体供应商时，目标必须具备可核对的供应商上下文，
+ *   否则该规则不匹配（fail-closed，防 fail-open）；
+ * - `NOT_APPLICABLE`：**被判定对象自身不具备供应商属性**时使用（如质检方案 / 检验标准等
+ *   "方案域"对象：方案表无 supplier_code 列，业务上标准也不分供应商）。此时供应商维度不参与判定：
+ *   规则的三维里只核对物料分类 + 物料编码，命中即放行 ——
+ *   "仅限定供应商"（分类与编码均通配）的规则在该模式下等价于物料维度全通配。
+ *
+ * 口径见 docs/42-质检方案域PBAC供应商维度错配修复设计.md §3。
+ */
+export type SupplierDimensionMode = 'ENFORCE' | 'NOT_APPLICABLE';
+
+/**
  * PBAC 三维行级数据权限评估器 (PBACEvaluator)
  * 纯内存无状态领域服务，对用户拥有的权限策略执行判定：
  * 
@@ -12,6 +26,7 @@ import { MaterialPermission } from '@letian/contracts';
  *    - materialCodes: 包含目标编码或通配；
  *    - supplierCodes: 仅当待判定对象具备供应商上下文（targetSupplierCode 非空）时执行包含判定；
  *      若 policy 限定具体供应商而目标无供应商上下文，则该 policy 不匹配（拒绝）。
+ *      传入 supplierDimension='NOT_APPLICABLE'（对象无供应商属性）时该维度不参与判定。
  */
 export class PBACEvaluator {
   /**
@@ -22,6 +37,7 @@ export class PBACEvaluator {
     targetCategory: string;
     targetMaterialCode: string;
     targetSupplierCode?: string;
+    supplierDimension?: SupplierDimensionMode;
   }): boolean {
     return this.findMatchingRule(params) !== null;
   }
@@ -35,8 +51,10 @@ export class PBACEvaluator {
     targetCategory: string;
     targetMaterialCode: string;
     targetSupplierCode?: string;
+    supplierDimension?: SupplierDimensionMode;
   }): MaterialPermission | null {
     const { permissions, targetCategory, targetMaterialCode, targetSupplierCode } = params;
+    const supplierDimension = params.supplierDimension ?? 'ENFORCE';
 
     if (!permissions || permissions.length === 0) {
       return null;
@@ -69,6 +87,11 @@ export class PBACEvaluator {
       }
 
       // 3. 评估供应商维度
+      //    对象无供应商属性（方案域）时该维度不适用：分类 + 编码命中即视为匹配
+      if (supplierDimension === 'NOT_APPLICABLE') {
+        return policy;
+      }
+
       const hasSupplierWildcard =
         policy.supplierCodes.length === 0 || policy.supplierCodes.includes('*');
       const targetHasSupplier = targetSupplierCode !== undefined && targetSupplierCode.trim() !== '';

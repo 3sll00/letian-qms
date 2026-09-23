@@ -11,8 +11,15 @@ import type { IUnitOfWorkContext } from '../../tx/unit-of-work.js';
  * - **不合格描述**优先取检验单备注，缺失时用首个判不合格的指标项拼装；
  * - **供应商**口径对委外工序取加工商 `vendorName`（IQC 取 `supplierName`），客户取 `customerName`；
  * - **入池幂等**由仓储按 `source_order_id` upsert 保证，重复判定不会产生重复条目。
+ *
+ * `fallbackReason`（可选）供终判路径（`FinalizeInspectionStatusUseCase`）传入：整批判退 / 让步申请
+ * 这类**没有超差实测项**的单据，其不合格描述来自检验员的终判结论备注；两者皆空时给出如实描述，
+ * 绝不写「实测超出公差判定不合格」这种与事实不符的兜底文案（docs/39 §3）。
  */
-export function buildPendingDefectDraft(order: InspectionOrder): PendingDefectDraft {
+export function buildPendingDefectDraft(
+  order: InspectionOrder,
+  fallbackReason?: string
+): PendingDefectDraft {
   const failedItems = (order.items ?? []).filter((item) => item.result === 'FAILED');
   const firstFailed = failedItems[0];
 
@@ -24,12 +31,15 @@ export function buildPendingDefectDraft(order: InspectionOrder): PendingDefectDr
     sampleQty > 0 ? sampleQty : declaredQty > 0 ? declaredQty : defectQty > 0 ? defectQty : 1;
 
   const notes = (order.inspectionNotes ?? '').trim();
+  const explicitReason = (fallbackReason ?? '').trim();
   const defectDescription =
     notes !== ''
       ? notes
+      : explicitReason !== ''
+        ? explicitReason
       : firstFailed !== undefined
         ? `${firstFailed.name ?? firstFailed.itemCode} 超差判定不合格`
-        : '实测超出公差判定不合格';
+        : '检验判定不合格（未录入具体超差项）';
 
   const supplierName = order.supplierName ?? order.vendorName;
 
@@ -66,7 +76,8 @@ export function buildPendingDefectDraft(order: InspectionOrder): PendingDefectDr
  */
 export async function collectPendingDefect(
   ctx: IUnitOfWorkContext,
-  order: InspectionOrder
+  order: InspectionOrder,
+  fallbackReason?: string
 ): Promise<void> {
-  await ctx.pendingDefects.save(buildPendingDefectDraft(order));
+  await ctx.pendingDefects.save(buildPendingDefectDraft(order, fallbackReason));
 }

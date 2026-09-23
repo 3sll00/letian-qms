@@ -100,12 +100,17 @@ export const plansController: FastifyPluginAsync<{ container: ApiContainer }> = 
     async (request, reply) => {
       const query = request.query as z.infer<typeof MatchInspectionPlanQuerySchema>;
 
-      // PBAC 三维物料权限校验先于方案查询，避免向越权用户泄露方案是否存在
+      // PBAC 物料权限校验先于方案查询，避免向越权用户泄露方案是否存在。
+      // 方案域对象**无供应商属性**（方案表无 supplier_code 列，检验标准不分供应商），
+      // 故供应商维度不参与判定：只核对物料分类 + 物料编码 —— 否则三维限定账号
+      //（如 IQC 检验员陈静：分类 + 编码 + 供应商）在录入页恒 403、指标清单恒空。
+      // 口径见 docs/42-质检方案域PBAC供应商维度错配修复设计.md §3。
       const securityCtx = await buildRequestSecurityContext(request, container);
       const material = await container.repositories.masterData.findMaterialByCode(query.materialCode);
       securityCtx.assertAccess({
         targetCategory: material?.categoryCode ?? 'UNKNOWN',
         targetMaterialCode: query.materialCode,
+        supplierDimension: 'NOT_APPLICABLE',
         operationName: '匹配质检方案',
       });
 

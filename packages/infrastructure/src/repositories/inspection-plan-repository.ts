@@ -298,7 +298,12 @@ export class KyselyInspectionPlanRepository implements IInspectionPlanRepository
     categoryCode?: string;
     keyword?: string;
     activeOnly?: boolean;
-    /** 三维 PBAC 权限过滤（方案表无供应商列，限定供应商的规则按 fail-closed 不匹配） */
+    /**
+     * 三维 PBAC 权限过滤：方案域对象**无供应商属性**（方案表无 supplier_code 列），
+     * 故供应商维度不参与判定（`supplierDimension: 'NOT_APPLICABLE'`）——
+     * 限定供应商的规则不再整条作废，改按物料分类 / 编码过滤。
+     * 口径见 docs/42-质检方案域PBAC供应商维度错配修复设计.md §3。
+     */
     permissions?: readonly MaterialPermission[];
     page: number;
     pageSize: number;
@@ -339,6 +344,7 @@ export class KyselyInspectionPlanRepository implements IInspectionPlanRepository
           buildMaterialPermissionWhere(query.permissions, {
             targetRef: 'inspection_plans',
             hasSupplierColumn: false,
+            supplierDimension: 'NOT_APPLICABLE',
           })
         );
       }
@@ -390,6 +396,7 @@ export class KyselyInspectionPlanRepository implements IInspectionPlanRepository
         : buildMaterialPermissionWhere(query.permissions, {
             targetRef: 'inspection_plans',
             hasSupplierColumn: false,
+            supplierDimension: 'NOT_APPLICABLE',
           });
 
     let statement = this.db

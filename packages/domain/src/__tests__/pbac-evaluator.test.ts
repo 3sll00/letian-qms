@@ -275,6 +275,117 @@ export function runPBACEvaluatorTests(): { total: number; passed: number } {
     );
   });
 
+  // ===================== 4b. 方案域：供应商维度不适用（NOT_APPLICABLE） =====================
+  //  口径：被判定对象**自身无供应商属性**（质检方案 / 检验标准）时，供应商维度不参与判定 ——
+  //  只核对物料分类 + 物料编码（docs/42-质检方案域PBAC供应商维度错配修复设计.md §3）。
+  //  真实起因：三维限定账号（IQC 检验员陈静：分类 CAT-RAW-WIRE + 编码 MAT-304SS-05 +
+  //  供应商 SUP-001/002）在 GET /plans/match 上恒 403，录入页指标清单恒空。
+
+  test('NOT_APPLICABLE：三维限定 policy + 无供应商上下文 —— 分类与编码命中即放行', () => {
+    assert(
+      PBACEvaluator.hasPermission({
+        permissions: [SUPPLIER_SCOPED_POLICY],
+        targetCategory: 'FASTENER',
+        targetMaterialCode: 'M-001',
+        supplierDimension: 'NOT_APPLICABLE',
+      }),
+      '方案域必须跳过供应商维度'
+    );
+  });
+
+  test('NOT_APPLICABLE：无供应商上下文 + 明确域外供应商 —— 均放行（该维度整体不适用）', () => {
+    assert(
+      PBACEvaluator.hasPermission({
+        permissions: [SUPPLIER_SCOPED_POLICY],
+        targetCategory: 'FASTENER',
+        targetMaterialCode: 'M-001',
+        targetSupplierCode: 'SUP-FORBIDDEN',
+        supplierDimension: 'NOT_APPLICABLE',
+      }),
+      '方案域不因供应商不在白名单而拒绝'
+    );
+  });
+
+  test('NOT_APPLICABLE：物料分类维度不放宽 —— 不匹配仍拒绝', () => {
+    assert(
+      !PBACEvaluator.hasPermission({
+        permissions: [SUPPLIER_SCOPED_POLICY],
+        targetCategory: 'CHEMICAL',
+        targetMaterialCode: 'M-001',
+        supplierDimension: 'NOT_APPLICABLE',
+      }),
+      '分类不匹配必须拒绝'
+    );
+  });
+
+  test('NOT_APPLICABLE：物料编码维度不放宽 —— 不匹配仍拒绝', () => {
+    assert(
+      !PBACEvaluator.hasPermission({
+        permissions: [SUPPLIER_SCOPED_POLICY],
+        targetCategory: 'FASTENER',
+        targetMaterialCode: 'M-999',
+        supplierDimension: 'NOT_APPLICABLE',
+      }),
+      '编码不匹配必须拒绝'
+    );
+  });
+
+  test('NOT_APPLICABLE：仅限定供应商的 policy 在方案域等价于物料维度全通配', () => {
+    const supplierOnly = makePermission({
+      materialCategories: [],
+      materialCodes: [],
+      supplierCodes: ['SUP-A'],
+    });
+    assert(
+      PBACEvaluator.hasPermission({
+        permissions: [supplierOnly],
+        targetCategory: 'ANY_CATEGORY',
+        targetMaterialCode: 'ANY-CODE',
+        supplierDimension: 'NOT_APPLICABLE',
+      }),
+      '仅供应商限定的规则不表达物料范围，在方案域按物料维度放行'
+    );
+  });
+
+  test('NOT_APPLICABLE：无生效规则仍然 fail-closed', () => {
+    assert(
+      !PBACEvaluator.hasPermission({
+        permissions: [],
+        targetCategory: 'FASTENER',
+        targetMaterialCode: 'M-001',
+        supplierDimension: 'NOT_APPLICABLE',
+      }),
+      '空权限在方案域同样必须拒绝'
+    );
+    const inactive = makePermission({
+      isActive: false,
+      materialCategories: ['FASTENER'],
+      materialCodes: ['M-001'],
+      supplierCodes: ['SUP-A'],
+    });
+    assert(
+      !PBACEvaluator.hasPermission({
+        permissions: [inactive],
+        targetCategory: 'FASTENER',
+        targetMaterialCode: 'M-001',
+        supplierDimension: 'NOT_APPLICABLE',
+      }),
+      '停用策略在方案域同样必须拒绝'
+    );
+  });
+
+  test('缺省 supplierDimension 等价于 ENFORCE（单据域行为不变）', () => {
+    const target = { targetCategory: 'FASTENER', targetMaterialCode: 'M-001' };
+    const enforced = PBACEvaluator.hasPermission({
+      permissions: [SUPPLIER_SCOPED_POLICY],
+      ...target,
+      supplierDimension: 'ENFORCE',
+    });
+    const omitted = PBACEvaluator.hasPermission({ permissions: [SUPPLIER_SCOPED_POLICY], ...target });
+    assert(!enforced && !omitted, '显式 ENFORCE 与缺省都必须拒绝（无供应商上下文）');
+  });
+
+
   // ===================== 5. policy 之间 OR 语义 =====================
 
   test('多 policy OR: 任一启用 policy 匹配即通过', () => {

@@ -8,7 +8,6 @@ import {
   Clock,
   Download,
   FileSignature,
-  Plus,
   RefreshCw,
   RotateCcw,
   Search,
@@ -16,7 +15,6 @@ import {
 import type { MRBStatus, MrbReviewRecord } from '@letian/contracts';
 import { api, errorMessage } from '../../lib/api';
 import { StatusBadge } from '../../components/StatusBadge';
-import { InitiateReviewDrawer } from './InitiateReviewDrawer';
 import { ReviewDispositionDrawer } from './ReviewDispositionDrawer';
 import {
   MRB_DISPOSITION_OPTIONS,
@@ -31,7 +29,7 @@ import {
  * MRB 不合格品处置（整合单页）
  *
  * 口径与结构依据 docs/19-MRB不合格品处置页整合设计.md：
- * - 阶段 1「不合格待审核池」→ 页头【+ 发起评审】抽屉（InitiateReviewDrawer）；
+ * - 阶段 1「不合格台账」→ 判定不合格即自动汇入，**页面无人工发起入口**（docs/43）；
  * - 阶段 2「MRB 评审与处置」→ 本页处置列表 + 行内【评审】抽屉（ReviewDispositionDrawer）。
  *
  * 数据口径：列表与 5 项 KPI 全部取 `GET /mrb/records`，KPI 由服务端在 PBAC 过滤后统计，
@@ -47,6 +45,11 @@ interface MrbListResponse {
   list?: MrbReviewRecord[];
   total?: number;
   pendingCount?: number;
+  /**
+   * 不合格台账待发起条数。自动发起（docs/43）后正常链路恒为 0，
+   * 保留字段仅为兼容历史接口形态；页面已不再消费。
+   */
+  pendingPoolCount?: number;
   underReviewCount?: number;
   totalReviewedCount?: number;
   disposedCount?: number;
@@ -163,9 +166,7 @@ export function MrbPage() {
   const [exporting, setExporting] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const [initiateOpen, setInitiateOpen] = useState(false);
   const [activeRecord, setActiveRecord] = useState<MrbReviewRecord | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
 
   const tabStatuses = useMemo<readonly MRBStatus[]>(
     () => MRB_TABS.find((item) => item.key === tab)?.statuses ?? [],
@@ -246,14 +247,6 @@ export function MrbPage() {
     }
   };
 
-  const handleInitiated = (mrbNo: string) => {
-    setInitiateOpen(false);
-    setNotice(`已生成 MRB 评审工单 [${mrbNo}]，源检验单已流转至评审中；可在下方【待评审】页签继续会签与处置。`);
-    setTab('PENDING_REVIEW');
-    setPage(1);
-    void loadRecords();
-  };
-
   const kpiCards: readonly {
     key: keyof MrbKpi;
     title: string;
@@ -316,7 +309,14 @@ export function MrbPage() {
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h2 className="text-xl font-black text-slate-900">MRB不合格品处置</h2>
-          <p className="text-xs text-slate-500 mt-1">不合格品评审与处置 · 支持多级评审流程</p>
+          {/*
+            口径（docs/43-不合格判定自动发起MRB评审设计.md）：判定不合格即**自动创建 MRB
+            评审单**并进入会签，页面无人工发起入口 —— 原「+ 发起评审」按钮与「待发起评审」
+            计数胶囊（docs/39 §2 D3）已随客户口径变更移除。
+          */}
+          <p className="text-xs text-slate-500 mt-1">
+            <span>不合格品评审与处置 · 判定不合格自动进入评审</span>
+          </p>
         </div>
         <div className="flex items-center gap-2.5">
           <button
@@ -328,33 +328,8 @@ export function MrbPage() {
             <Download className="w-3.5 h-3.5 text-blue-600" />
             <span>{exporting ? '导出中…' : '导出报表'}</span>
           </button>
-          <button
-            type="button"
-            onClick={() => setInitiateOpen(true)}
-            className="px-4 py-2 text-xs font-bold text-white bg-[#2563EB] hover:bg-blue-700 rounded-xl shadow-sm flex items-center gap-1.5 transition-colors"
-          >
-            <Plus className="w-4 h-4" />
-            <span>发起评审</span>
-          </button>
         </div>
       </div>
-
-      {/* 发起成功提示 */}
-      {notice !== null && (
-        <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3 flex items-start justify-between gap-3 text-xs text-emerald-800">
-          <div className="flex items-start gap-2.5">
-            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-            <span>{notice}</span>
-          </div>
-          <button
-            type="button"
-            onClick={() => setNotice(null)}
-            className="text-emerald-600 hover:text-emerald-800 shrink-0"
-          >
-            关闭
-          </button>
-        </div>
-      )}
 
       {/* 5 项 KPI：一律取服务端口径 */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3.5">
@@ -609,13 +584,6 @@ export function MrbPage() {
           </div>
         </div>
       </div>
-
-      {/* 阶段 1：待审核池发起抽屉 */}
-      <InitiateReviewDrawer
-        open={initiateOpen}
-        onClose={() => setInitiateOpen(false)}
-        onInitiated={handleInitiated}
-      />
 
       {/* 阶段 2：评审与处置抽屉 */}
       <ReviewDispositionDrawer

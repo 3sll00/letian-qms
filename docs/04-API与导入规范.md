@@ -129,6 +129,10 @@
   - **响应结果**：`TraceBatchSearchResponse` = `{ total, page, pageSize, items }`，每行 `TraceBatchSummary`。
   - **数据来源是两路并集**：`batch_trace_nodes`（已建血缘的批次）与 `inspection_orders`（有检验台账的批次）；
     每行用 `sources: ['TRACE_NODE' | 'INSPECTION_ORDER']` 标明命中来源，界面据此区分「已建血缘」与「仅检验台账」。
+  - **写侧（2026-09-23 补充）**：节点不是人工维护的 —— 检验单**终判**时在同一事务内按 `batch_no` upsert 该批次节点
+    （一个批次一个节点，`batch_trace_nodes.batch_no` UNIQUE）。因此正常终判过的批次，其行必然带 `TRACE_NODE` 来源与
+    `stageName` / `nodeStatus` / `inspectionOrderNo`；建单与进行中环节不登记（该来源归 MES/ERP 同步），
+    详见 `41-检验环节自动登记追溯节点设计.md`。
   - **过滤一律下沉 SQL**（`ILIKE` + 服务端分页），前端不得做二次过滤。
   - PBAC 按**清单语义**处理：越权批次被**剔除**而不是整个请求 403。
 - `GET /api/v1/traceability/orders/:orderNo` —— **本订单检验环节**（订单维度台账视图，**不是**血缘链路）。
@@ -198,6 +202,12 @@
     `category_code` = 该物料分类）；多命中取最新创建的一行；未命中返回 404 `inspection-plan-not-found`。
   - 只认 `version_status = ACTIVE` **且**生效周期覆盖当天的版本（`effectiveStartDate <= CURRENT_DATE <= effectiveEndDate`，
     两侧都可为空）：周期外的版本直接失效，继续往下一级兜底。
+  - **PBAC 方案域口径（2026-09-23，`docs/42`）**：方案对象**自身无供应商属性**（`inspection_plans` 无 `supplier_code` 列，
+    检验标准不分供应商），故该接口的物料权限核对**只判物料分类 + 物料编码**，供应商维度不参与判定 ——
+    三维限定账号（如 IQC 检验员：分类 + 编码 + 供应商）不再因"规则限定供应商"被整条作废（修复前恒 403 `pbac-permission-denied`，
+    录入页指标清单恒空）。`GET /plans` 与 `GET /plans/stats` 的行级过滤同口径。
+  - 口径边界：**不放宽物料维度**（分类 / 编码不命中仍 403）、**不放宽单据域**
+    （检验单 / 待审核池 / MRB 处置单仍三维全判）；无生效权限规则时方案域同样 403（fail-closed）。
 - `POST /api/v1/plans/versions/{versionId}/status`: **方案版本启停（审批）**。
   - **请求体契约 `TogglePlanVersionStatusRequestSchema`**：只传 `{ action: 'ACTIVATE' | 'DEACTIVATE' }`
     （`PlanVersionStatusActionEnum`）。目标版本由 URL 的 **`versionId` = 版本行 UUID** 唯一确定，

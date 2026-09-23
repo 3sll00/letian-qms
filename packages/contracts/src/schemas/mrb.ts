@@ -258,6 +258,13 @@ export const DisposeMRBRequestSchema = z.object({
 export const PaginatedMRBRecordsSchema = z.object({
   total: z.number().int().openapi({ description: '总条数', example: 12 }),
   pendingCount: z.number().int().openapi({ description: 'KPI: 待评审数', example: 2 }),
+  pendingPoolCount: z
+    .number()
+    .int()
+    .openapi({
+      description: 'KPI: 不合格待审核池「待发起评审」条数（docs/39 §3 D3，PBAC 过滤后统计）',
+      example: 1,
+    }),
   underReviewCount: z.number().int().openapi({ description: 'KPI: 评审中数', example: 1 }),
   totalReviewedCount: z.number().int().openapi({ description: 'KPI: 累计已评审数', example: 9 }),
   disposedCount: z.number().int().openapi({ description: 'KPI: 已处置完成数', example: 8 }),

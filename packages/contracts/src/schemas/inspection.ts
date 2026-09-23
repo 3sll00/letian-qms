@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { extendZodWithOpenApi } from '@asteasolutions/zod-to-openapi';
+import { MRBDispositionEnum } from './mrb';
 
 extendZodWithOpenApi(z);
 
@@ -417,6 +418,19 @@ export const InspectionOrderSchema = z.object({
   processType: z.string().optional().openapi({ description: '加工类型/工艺分类', example: '镀锌' }),
   returnDate: z.string().optional().openapi({ description: '委外件回厂登记日期 (YYYY-MM-DD)', example: '2026-07-06' }),
   vendorName: z.string().optional().openapi({ description: '加工商/外协厂商名称快照', example: '苏州机加工厂' }),
+  // 030 委外检验录入页业务事实字段（docs/36 迁移 030）：三列均为录入事实，缺省即缺省，绝不推导
+  materialGrade: z.string().optional().openapi({
+    description: '材质牌号/强度等级（落库 inspection_orders.material_grade）',
+    example: '10.9级',
+  }),
+  techStandard: z.string().optional().openapi({
+    description: '执行技术标准与工艺规范（落库 inspection_orders.tech_standard）；制造证书「执行规范」行读该列',
+    example: 'GB/T 3098.1-2010',
+  }),
+  inspectedDate: z.string().optional().openapi({
+    description: '检验日期 YYYY-MM-DD（落库 inspection_orders.inspected_date）；为空时读侧才回落 completedAt/createdAt',
+    example: '2026-09-23',
+  }),
   // 029 质量负责人签核（docs/35 §5）：由 POST /inspections/{id}/approve 写入**真实签核动作**；
   // 未签核即缺省 —— 证书留白，绝不打印任何人名
   approverId: z.string().uuid().optional().openapi({ description: '质量负责人（员工主数据 id），未签核时缺省' }),
@@ -515,6 +529,10 @@ export const CreateInspectionOrderRequestSchema = z.object({
   processType: z.string().optional().openapi({ description: '加工类型/工艺分类' }),
   returnDate: z.string().optional().openapi({ description: '委外件回厂登记日期 (YYYY-MM-DD)' }),
   vendorName: z.string().optional().openapi({ description: '加工商/外协厂商名称' }),
+  // 030 委外检验录入页业务事实字段（docs/36）：空串按「未提供」归一，不落 NULL 覆盖既有值
+  materialGrade: z.string().optional().openapi({ description: '材质牌号/强度等级（落库 inspection_orders.material_grade）' }),
+  techStandard: z.string().optional().openapi({ description: '执行技术标准与工艺规范（落库 inspection_orders.tech_standard）' }),
+  inspectedDate: z.string().optional().openapi({ description: '检验日期 YYYY-MM-DD（落库 inspection_orders.inspected_date）' }),
   completedAt: z.string().optional().openapi({
     description:
       '台账「完成时间」列：该工序报工/报检登记时间（MES 同步链路以 t_check_report.check_date 写入）；终判完成时由状态流转刷新',
@@ -560,6 +578,44 @@ export const BatchRecordInspectionItemsRequestSchema = z.object({
 export const ApproveInspectionOrderRequestSchema = z.object({
   remark: z.string().optional().openapi({ description: '签核意见（写入审计日志，不覆盖检验单备注）', example: '资料齐全，同意放行' }),
 }).openapi('ApproveInspectionOrderRequest');
+
+/**
+ * 检验单终判请求（docs/39 §3）。
+ *
+ * 口径：`status` 必填并受 `InspectionStatusEnum` 约束（非法值 400，不再直接落库）；
+ * 判定「不合格」（`status = FAILED` 或 `judgment = FAILED`）时，服务端在**同一事务**内
+ * 把该单汇入不合格待审核池（`pending_mrb_items`），由质检主管在【MRB不合格品处置】逐条发起评审。
+ * `remark` 与 `inspectionNotes` 语义相同（终判结论备注），同时给出时以 `inspectionNotes` 为准。
+ */
+export const FinalizeInspectionStatusRequestSchema = z
+  .object({
+    status: InspectionStatusEnum.openapi({
+      description: '终判目标状态：判定不合格用 FAILED（合格 PASSED，委外返工 RE_INSPECTING，归档 COMPLETED）',
+      example: 'FAILED',
+    }),
+    judgment: InspectionStatusEnum.optional().openapi({
+      description: '综合判定结论（与 status 同源）；让步接收 / 特采申请场景可省略，仅以 status = FAILED 表示不合格',
+    }),
+    passQty: z.number().min(0).optional().openapi({ description: '合格数量（落 inspection_orders.pass_qty）' }),
+    failQty: z
+      .number()
+      .min(0)
+      .optional()
+      .openapi({ description: '不合格数量（落 inspection_orders.fail_qty，同时作为入池的不合格数）' }),
+    sampleQty: z.number().min(0).optional().openapi({ description: '抽样 / 受检数量（保留字段，终判当前不改抽样数）' }),
+    remark: z.string().optional().openapi({ description: '终判备注（语义同 inspectionNotes，同时给出时以 inspectionNotes 为准）' }),
+    inspectionNotes: z.string().optional().openapi({ description: '终判结论备注（以它为准写入 inspection_notes）' }),
+    /**
+     * 拟定处置（检验员的处置意图，落 `mrb_reviews.disposition` 初值）。
+     * 判定不合格时自动创建的 MRB 单以此作为「处置方式」列初值，终审时由处置决策覆盖；
+     * 缺省 `REWORK`（返工），"来料不合格退货" 传 `RETURN_TO_VENDOR`、"让步接收 / 特采" 传 `CONCESSION`。
+     */
+    preliminaryDisposition: MRBDispositionEnum.optional().openapi({
+      description: '拟定处置（判定不合格自动建 MRB 单时的处置方式初值）',
+      example: 'RETURN_TO_VENDOR',
+    }),
+  })
+  .openapi('FinalizeInspectionStatusRequest');
 
 export const InspectionProgressOverviewSchema = z.object({
   totalOrders: z.number().int(),

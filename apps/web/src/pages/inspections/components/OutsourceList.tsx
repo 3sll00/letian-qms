@@ -45,6 +45,16 @@ export interface OutsourceListItem {
   approverName?: string;
   /** 签核时间（inspection_orders.approved_at） */
   approvedAt?: string;
+  /** 030 委外录入页业务事实字段（docs/36）：材质牌号 / 执行技术标准 / 检验日期，均只取物理列 */
+  materialGrade?: string;
+  techStandard?: string;
+  inspectedDate?: string;
+  /**
+   * 完成时间 / 建单时间（inspection_orders.completed_at / created_at）。
+   * 仅作制造证书「Issue Date」在 inspected_date 为空时的回落档（docs/36 §6），只读、不参与录入。
+   */
+  completedAt?: string;
+  createdAt?: string;
 }
 
 
@@ -92,6 +102,12 @@ interface OrderRow {
   approverName?: string | null;
   /** 签核时间（inspection_orders.approved_at） */
   approvedAt?: string | null;
+  /** 030 委外录入页业务事实字段（docs/36）：材质牌号 / 执行技术标准 / 检验日期 */
+  materialGrade?: string;
+  techStandard?: string;
+  inspectedDate?: string;
+  /** 完成时间（inspection_orders.completed_at）：签发日期回落的第二档 */
+  completedAt?: string | null;
 }
 
 export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initialTab }) => {
@@ -177,6 +193,13 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
           returnDate: o.returnDate ?? '-',
           status: STATUS_TO_CN[o.status] ?? '待检验',
           inspector: o.inspectorName || o.inspector || '-',
+          // 030 委外录入页业务事实字段：同样只取物理列，缺失即空串（详情页按「无来源就留空」渲染）
+          materialGrade: o.materialGrade ?? '',
+          techStandard: o.techStandard ?? '',
+          inspectedDate: o.inspectedDate ?? '',
+          // 签发日期回落档（制造证书用）：同样只取物理列，缺失即空串
+          completedAt: o.completedAt ?? '',
+          createdAt: o.createdAt ?? '',
           approverName: o.approverName || '',
           approvedAt: o.approvedAt || '',
           tabType: tab,
@@ -221,6 +244,11 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
         vendor: item.vendor,
         batchNo: item.batchNo,
         inspector: item.inspector === '-' ? '' : item.inspector,
+        // 030 字段接入制造证书（docs/36 §6）：「Specification (执行规范)」行读 tech_standard；
+        // 签发日期按 inspected_date → completed_at → created_at 回落（与录入页证书同一口径），
+        // 三档皆空时才由 buildManufacturingCertData 取「今天」（本证书生成动作的真实日期）
+        standard: item.techStandard,
+        dateOfIssue: (item.inspectedDate || item.completedAt || item.createdAt || '').slice(0, 10),
         // 印章结论取台账状态（真实落库值）；待检验 / 检验中不下结论
         overallDecision:
           item.status === '已合格' ? 'PASSED' : item.status === '不合格' ? 'FAILED' : '',

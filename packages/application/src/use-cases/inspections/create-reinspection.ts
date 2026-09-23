@@ -113,9 +113,17 @@ export class CreateReinspectionUseCase {
         ...(origOrder.erpStatus !== undefined ? { erpStatus: origOrder.erpStatus } : {}),
         ...(origOrder.processType !== undefined ? { processType: origOrder.processType } : {}),
         ...(origOrder.vendorName !== undefined ? { vendorName: origOrder.vendorName } : {}),
-        // 委外加工单号 / 回厂日期刻意不沿承：读侧 mapRow 对这两列已有展示兜底
-        // （缺省回落 batchNo / 建单日期），若在此把兜底值落库，等于把「展示推导」固化成
-        // 「真实凭证号」，后续无法再区分该值是 ERP 下发还是系统推导。
+        // 委外加工单号 / 回厂日期：沿承原单的真实列值（仅当原单确有值时复制）。
+        // 原口径「刻意不沿承」的依据是「读侧 mapRow 会回落 batchNo / 建单日期」，该兜底已于
+        // 2026-09-22 废止（见 docs/32 §2.2 与 docs/36 §1.2）：兜底不存在后，不沿承的直接后果是
+        // 复检行的「委外加工单号 / 回厂日期」恒为空，而这两列描述的是批次来源凭证
+        // （与 inboundNo / dispatchDate 同性质），不因返工复检而改变。
+        ...(origOrder.outsourceNo !== undefined ? { outsourceNo: origOrder.outsourceNo } : {}),
+        ...(origOrder.returnDate !== undefined ? { returnDate: origOrder.returnDate } : {}),
+        // 030 录入页业务事实字段：材质牌号 / 执行技术标准同为「本批工件的事实」，复检沿承；
+        // 检验日期不沿承 —— 复检是新的检验周期，沿承原单检验日期等于伪造（与 inspectorName 同口径）
+        ...(origOrder.materialGrade !== undefined ? { materialGrade: origOrder.materialGrade } : {}),
+        ...(origOrder.techStandard !== undefined ? { techStandard: origOrder.techStandard } : {}),
         isMandatoryGate: origOrder.isMandatoryGate,
         // 复检轮的「检验人」由调用方指定：复检是新的检验周期，沿承原单检验人等于伪造，
         // 未传时保持 undefined，由读侧按员工主数据补齐（见 docs/30 §3）

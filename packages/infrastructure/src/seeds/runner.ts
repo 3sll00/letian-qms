@@ -161,15 +161,31 @@ function round3(value: number): number {
  * "cannot extract elements from a scalar"（SQLSTATE 22023）。
  */
 
+/**
+ * 数值判定基准。演示工单的实测值只对数值型指标生成（`toOrderItem` 已先按 dataType 拦下定性指标），
+ * 故这里的 `?? 0` 只是为可选字段收窄类型，正常路径不会命中默认值。
+ */
+function numericBasis(metric: SeedMetric): {
+  nominalValue: number;
+  upperTolerance: number;
+} {
+  return {
+    nominalValue: metric.nominalValue ?? 0,
+    upperTolerance: metric.upperTolerance ?? 0,
+  };
+}
+
 /** 公差内的实测值（取上公差的 35% 作为偏移量） */
 function withinTolerance(metric: SeedMetric): number {
-  return round3(metric.nominalValue + metric.upperTolerance * 0.35);
+  const basis = numericBasis(metric);
+  return round3(basis.nominalValue + basis.upperTolerance * 0.35);
 }
 
 /** 公差外的实测值（超出上公差 50%） */
 function outOfTolerance(metric: SeedMetric): number {
-  const overshoot = metric.upperTolerance > 0 ? metric.upperTolerance * 0.5 : 0.01;
-  return round3(metric.nominalValue + metric.upperTolerance + overshoot);
+  const basis = numericBasis(metric);
+  const overshoot = basis.upperTolerance > 0 ? basis.upperTolerance * 0.5 : 0.01;
+  return round3(basis.nominalValue + basis.upperTolerance + overshoot);
 }
 
 /** 指标模板 -> 方案快照指标（契约 InspectionPlanItem） */
@@ -181,6 +197,8 @@ function toPlanItem(metric: SeedMetric, seq: number): InspectionPlanItem {
     dataType: metric.dataType,
     metricCategory: metric.metricCategory,
     standardText: metric.standardText,
+    // 定性指标的判标清单（TBD-06 唯一权威）：此前种子路径漏传，播种后清单会丢失
+    acceptableValues: metric.acceptableValues,
     nominalValue: metric.nominalValue,
     upperTolerance: metric.upperTolerance,
     lowerTolerance: metric.lowerTolerance,
@@ -193,6 +211,14 @@ function toPlanItem(metric: SeedMetric, seq: number): InspectionPlanItem {
 
 /** 指标模板 -> 工单实测项（契约 InspectionItem），按形态填充 result / measuredVal */
 function toOrderItem(metric: SeedMetric, seq: number, kind: ItemResultKind): InspectionItem {
+  // 演示工单的「实测值」只对数值型指标编造（公差内 / 公差外各一版）；定性指标没有可生成的实测文本，
+  // 若将来把定性指标接进演示工单，必须显式给出实测文本，不能在这里静默落空值。
+  if (metric.dataType !== 'NUMERIC') {
+    throw new Error(
+      `SEED_ORDER_ITEM_REQUIRES_NUMERIC: 方案指标 [${metric.itemCode}] 为 ${metric.dataType} 型，演示工单实测值生成仅支持 NUMERIC`
+    );
+  }
+
   const base: InspectionItem = {
     seq,
     itemCode: metric.itemCode,
@@ -338,8 +364,10 @@ export async function seed(db: Kysely<Database>): Promise<void> {
       planName: plan.planName,
       inspectionType: plan.inspectionType,
       materialCode: plan.materialCode,
-      // 方案分类归属：与物料主数据保持一致，供分类级兜底匹配使用
-      categoryCode: materialCategoryOf(plan.materialCode),
+      // 方案分类归属：与物料主数据保持一致，供分类级兜底匹配使用。
+      // 分类通用方案（materialCode 为空串）没有可比对的物料，必须显式给出 categoryCode
+      // —— 否则 materialCategoryOf('') 会抛 SEED_MATERIAL_NOT_FOUND，全量播种直接失败（见 docs/37 §8）。
+      categoryCode: plan.categoryCode ?? materialCategoryOf(plan.materialCode),
       versions: plan.versions.map((version) => ({
         id: version.id,
         planId: version.id,

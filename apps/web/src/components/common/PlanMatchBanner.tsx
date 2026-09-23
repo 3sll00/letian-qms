@@ -63,7 +63,7 @@ export const PlanMatchBanner: React.FC<PlanMatchBannerProps> = ({
   inspectionType,
   compact = false,
 }) => {
-  const { status, display, error, message, reload, source, order } = state;
+  const { status, display, error, message, reload, source, order, permissionDenied } = state;
   const isSnapshot = source === 'SNAPSHOT';
   const code = materialCode && materialCode.trim() !== '' ? materialCode.trim() : '—';
   const sourceTag = isSnapshot ? '本单方案快照' : '已匹配质检方案';
@@ -166,10 +166,17 @@ export const PlanMatchBanner: React.FC<PlanMatchBannerProps> = ({
   }
 
   const isNotFound = status === 'not-found';
+  /**
+   * PBAC 数据权限拦截（403）：**方案可能就在那里**，与"方案没配"是两种完全不同的失败。
+   * 组合状态里 `permissionDenied` 由 Hook 按错误码判定，这里只负责分开文案（docs/42 §2.2）。
+   */
+  const isPermissionDenied = !isSnapshot && permissionDenied;
   const title = isSnapshot
     ? isNotFound
       ? '未找到该检验单'
       : '检验单方案快照加载失败'
+    : isPermissionDenied
+    ? '无该物料的数据权限'
     : isNotFound
     ? '未匹配到质检方案'
     : '质检方案匹配失败';
@@ -178,6 +185,12 @@ export const PlanMatchBanner: React.FC<PlanMatchBannerProps> = ({
       回看口径：指标清单与判定依据应取自本单建单时固化的方案快照（
       <span className="font-mono">GET /api/v1/inspections/{'{'}id{'}'}</span>
       ）。为不误导判定，本单不会展示任何按"当前生效方案"重算的指标行。
+    </>
+  ) : isPermissionDenied ? (
+    <>
+      本单不展示任何演示指标行。请由管理员在「系统管理 - 物料权限」中核查当前账号的物料数据权限（PBAC）策略：
+      需覆盖物料 <span className="font-mono">{code}</span> 或其所属存货分类；若策略已覆盖仍被拦截，
+      请把上方拦截详情（用户 / 物料分类 / 物料 / 供应商）一并提供给管理员定位。
     </>
   ) : (
     <>
@@ -191,6 +204,7 @@ export const PlanMatchBanner: React.FC<PlanMatchBannerProps> = ({
     <div
       data-testid="plan-match-banner"
       data-status={isNotFound ? 'not-found' : 'error'}
+      data-permission-denied={isPermissionDenied ? 'true' : 'false'}
       data-source={source}
       className={`border rounded-lg shadow-sm text-xs flex items-start justify-between gap-3 ${
         isNotFound ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-rose-50 border-rose-300 text-rose-900'

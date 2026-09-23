@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Letian QMS API Specification
-  version: 2.13.0
+  version: 2.15.0
   description: 乐天紧固件质量管理系统契约规范，完全对齐 21 项业务能力、DDD 四层架构与 PostgreSQL 14+ 数据实体。
 servers:
   - url: /api/v1
@@ -52,6 +52,8 @@ paths:
         第二级存货分类通用方案（material_code = '' 且 category_code = 该物料所属分类）。
         两级共同要求 inspection_stage = inspectionType、version_status = 'ACTIVE'
         且版本生效周期覆盖当天；多命中取最新创建的一行。
+        PBAC 方案域口径（docs/42 §3）：方案对象无供应商属性，本接口只判物料分类 + 物料编码，
+        供应商维度不参与判定；物料维度越权返回 403 pbac-permission-denied。
         口径唯一真相见 docs/17-检验录入界面说明与质检方案匹配口径.md §7.3。
       operationId: matchInspectionPlan
       parameters:
@@ -509,6 +511,43 @@ paths:
                 $ref: '#/components/schemas/InspectionOrder'
         '403':
           description: 当前角色无签核权限（不是 QA_MANAGER / ADMIN / SYSTEM）
+        '404':
+          description: 检验单不存在
+
+  /inspections/{id}/status:
+    post:
+      summary: 检验单终判（状态 / 数量 / 综合结论），判定不合格时同一事务内自动汇入不合格待审核池
+      description: |
+        终判的**唯一写入口**（口径见 docs/39-不合格判定自动入池与MRB页可见性打通设计.md §2 D1 / §4）。
+        - `status` 必填并受 `InspectionStatusEnum` 约束，非法值 400（不再无校验直接落库）。
+        - 「判为不合格」判定式：终判后 `status = FAILED` **或** `judgment = FAILED`。此时服务端在**同一事务**内把该单
+          upsert 进不合格待审核池（`pending_mrb_items`，幂等键 `source_order_id`），随后由质检主管在
+          【MRB不合格品处置】页面【+ 发起评审】逐条发起 —— 两阶段机制（自动入池 / 人工发起）不变。
+        - `RE_INSPECTING`（MRB 返工回边）与 `COMPLETED`（归档终态）**不触发入池**。
+        - 每次终判写一条 `STATUS_CHANGE` 审计留痕，`diffPatch.pendingDefectCollected` 明示本次是否入池。
+      operationId: finalizeInspectionStatus
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FinalizeInspectionStatusRequest'
+      responses:
+        '200':
+          description: 终判完成，返回更新后的检验单
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionOrder'
+        '400':
+          description: 请求体校验失败（status / judgment 非法取值）
         '404':
           description: 检验单不存在
 
@@ -1232,6 +1271,16 @@ components:
         vendorName:
           type: string
           description: 加工商/外协厂商名称快照（009 委外检验扩展）
+        # 030 委外检验录入页业务事实字段（迁移 030，docs/36）：三列均为录入事实，缺省即缺省，绝不推导
+        materialGrade:
+          type: string
+          description: 材质牌号/强度等级（落库 inspection_orders.material_grade，如 10.9级 / 35CrMo）
+        techStandard:
+          type: string
+          description: 执行技术标准与工艺规范（落库 inspection_orders.tech_standard）；制造证书「执行规范」行读该列
+        inspectedDate:
+          type: string
+          description: 检验日期 YYYY-MM-DD（落库 inspection_orders.inspected_date）；为空时读侧才回落 completedAt/createdAt
         planVersionId:
           type: string
           format: uuid
@@ -1415,6 +1464,16 @@ components:
         vendorName:
           type: string
           description: 加工商/外协厂商名称（009 委外检验扩展）
+        # 030 委外检验录入页业务事实字段（迁移 030，docs/36）：空串按「未提供」归一，不落 NULL 覆盖既有值
+        materialGrade:
+          type: string
+          description: 材质牌号/强度等级（落库 inspection_orders.material_grade）
+        techStandard:
+          type: string
+          description: 执行技术标准与工艺规范（落库 inspection_orders.tech_standard）
+        inspectedDate:
+          type: string
+          description: 检验日期 YYYY-MM-DD（落库 inspection_orders.inspected_date）
         completedAt:
           type: string
           description: 台账「完成时间」列：该工序报工/报检登记时间；终判完成时由状态流转刷新
@@ -1774,6 +1833,38 @@ components:
         remark:
           type: string
           description: 签核意见（写入审计留痕 diff_patch.remark，不写检验单备注）
+
+    FinalizeInspectionStatusRequest:
+      type: object
+      required: [status]
+      description: 检验单终判请求（口径见 docs/39 §3 / §4）；判定不合格时服务端在同一事务内汇入不合格待审核池
+      properties:
+        status:
+          type: string
+          enum: [PENDING, INSPECTING, DRAFT, PASSED, FAILED, IN_MRB_REVIEW, RE_INSPECTING, COMPLETED]
+          description: 终判目标状态：判不合格用 FAILED（合格 PASSED，委外返工 RE_INSPECTING，归档 COMPLETED）
+        judgment:
+          type: string
+          enum: [PENDING, INSPECTING, DRAFT, PASSED, FAILED, IN_MRB_REVIEW, RE_INSPECTING, COMPLETED]
+          description: 综合判定结论（服务端按检验单状态枚举校验）；仅以 status = FAILED 表示不合格时可省略
+        passQty:
+          type: number
+          minimum: 0
+          description: 合格数量（落 inspection_orders.pass_qty）
+        failQty:
+          type: number
+          minimum: 0
+          description: 不合格数量（落 inspection_orders.fail_qty，同时作为入池的不合格数）
+        sampleQty:
+          type: number
+          minimum: 0
+          description: 抽样 / 受检数量（保留字段：终判当前不改写抽样数）
+        remark:
+          type: string
+          description: 终判备注（语义同 inspectionNotes，同时给出时以 inspectionNotes 为准）
+        inspectionNotes:
+          type: string
+          description: 终判结论备注（以它为准写入 inspection_notes）
 
     CompanyProfile:
       type: object
@@ -2412,7 +2503,7 @@ components:
 
     PaginatedMRBRecords:
       type: object
-      required: [total, pendingCount, underReviewCount, totalReviewedCount, disposedCount, monthlyReviewRate, items, page, pageSize]
+      required: [total, pendingCount, pendingPoolCount, underReviewCount, totalReviewedCount, disposedCount, monthlyReviewRate, items, page, pageSize]
       properties:
         total:
           type: integer
@@ -2420,6 +2511,9 @@ components:
         pendingCount:
           type: integer
           description: 待评审数量
+        pendingPoolCount:
+          type: integer
+          description: 不合格待审核池「待发起评审」条数（`pending_mrb_items.status = PENDING_INITIATE`，PBAC 行级过滤后统计；口径见 docs/39 §2 D3）
         underReviewCount:
           type: integer
           description: 评审中数量

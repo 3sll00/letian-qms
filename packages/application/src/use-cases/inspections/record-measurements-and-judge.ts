@@ -7,6 +7,7 @@ import { ApplicationError } from '../../errors/application-error.js';
 import type { ISecurityContext } from '../../security/security-context.js';
 import type { IUnitOfWork } from '../../tx/unit-of-work.js';
 import { collectPendingDefect } from '../mrb/collect-pending-defect.js';
+import { autoInitiateMrbReview } from '../mrb/auto-initiate-mrb-review.js';
 
 export interface RecordMeasurementsAndJudgeCommand
   extends Partial<BatchRecordInspectionItemsRequest> {
@@ -97,9 +98,26 @@ export class RecordMeasurementsAndJudgeUseCase {
       const status = order.getStatus();
       const decision = order.getOverallDecision();
 
-      // 4. 判定不合格 -> 汇入不合格待审核池（与工单状态同事务提交，见 docs/20 §5 D3）
+      // 4. 判定不合格 -> 汇入不合格台账（与工单状态同事务提交，见 docs/20 §5 D3）
+      //    + 同事务自动创建 MRB 评审单（docs/43 §3：判定即入评审，无人工发起环节）。
+      //    该路径此前只入池不建单：若不补齐，这些单会留下永远无人发起的孤儿台账条目。
+      let mrbReviewNo: string | undefined;
       if (decision === 'FAILED') {
-        await collectPendingDefect(ctx, order.toDTO());
+        const failedOrder = order.toDTO();
+        await collectPendingDefect(ctx, failedOrder);
+
+        const auto = await autoInitiateMrbReview(
+          ctx,
+          failedOrder,
+          { id: cmd.operatorId, name: cmd.operatorName },
+          {
+            ...(cmd.overallRemark !== undefined ? { reviewNotes: cmd.overallRemark } : {}),
+          },
+          securityCtx
+        );
+        if (auto !== null) {
+          mrbReviewNo = auto.mrbReview.mrbNo;
+        }
       }
 
       // 5. 发送领域事件到 Outbox
@@ -143,11 +161,18 @@ export class RecordMeasurementsAndJudgeUseCase {
           decision,
           status,
           itemCount: cmd.items.length,
+          // 自动发起留痕（docs/43）：让「判不合格却没有 MRB 单」在审计日志里一眼可判
+          mrbAutoInitiated: mrbReviewNo !== undefined,
+          ...(mrbReviewNo !== undefined ? { mrbReviewNo } : {}),
           ...(cmd.overallRemark !== undefined ? { remark: cmd.overallRemark } : {}),
         },
         createdAt: new Date().toISOString(),
       });
 
+      // 自动建单会把工单推进到 IN_MRB_REVIEW，回读最终态返回（避免前端拿到 FAILED 中间态）
+      if (mrbReviewNo !== undefined) {
+        return (await ctx.inspectionOrders.findById(order.getId())) ?? order.toDTO();
+      }
       return order.toDTO();
     });
   }

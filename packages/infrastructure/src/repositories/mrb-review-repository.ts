@@ -1,4 +1,4 @@
-import { Kysely } from 'kysely';
+import { Kysely, sql } from 'kysely';
 import type { MRBReviewRepository as IMRBReviewRepository } from '@letian/domain';
 import type {
   MaterialPermission,
@@ -132,7 +132,10 @@ export class KyselyMRBReviewRepository implements IMRBReviewRepository {
     createdFrom?: Date;
     /** 发现日期上界（不含），由控制器按「日界右开区间」计算 */
     createdToExclusive?: Date;
-    /** 三维 PBAC 权限过滤（MRB 表无供应商列，限定供应商的规则按 fail-closed 不匹配） */
+    /**
+     * 三维 PBAC 权限过滤：分类维度经 `materials` 换算、供应商维度经源检验单
+     * （`source_order_no = order_no`）换算；源单缺失即不命中供应商规则（fail-closed，docs/39 §4.6）
+     */
     permissions?: readonly MaterialPermission[];
     page: number;
     pageSize: number;
@@ -179,9 +182,12 @@ export class KyselyMRBReviewRepository implements IMRBReviewRepository {
       countQuery = countQuery.where('createdAt', '<', query.createdToExclusive);
     }
     if (query.permissions !== undefined) {
+      // 供应商维度经**源检验单**换算（MRB 表无 supplier_code 列，按 source_order_no = order_no 关联）；
+      // 源单缺失 / 未登记供应商即不命中该规则（fail-closed），与池查询同一口径（docs/39 §4.6）
       const pbacWhere = buildMaterialPermissionWhere(query.permissions, {
         targetRef: 'mrb_reviews',
-        hasSupplierColumn: false,
+        hasSupplierColumn: true,
+        supplierCodeExpr: sql`(SELECT src.supplier_code FROM inspection_orders AS src WHERE src.order_no = mrb_reviews.source_order_no)`,
       });
       listQuery = listQuery.where(pbacWhere);
       countQuery = countQuery.where(pbacWhere);

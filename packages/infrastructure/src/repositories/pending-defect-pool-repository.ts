@@ -76,13 +76,15 @@ export class KyselyPendingDefectPoolRepository implements IPendingDefectPoolRepo
       if (query.status !== undefined && query.status !== '') {
         current = current.where('status', '=', query.status);
       }
-      // 三维 PBAC：分类维度经 materials 子查询换算；供应商维度 fail-closed
-      // （池表无供应商编码列，限定供应商的规则不匹配任何行，与 /mrb/records 一致）
+      // 三维 PBAC：分类维度经 materials 子查询换算；供应商维度**经源检验单换算**
+      // （池表无 supplier_code 列，按 source_order_id 关联 inspection_orders 取真实供应商编码）。
+      // 源检验单缺失时不命中任何供应商规则（fail-closed），不放大可见范围（docs/39 §2 D2）。
       if (query.permissions !== undefined) {
         current = current.where(
           buildMaterialPermissionWhere(query.permissions, {
             targetRef: 'pending_mrb_items',
-            hasSupplierColumn: false,
+            hasSupplierColumn: true,
+            supplierCodeExpr: sql`(SELECT src.supplier_code FROM inspection_orders AS src WHERE src.id = pending_mrb_items.source_order_id)`,
           })
         );
       }
