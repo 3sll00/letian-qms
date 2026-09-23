@@ -145,21 +145,105 @@
 | 迁移 / 种子 | `029_company_profile_and_order_approval.ts`、`migrations/runner.ts`、`migrations/index.ts`、`database/schema.ts`、`seeds/data.ts`、`seeds/runner.ts`（表数 25 → **26**） |
 | 契约 | `packages/contracts/src/schemas/inspection.ts`（签核请求 + DTO 字段）、`…/master-data` 相关 schema、`packages/contracts/src/openapi/generator.ts`（如需要）、`docs/api/letian-qms-openapi.yaml` |
 | 领域 | `packages/domain/src/services/outsource-reference.ts` + 单测 |
-| API | `apps/api/src/controllers/inspections.controller.ts`（approve）、`master-data.controller.ts`（company-profile）、`packages/infrastructure/src/repositories/{inspection-order,master-data}-repository.ts` |
-| Web | `certificateDataService.ts`、`components/certificate/{QualityCertificateTemplate,ManufacturingCertTemplate,CertificatePrintModal}.tsx`、`lib/companyProfile.ts`、`components/common/ApprovalButton.tsx`、`pages/inspections/components/{OutsourceInspectionForm,OutsourceList,IqcRecordForm,IqcList,OqcRecordForm,OqcList,IpqcViews}.tsx`、`pages/inspections/index.tsx`、`pages/master-data/*`、`mocks/{data,handlers}.ts` |
-| 脚本 | `scripts/testing/outsource-no-check.cjs`、`scripts/logs/leftovers2-probe.cjs`（CDP 走查） |
+| API | `apps/api/src/controllers/inspections.controller.ts`（approve）、`master-data.controller.ts`（company-profile）、`apps/api/src/lib/permission-guard.ts`（`assertQualityApprover`）、`packages/infrastructure/src/repositories/{inspection-order,master-data}-repository.ts` |
+| Web | `certificateDataService.ts`、`components/certificate/{QualityCertificateTemplate,ManufacturingCertTemplate,CertificatePrintModal}.tsx`、`lib/companyProfile.ts`、`components/common/ApprovalButton.tsx`、`pages/inspections/components/{OutsourceInspectionForm,OutsourceList,IqcRecordForm,IqcList,OqcRecordForm,OqcList,IpqcViews}.tsx`、`pages/inspections/index.tsx`、`pages/master-data/{index,CompanyProfileView,CreateMasterDataModal}.tsx`、`mocks/{data,handlers,validate}.ts` |
+| 脚本 | `scripts/testing/outsource-no-check.cjs`（扫库校验）、`scripts/testing/ipqc-ledger-verify.cjs`（操作列断言同步）、`scripts/testing/leftovers2-probe.cjs`（CDP 走查 29 项，`pnpm verify:leftovers2`） |
 
 ---
 
 ## 12. 验证（实测回填）
 
-（本轮实测完成后回填：迁移 029 up/down 往返、API 冒烟、CDP 走查、回归数字。）
+**迁移 / 库**
+
+| 项 | 实测结果 |
+|:---|:---|
+| 迁移 `029` up | `company_profile` 建表 + `inspection_orders` 增 3 列；`information_schema.tables` = **34**；`kysely_migration` 最新 = `029_company_profile_and_order_approval` |
+| 迁移 `029` down | 3 列与 `company_profile` 全部回退，库结构回到 `028` 状态（up/down 往返实测） |
+| 迁移前备份 | `D:\乐天\db-backup-20260922-143515\letian_qms_db-pre029.sql`（190,810 字节） |
+| 种子 | `pnpm db:seed` → **26 表 165 行**（`company_profile` 1 行，值 = 迁移前两处硬编码常量的原值） |
+
+**接口（真实库）**
+
+| 用例 | 实测 |
+|:---|:---|
+| `GET /master-data/company-profile` | 200，返回种子行（`legalName` / `legalNameEn` / `qualityStamp` 非空） |
+| `PUT /master-data/company-profile` 传非法邮箱 | **400**（契约 `z.string().email()` 生效，不静默接受） |
+| `POST /inspections/:id/approve`（`IQC_INSPECTOR` 陈静） | **403**（门禁在服务端，前端不猜角色） |
+| `POST /inspections/:id/approve`（`QA_MANAGER` 张强） | **200**，回吐 `approverName='张强'`；重新 `GET` 仍在（真实落库，非响应体内存值） |
+| 审计留痕 | `audit_logs` 出现 `diff_patch.event='QUALITY_APPROVAL'` 行；**主动试删被触发器拒绝**（append-only 是数据库层强制约束，不是文档里的一句话） |
+| 重复签核 | 幂等覆盖：返回新的 `approvedAt`，不冲突、不重复建单 |
+
+**前端 CDP 走查 29/29**（`pnpm verify:leftovers2` → `scripts/testing/leftovers2-probe.cjs`：真实写路径 + 四个台账 + 企业档案页）
+
+- **M5 企业档案**：页签存在且回显种子值；保存出现绿字回执；接口回读 `address` = 探针值（真实落库）；`updated_by` = `张强`；清空字段后再回读为空；企业档案页签下**不出现**「新增」入口
+- **M4 签核**：录入表单页头出现签核按钮（未签核 = 质量负责人签核 / 已签核 = 重新签核，均由真实签核状态驱动）
+- **M3 写路径**：IQC 提交回执 = `已保存并终判：INS-20231013-0001（判定：合格）`（服务端返回，非 `alert` 假成功）
+- **M7 委外新建**：入口可达；物料编码下拉 = 存货主数据 17 条；选中 `MAT-10B21-06` 即回填物料名称「冷镦钢 10B21 Φ6.0mm」
+- **M9 证书入口**：来料 / 过程检 / 委外 / 出货**四个台账**操作列均含「证书」，点击可开证书且弹窗含本行单号；弹窗出现非打印提示条「提示：本单未录入实测值：化学成分、力学性能、尺寸与外观 —— 证书不打印该分段」
+
+**离线 Mock 同步实测 4/4**（`pnpm verify:leftovers2:mock` → MSW 浏览器冒烟 `scripts/testing/leftovers2-mock-probe.cjs`，本轮已从 `scripts/logs/` 提升为仓库内门禁）
+
+- `GET /master-data/company-profile`：企业档案页回显 `mockCompanyProfile` 法定名称（值与种子同源）
+- `PUT /master-data/company-profile`：保存出现绿字回执；`updated_by` = 页面顶栏当前 Mock 登录身份（服务端会话口径，客户端不可自称）；清空字段再保存生效
+- `POST /inspections/:id/approve`：签核后 `data-testid="approval-state"` 显示「已由 <登录身份> 签核 · <服务端时间>」
+
+本轮同时收口了两处 **Mock ↔ 真实后端的身份口径分叉**（原状：离线演示的回执会写出与页面顶栏不一致的编造姓名）：
+
+- Mock 补 `GET /api/v1/auth/users`（`mockAuthUsers`：9 名职员与真实 `employees` **同 UUID、同姓名、同主角色**）。此前该接口未被 mock，登录页在离线环境下拿不到名单、只能退化为「以默认身份进入」。
+- Mock `POST /api/v1/auth/login` 改为与后端 `authController` 同口径：传 `userId` 必须能在职员档案里查到（查不到即 **401**，不接受请求体自称），缺省身份固定为质量主管「张强」。此前缺省返回的是 `张三 (测试质检员)` + `role: INSPECTOR`，于是 `updated_by` / `approver_name` 会写出一个页面顶栏上根本不存在的人。
+- 新增与种子同行的**待检验**来料单 `INS-20231013-0001`（与真实库 `INS-20231013-0001` 同单号、同物料、同批次）：此前 Mock 的两张 IQC 单都已判定，离线演示根本走不到「录入 → 签核」链路。
+- 两个探针都在导航前清掉浏览器会话，并在登录后确认已进入应用：Chrome 用户目录是复用的，残留会话会让顶栏身份停在上一轮用户（这正是起初「回执身份 ≠ 顶栏身份」假失败的成因）。Mock 探针还要求 `VITE_API_TARGET` 指向**未监听**端口 —— 否则未被 mock 的接口会打到真实后端并 401，前端安全登出会把人踢回登录页，断言全灭。
+**回归门禁**
+
+| 命令 | 结果 |
+|:---|:---|
+| `pnpm typecheck` | **7/7** 通过 |
+| `pnpm test` | 全绿（契约 Zod 校验、领域规则、端到端集成、委外台账、物料权限、MRB 联动） |
+| `pnpm --filter @letian/web run validate:mocks` | **19 组**（新增「企业档案 `mockCompanyProfile`」一组） |
+| `pnpm audit:code` | 通过：`any` **137** / 预算 138（本轮把 `certificateDataService.ts` 的 5 处 `any` 收敛为 `unknown` + 显式收窄） |
+| `pnpm verify:inspections` | **18/18** |
+| `pnpm verify:ipqc-ledger` | **29/29**（断言同步为「操作列按状态分派 + 行级证书入口」） |
+| `pnpm verify:oqc` | **8/8** |
+| `pnpm verify:mrb-wiring`（独立 `:3101` 实例） | **35/35** |
+| `pnpm verify:outsource-no` | PASS（`ERP_NUMBER` 7 行 / `EMPTY` 17 行 / `DERIVED` 0 行） |
+| `information_schema.tables` | **34** |
+
+**静态检查与端到端门禁（二轮补做：把「注册了但从没跑过」的脚本真正跑通）**
+
+| 命令 | 结果 |
+|:---|:---|
+| `pnpm lint` | **0 error / 297 warning**（首次接入实测）。修前为 **234 error**：`no-explicit-any` 176、`no-unused-vars` 57、`no-irregular-whitespace` 1 —— 也就是说 `lint` 脚本从注册起就没通过过 |
+| `pnpm verify:leftovers2:mock` | **4/4**（本轮把它从 `scripts/logs/` 提升为仓库内门禁，并注册 `package.json` 脚本） |
+| `pnpm verify:smoke` | **7/7**，未捕获异常 **0**；同步重出 `docs/screenshots/` 六张验收图 |
+| `pnpm desktop:demo` | **PASS**：`apps/desktop/release/LetianQMS-Desktop-1.0.0.exe`（78.5 MB）、`.../LetianQMS-Portable-1.0.0.exe`（78.3 MB）、`.../win-unpacked/乐天QMS工作台.exe`（180 MB）—— **R5 的桌面端离线包已重新构建验证** |
+| `pnpm audit:code` | 通过：`any` **136** / 预算 138（清理死代码后比上一轮少 1 处） |
+| `pnpm verify:mrb`（离线 Mock，`WEB_BASE` 锁定干净 `dev:mock` 实例） | **24/24**（原记 19/23，病因见 R7：探针打到了真实后端代理实例） |
+| `pnpm verify:eol`（新增门禁） | PASS：已跟踪文本文件 **0 个混行 / 0 个全 CRLF**（归一前 75 个） |
+
+`pnpm lint` 的处置口径（重点：消除同一条口径上的两个执行点）：
+
+- `@typescript-eslint/no-explicit-any` 由 `error` 降为 `warn`：仓库内 **`any` 的执行点是 `pnpm audit:code`**（预算 138 / 基线文件 / 「不得新增」语义，见 `scripts/testing/README.md` §三）。此前 eslint 判 error、audit 判「在预算内」，同一条口径出现两个互相矛盾的结论，任何一次 `pnpm lint` 都必然失败。
+- `no-unused-vars` 的 57 条**全部按真·死代码修掉**（未使用的 import、只写不读的 `useState`、未使用入参改 `_` 前缀），不是关规则；其中 `apps/web/src/pages/inspections/components/IqcRecordForm.tsx` 删掉的是一个**点了没有任何反应**的「预览与打印质量保证证书 (PDF)」按钮 —— 它的弹窗在 M8 改造中已改走 `certificateDataService`，按钮与 `templateModalOpen` 状态成了残留（同类残留：`IpqcViews` 的只写不读 `statusCounts`、`categories` 的未使用 `totalMaterialCount`）。
+- `no-irregular-whitespace` 1 条：`apps/web/src/pages/master-data/index.tsx` 第 5 行混入了一个 BOM 字符（`U+FEFF`），已删除。
+- `scripts/logs/`（一次性产物目录，已 gitignore）移出扫描范围；剩余 297 条 warning 为 `any` 175 + `no-console` 122，见 R8。
+
+> 探针会真实推进一单的实测值与终判（这是「实测」的定义），跑完执行 `pnpm db:seed` 回到演示基线；
+> 签核三列由探针在收尾时置回 `NULL`，`QUALITY_APPROVAL` 审计留痕**不删**（也删不掉）。
 
 ---
 
 ## 13. 遗留
 
-（本轮实测后回填：确实无法在本机闭环的项 + 原因。）
+| 编号 | 事项 | 说明 |
+|:---|:---|:---|
+| R1 | ERP `DlyndxSC.Number` 的**流水段**真实形态 | 本机无 ERP 连接：`verify:outsource-no` 实测 `DERIVED` **0** 行（没有 `Number` 为空、需要拿 `VchCode` 拼的样例）。拿到 ERP 导出样例后按 `docs/31` 先例补一条断言即可，业务代码不动（形态判定已单点化到 `packages/domain/src/services/outsource-reference.ts`） |
+| R2 | 两条 2023 历史行委外加工单号仍为 `NULL` | 既定口径是**不补号**（ERP 侧无对账单）；拿到对账单后按 §3 用同一张留痕表回填 |
+| R3 | 企业档案除「法定名称中英文 / 印章文字」外的字段 | 种子留空（地址 / 产地 / 电话 / 邮箱 / 简称）→ 证书对应单元格按设计**留白**；需业务侧在「主数据 · 企业档案」维护后才打印 |
+| R4 | 历史单据证书的「批准人」栏 | 没有发生过签核动作就留白（`approver_name` 为空）——这是**设计口径**而不是缺陷：要打印，就得有人真的签核 |
+| R5 | 桌面端（Electron）离线包 | **已收口**：`pnpm desktop:demo` 实测 PASS（NSIS 安装包 78.5 MB / 免安装 78.3 MB / `win-unpacked` 180 MB）。仍未做的是**人眼安装与启动验收**（本机无交互式会话）——构建产物本身已可复现 |
+| R6 | 仓库范围的行尾（EOL）混行 | **已收口**。实测 `git ls-files --eol`：索引（HEAD blob）里**文本文件本来就是 LF**（无一条 CRLF blob），脏的只是**工作区** —— 75 个文本文件带 CRLF（56 混行 + 19 全 CRLF），根因是仓库**没有 `.gitattributes`**，各编辑器/工具各写各的行尾。处置：补根 `.gitattributes`（`* text=auto eol=lf` + 二进制 `binary`）→ 按索引口径把工作区 75 个文件整文件归一为 LF → 新增 `pnpm verify:eol`（`scripts/testing/eol-check.cjs`）纳入提交前检查，实测 **0 混行 / 0 全 CRLF**。`core.autocrlf=true` 对已跟踪文本文件不再起作用（`.gitattributes` 的 `eol=lf` 优先级高于 `core.autocrlf`），因此**不需要改本机 git 配置** |
+| R7 | `pnpm verify:mrb`（离线 Mock）4 条失败 | **已收口；病因与初判不同**。先把 `WEB_BASE` 显式指向一个**干净的 `dev:mock` 实例**复测：**24/24 通过**，Mock 侧「评审中 = 2 条」「待审核池（待发起评审）= 3 条」与脚本期望**完全一致** —— 所以**不是 Mock 数据漂移**。真因是**探针的运行目标没锁死**：`mrb-verify.cjs` 自动探测 `5201 → 5200 → 5202`，多会话环境里会落到**真实后端代理**实例上，断言于是照着真实库取值（真实库 `PENDING_INITIATE` 只有 1 条）；更糟的是脚本的返工处置会真的 `POST /mrb/records/:id/disposition` **写真实库**，把一条 `UNDER_REVIEW` 改成 `DISPOSED`，所以**同一条命令第二次跑**连「评审中 = 2」也对不上（脏库实测 KPI：评审中 1 / 已处置 3 / 评审率 50%；`pnpm db:seed` 复位后为 2 / 2 / 33.33%）。处置：探针加**运行目标自检** —— 页面内 `navigator.serviceWorker.getRegistrations()` 必须命中 `mockServiceWorker`，不是离线 Mock 就 `exit 3` 并打印正确启动方式；顺带修正一处误导断言名（「待评审」页签断言 `rowCount === 1` 却命名为「空态」）。权威 MRB 门禁仍是 `pnpm verify:mrb-wiring`（真实库 **35/35**） |
+| R8 | 静态检查剩余 297 条 warning | `any` **175**（执行点已统一到 `audit:code` 预算）+ `no-console` **122**（多为种子 / 同步脚本的正常进度输出，建议按目录给 eslint `overrides`，而不是逐条加注释） |
 
 ---
 
@@ -168,3 +252,6 @@
 | 版本 | 日期 | 变更 |
 |:---|:---|:---|
 | v1.0.0 | 2026-09-22 | 新建。承接 `docs/34` §9 的 M1~M9：ERP 号段形态单点化与扫库校验（M1）、2023 历史行口径固化与回填预案（M2）、IQC/OQC 写路径打通（M3）、质量负责人签核数据源（M4）、企业档案主数据 `company_profile`（M5）、证书实测分段可见性解释（M6）、委外新建链路（M7）、IQC/OQC 证书改走 certificateDataService（M8）、证书入口统一（M9） |
+| v1.0.1 | 2026-09-22 | 实测回填（§12 / §13）：迁移 `029` up/down 往返；接口 403 / 400 / 200 与审计 append-only 实测；CDP 走查 **29/29**；`typecheck 7/7`、`test` 全绿、`validate:mocks 19 组`、`verify:inspections 18/18` + `verify:ipqc-ledger 29/29` + `verify:oqc 8/8` + `verify:mrb-wiring 35/35` + `verify:outsource-no` PASS、`audit:code` 通过（`any` 137/138）；种子 26 表 165 行、`information_schema.tables` 34。同步补做：离线 Mock（`mockCompanyProfile` + `company-profile` GET/PUT + `inspections/:id/approve`）、`validate:mocks` 新增企业档案契约校验、`CreateMasterDataModal` 补 `companyProfile` 分支、`certificateDataService` 收敛 5 处 `any` |
+| v1.0.2 | 2026-09-22 | **门禁与 Mock 口径收口（本轮）**：`pnpm lint` 首次跑通（修前 234 error → 0 error，`any` 规则执行点统一到 `audit:code`，57 条死代码清掉、1 处 BOM 清除）；`verify:leftovers2:mock` 从 `scripts/logs/` 提升为仓库门禁并实测 **4/4**；Mock 补齐 `GET /auth/users` + 登录身份按职员档案解析（与后端 `authController` 同口径）+ 新增待检验来料单；`verify:smoke` **7/7**；`desktop:demo` **PASS**（R5 收口）；新增遗留 R6（EOL 混行）/ R7（`verify:mrb` Mock 漂移）/ R8（297 条 warning） |
+| v1.0.3 | 2026-09-22 | **遗留 R6 / R7 收口（本轮）**：新增根 `.gitattributes`（`* text=auto eol=lf` + 二进制 `binary`）并把工作区 75 个带 CRLF 的文本文件归一为 LF（索引本来就是 LF，差异只在工作区）；新增 `pnpm verify:eol` 门禁（`scripts/testing/eol-check.cjs`，纳入 `scripts/testing/README.md`）；`verify:mrb` 加运行目标自检（必须是 MSW 离线 Mock，否则 `exit 3`）后实测 **24/24**，并更正 R7 病因（探针落到真实后端代理 + 探针自身写脏真实库，而非 Mock 数据漂移） |

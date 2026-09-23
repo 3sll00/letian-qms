@@ -10,6 +10,9 @@
  *   6. 行内「评审」抽屉渲染会签席位与真实 approvers 记录。
  *   7. 并列菜单「评审流程设置」子页：流程说明与节点四列真实回吐（docs/21 §10 E1/E2），
  *      点「停用此流程」必须真实调用 POST /review-flows/:id/toggle-active 并被重载读回（E3）。
+ *   8. 运行目标自检（R7）：本探针的断言值只对**离线 Mock**成立，因此进入应用后先确认页面注册了
+ *      MSW 的 `mockServiceWorker`；若不是（例如落到了代理真实后端的 dev 实例），打印正确启动方式并
+ *      以退出码 3 退出 —— 否则断言会照真实库取值，且下面的「返工处置」会真的写真实库。
  */
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
@@ -19,7 +22,9 @@ const path = require('node:path');
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const OUT_DIR = path.join(__dirname, '..', 'logs');
 const PORT = 9336;
-// 多会话环境下 vite dev 端口会自增（5200/5201/5202），故自动探测，避免指向无人监听的端口而卡死
+// 多会话环境下 vite dev 端口会自增（5200/5201/5202），故自动探测，避免指向无人监听的端口而卡死。
+// 但「探测到的实例是不是离线 Mock」不能靠端口猜：进入应用后由运行目标自检（mockServiceWorker）判定，
+// 不是离线 Mock 就 exit 3，绝不拿真实库的数据去满足 Mock 断言。
 const WEB_CANDIDATES = process.env.WEB_BASE
   ? [process.env.WEB_BASE]
   : ['http://127.0.0.1:5201/', 'http://127.0.0.1:5200/', 'http://127.0.0.1:5202/'];
@@ -184,6 +189,26 @@ const check = (name, ok, detail) => {
   }
   log('menuReady:', menuReady);
 
+  // 运行目标自检（R7）：断言值（待评审 1 条 / 评审中 2 条 / 待审核池 3 条）只对离线 Mock 成立。
+  // 不锁 WEB_BASE 时多会话环境可能探测到「代理真实后端」的实例：断言照真实库取值，
+  // 而且下面的返工处置会真的 POST /mrb/records/:id/disposition 写真实库。
+  const swScripts = await evalJs(cdp, `navigator.serviceWorker.getRegistrations().then((rs) => rs.map((r) => ((r.active || r.installing || r.waiting || {}).scriptURL || '')))`);
+  const isOfflineMock = Array.isArray(swScripts) && swScripts.some((u) => String(u).includes('mockServiceWorker'));
+  check('运行目标自检：页面由离线 Mock 提供（已注册 mockServiceWorker）', isOfflineMock, swScripts);
+  if (!isOfflineMock) {
+    log('');
+    log('== FATAL(3)：探测到的前端不是离线 Mock —— 断言值无意义，且写路径会污染真实库 ==');
+    log('  web base: ' + webBase);
+    log('  serviceWorker 注册项: ' + JSON.stringify(swScripts));
+    log('  正确做法（先起 dev:mock，再用 WEB_BASE 显式指向它）：');
+    log('    $env:VITE_API_TARGET="http://127.0.0.1:5999"; pnpm dev:mock   # 5999 = 未监听端口');
+    log('    $env:WEB_BASE="http://127.0.0.1:5200/"; pnpm verify:mrb');
+    log('  真实库的权威门禁是：pnpm verify:mrb-wiring（需 API :3101 + pnpm db:seed）');
+    log('');
+    chrome.kill();
+    process.exit(3);
+  }
+
   const clickNav = async (label) => evalJs(cdp, `(() => {
     const matches = [...document.querySelectorAll('button,a,div,span,li')]
       .filter((e) => e.innerText && e.innerText.trim().startsWith(${JSON.stringify(label)}));
@@ -253,7 +278,7 @@ const check = (name, ok, detail) => {
   check('4 个状态页签（不含「全部」，与原型一致）', JSON.stringify(snapshot.tabLabels) === JSON.stringify(['待评审','评审中','已评审','已处置']), snapshot.tabLabels);
   check('默认选中「待评审」页签', JSON.stringify(snapshot.activeTab) === JSON.stringify(['待评审']), snapshot.activeTab);
   check('KPI 5 张卡片齐全', Object.keys(snapshot.kpis).length === 5, snapshot.kpis);
-  check('「待评审」页签空态（Mock 无待评审单据）', snapshot.rowCount === 1, snapshot.rowCount);
+  check('「待评审」页签取到 1 条 Mock 记录（断言的是条数，不是空态）', snapshot.rowCount === 1, snapshot.rowCount);
   check('浅色主题：MRB 页面子树无深色容器', snapshot.darkEls.length === 0, snapshot.darkEls);
 
   // 切到「评审中」页签：应取到 2 条记录且检验人列有值

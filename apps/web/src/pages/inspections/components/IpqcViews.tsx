@@ -361,15 +361,14 @@ function buildIpqcLedgerColumns(sub: IpQcLedgerSub, handlers: IpQcLedgerHandlers
   return columns;
 }
 
-export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub, onInspect }) => {
+export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
   const [overviewData, setOverviewData] = useState<IpqcOverviewData | null>(null);
   const [overviewLoading, setOverviewLoading] = useState(false);
 
   const [items, setItems] = useState<InspectionItemData[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(10);
-  const [statusCounts, setStatusCounts] = useState<Record<string, number>>({});
+  const [pageSize] = useState(10);
   const [tableLoading, setTableLoading] = useState(false);
   const [tableError, setTableError] = useState<string | null>(null);
 
@@ -474,9 +473,6 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub, onInspec
 
       setItems(res.items || []);
       setTotal(res.total || 0);
-      if (res.statusCounts) {
-        setStatusCounts(res.statusCounts);
-      }
     } catch (err: any) {
       console.error('Failed to load IPQC table data:', err);
       setTableError(err?.message || '加载过程检验台账失败，请检查网络或后端连接');

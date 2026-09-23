@@ -45,7 +45,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   `.execute(db);
 }
 
-export async function down(db: Kysely<unknown>): Promise<void> {
+export async function down(_db: Kysely<unknown>): Promise<void> {
   // 数据对齐类迁移不可逆：被回填的行原本是「空值」这一非展示口径，
   // 无法逐行区分哪些值是本迁移写入的，保留空实现让 down 流程正常推进（与 011 / 022 一致）。
 }

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowLeft, Printer, ShieldCheck, Activity, Flame, Layers, CheckCircle2, AlertCircle, ClipboardList } from 'lucide-react';
+import { ArrowLeft, Printer, ShieldCheck, Activity, Flame, Layers, ClipboardList } from 'lucide-react';
 import { CertificatePrintModal } from '../../../components/certificate/CertificatePrintModal';
 import { PlanMatchBanner } from '../../../components/common/PlanMatchBanner';
 import { ApprovalButton } from '../../../components/common/ApprovalButton';

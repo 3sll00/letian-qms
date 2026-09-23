@@ -87,7 +87,7 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
   const [spec, setSpec] = useState(fromList(initialItem?.spec ?? initialItem?.specification));
   // 执行标准 / 材质牌号：列表行与本单合同都没有该字段的稳定来源，留空由录入人按图纸填写
   const [standard, setStandard] = useState("");
-  const [materialGrade, setMaterialGrade] = useState(fromList(initialItem?.steelGrade ?? initialItem?.materialGrade));
+  const [materialGrade] = useState(fromList(initialItem?.steelGrade ?? initialItem?.materialGrade));
   const [heatNo, setHeatNo] = useState(fromList(initialItem?.heatNo ?? initialItem?.furnaceHeatNo));
   const [lotNo, setLotNo] = useState(fromList(initialItem?.lotNo ?? initialItem?.batchNo));
   const [quantity, setQuantity] = useState(
@@ -149,7 +149,7 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
   const [decision, setDecision] = useState<"合格" | "不合格" | "特采">("合格");
   const [inspector, setInspector] = useState(fromList(initialItem?.inspector ?? initialItem?.inspectorName));
   // 检验日期默认「今天」：录入动作真实发生日；历史默认值是编造的固定日期
-  const [inspectDate, setInspectDate] = useState(todayIsoDate());
+  const [, setInspectDate] = useState(todayIsoDate());
   // 结论不预置演示长文（原文案会让尚未检验的空白单据看起来已经判过合格）
   const [conclusion, setConclusion] = useState("");
 

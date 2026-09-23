@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Letian QMS API Specification
-  version: 2.12.0
+  version: 2.13.0
   description: 乐天紧固件质量管理系统契约规范，完全对齐 21 项业务能力、DDD 四层架构与 PostgreSQL 14+ 数据实体。
 servers:
   - url: /api/v1
@@ -481,6 +481,68 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/InspectionOrder'
+
+  /inspections/{id}/approve:
+    post:
+      summary: 质量负责人签核（写入 approver_id / approver_name / approved_at，并留一条 QUALITY_APPROVAL 审计留痕）
+      description: 签核人取当前登录用户，请求体不接受自称的签核人；角色门禁 QA_MANAGER / ADMIN / SYSTEM，其余角色 403。口径见 docs/35 §5。
+      operationId: approveInspectionOrder
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApproveInspectionOrderRequest'
+      responses:
+        '200':
+          description: 签核完成，返回更新后的检验单
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionOrder'
+        '403':
+          description: 当前角色无签核权限（不是 QA_MANAGER / ADMIN / SYSTEM）
+        '404':
+          description: 检验单不存在
+
+  /master-data/company-profile:
+    get:
+      summary: 读取企业档案单行主数据（证书抬头 / 印章 / 供货单位·产地唯一来源）
+      description: 无行时返回 null（不是空对象、更不是编造默认值），调用方据此提示「企业档案未维护」并让证书留白。口径见 docs/35 §6。
+      operationId: getCompanyProfile
+      responses:
+        '200':
+          description: 企业档案（未维护时为 null）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompanyProfile'
+    put:
+      summary: 维护企业档案（服务端 upsert，只更新显式给出的字段，空串 = 清空）
+      description: updated_by / updated_at 由服务端按当前登录用户与 now() 写入；email 留空须不下发该字段（空串不合法）。
+      operationId: upsertCompanyProfile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertCompanyProfileRequest'
+      responses:
+        '200':
+          description: 保存后的企业档案
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompanyProfile'
+        '400':
+          description: 参数校验失败（如 email 非合法邮箱）
 
   /mrb/pending-pool:
     get:
@@ -1705,6 +1767,63 @@ components:
                 type: number
               measuredText:
                 type: string
+
+    ApproveInspectionOrderRequest:
+      type: object
+      properties:
+        remark:
+          type: string
+          description: 签核意见（写入审计留痕 diff_patch.remark，不写检验单备注）
+
+    CompanyProfile:
+      type: object
+      description: 企业档案单行主数据（certificate 抬头 / 印章 / 供货单位·产地唯一来源）；未维护时 GET 返回 null
+      properties:
+        legalName:
+          type: string
+        legalNameEn:
+          type: string
+        shortName:
+          type: string
+        address:
+          type: string
+        originPlace:
+          type: string
+        phone:
+          type: string
+        email:
+          type: string
+          format: email
+        qualityStamp:
+          type: string
+        updatedBy:
+          type: string
+          description: 最后维护人（服务端按当前登录用户写入）
+        updatedAt:
+          type: string
+          format: date-time
+
+    UpsertCompanyProfileRequest:
+      type: object
+      description: 企业档案写入请求；只更新显式给出的字段（空串 = 清空），email 留空须不下发该字段；updatedBy / updatedAt 由服务端写入，客户端不得传入
+      properties:
+        legalName:
+          type: string
+        legalNameEn:
+          type: string
+        shortName:
+          type: string
+        address:
+          type: string
+        originPlace:
+          type: string
+        phone:
+          type: string
+        email:
+          type: string
+          format: email
+        qualityStamp:
+          type: string
 
     PendingDefectItem:
       type: object

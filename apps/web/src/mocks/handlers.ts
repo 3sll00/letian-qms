@@ -16,6 +16,7 @@ import {
   mockEmployees,
   mockMaterials,
   mockCompanyProfile,
+  mockAuthUsers,
   mockCategoryTree,
   mockPlans,
   withPlanDisplayFields,
@@ -41,6 +42,7 @@ import {
   IntegrationSyncLogSchema,
   TriggerSyncResponseSchema,
   UpsertCompanyProfileRequestSchema,
+  LoginResponseSchema,
   type InspectionOrder,
   type InspectionPlan,
   type InspectionPlanVersion,
@@ -213,23 +215,48 @@ export const handlers = [
   // ==========================================
   // 0. AUTH API (Mock 登录支持)
   // ==========================================
+  // 登录页名单：与真实后端 GET /api/v1/auth/users 同口径（在职职员 + 主角色名）
+  http.get('/api/v1/auth/users', () => HttpResponse.json(mockAuthUsers)),
+
+  // 登录：与真实后端 POST /api/v1/auth/login 同口径 —— 传 userId 必须能在职员档案里查到，
+  // 查不到即 401（不接受请求体自称姓名/角色）；缺省身份固定为质量主管「张强」。
   http.post('/api/v1/auth/login', async ({ request }) => {
-    const body = (await request.json().catch(() => ({}))) as Record<string, any>;
-    const user = {
-      userId: body.userId || '11111111-1111-1111-1111-111111111111',
-      userName: body.userName || '张三 (测试质检员)',
-      role: body.role || 'INSPECTOR',
-      department: body.department || '品质保证部',
-      permissions: body.permissions || ['*'],
-    };
-    // 登录即记住当前身份：签核 / 企业档案维护的「谁做的」取自这里
-    mockCurrentUser = { userId: user.userId, userName: user.userName, role: user.role };
-    return HttpResponse.json({
-      token: 'mock_jwt_token_for_dev_mode_' + Date.now(),
-      user,
-      expiresInSeconds: 86400,
-      devOnly: true,
-    });
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const claimedId = typeof body.userId === 'string' ? body.userId : undefined;
+
+    let userId: string;
+    let userName: string;
+    let role: string;
+    let roleName: string;
+
+    if (claimedId !== undefined) {
+      const employee = mockAuthUsers.find((u) => u.id === claimedId);
+      if (employee === undefined) {
+        return problemResponse(401, 'Unauthorized', `用户不存在或未在员工档案注册: ${claimedId}`);
+      }
+      userId = employee.id;
+      userName = employee.name;
+      role = employee.roleCode;
+      roleName = employee.roleName;
+    } else {
+      // 与后端 authController 的缺省演示身份一致：EMPLOYEE_IDS.zhangQiang
+      const fallback = mockAuthUsers.find((u) => u.roleCode === 'QA_MANAGER') ?? mockAuthUsers[0]!;
+      userId = fallback.id;
+      userName = typeof body.userName === 'string' && body.userName !== '' ? body.userName : fallback.name;
+      role = typeof body.role === 'string' && body.role !== '' ? body.role : fallback.roleCode;
+      roleName = fallback.roleName;
+    }
+
+    // 登录即记住当前身份：签核 / 企业档案维护的「谁做的」全部取自这里（客户端不能自称）
+    mockCurrentUser = { userId, userName, role };
+    return HttpResponse.json(
+      LoginResponseSchema.parse({
+        token: 'mock_jwt_token_for_dev_mode_' + Date.now(),
+        user: { userId, userName, role, roleName, activeRulesCount: 0 },
+        expiresInSeconds: 86400,
+        devOnly: true,
+      })
+    );
   }),
 
   // ==========================================

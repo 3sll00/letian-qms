@@ -1,5 +1,5 @@
 ﻿import React, { useState, useEffect, useMemo } from 'react';
-import { Folder, FolderOpen, Search, RotateCcw, RefreshCw, Layers, Tag, Box, Plus, X } from 'lucide-react';
+import { Folder, FolderOpen, Search, RefreshCw, Layers, Tag, Plus, X } from 'lucide-react';
 import { api, errorMessage } from '../../lib/api';
 
 interface CategoryTreeNodeView {
@@ -95,10 +95,6 @@ export function MaterialCategoriesPage() {
     return getDepth(categories);
   }, [categories]);
 
-  // 总物料关联数
-  const totalMaterialCount = useMemo(() => {
-    return allFlatNodes.reduce((sum, n) => sum + (n.count || 0), 0);
-  }, [allFlatNodes]);
 
   // 过滤后的树状展示
   const filterTree = (nodes: CategoryTreeNodeView[], kw: string): CategoryTreeNodeView[] => {

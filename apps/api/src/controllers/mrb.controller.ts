@@ -11,13 +11,12 @@ import {
   PendingDefectStatusEnum,
   type MRBReview,
 } from '@letian/contracts';
-import { NotFoundError, ConflictError } from '@letian/application';
+import { NotFoundError } from '@letian/application';
 import type { ApiContainer } from '../container';
 import { operatorOf } from '../lib/operator';
 import {
   getRequestPermissions,
   buildRequestSecurityContext,
-  logAuthorizationCheck,
 } from '../lib/permission-guard';
 
 /** 日期入参格式：`YYYY-MM-DD` */

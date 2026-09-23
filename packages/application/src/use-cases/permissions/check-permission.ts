@@ -1,6 +1,6 @@
 import type { MaterialPermission, PermissionCheckResponse } from '@letian/contracts';
 import { PBACEvaluator } from '@letian/domain';
-import type { IMaterialPermissionRepository, IMaterialLookupPort, IUnitOfWork } from '../../tx/unit-of-work.js';
+import type { IUnitOfWork } from '../../tx/unit-of-work.js';
 
 export interface CheckPermissionCommand {
   userId: string;

@@ -16,7 +16,6 @@ import { operatorOf } from '../lib/operator';
 import {
   getRequestPermissions,
   buildRequestSecurityContext,
-  logAuthorizationCheck,
   assertQualityApprover,
 } from '../lib/permission-guard';
 

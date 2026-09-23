@@ -30,7 +30,7 @@ export async function up(db: Kysely<any>): Promise<void> {
   `.execute(db);
 }
 
-export async function down(db: Kysely<any>): Promise<void> {
+export async function down(_db: Kysely<any>): Promise<void> {
   // 数据对齐类迁移不可逆：被覆盖的是「供应商编码」这一非展示口径，
   // 无法逐行推断哪些行原本有值、哪些行是本迁移写入的。保留空实现让 down 流程正常推进。
 }

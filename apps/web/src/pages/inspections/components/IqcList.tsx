@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { RefreshCw, Printer, Search, RotateCcw, GitFork, X } from 'lucide-react';
+import { RefreshCw, Search, RotateCcw, GitFork, X } from 'lucide-react';
 import { CertificatePrintModal } from '../../../components/certificate/CertificatePrintModal';
 import { buildIqcCertificateData } from '../../../lib/certificateDataService';
 import { loadCompanyProfile } from '../../../lib/companyProfile';

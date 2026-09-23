@@ -1,15 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
-  RotateCcw,
-  Search,
   Plus,
   RefreshCw,
-  FileCheck,
-  ShieldCheck,
-  CheckCircle2,
-  XCircle,
-  AlertCircle,
-  Download,
 } from 'lucide-react';
 import { CertificatePrintModal } from '../../../components/certificate/CertificatePrintModal';
 import { QualityCertificateData } from '../../../lib/inspectionTypes';
@@ -73,7 +65,7 @@ const CN_TO_INSPECTION_STATE: Record<string, string> = {
 export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
   const [items, setItems] = useState<OqcItem[]>([]);
   const [total, setTotal] = useState<number>(0);
-  const [loading, setLoading] = useState(false);
+  const [, setLoading] = useState(false);
   /** 接口异常时的显式提示：宁可空态 + 报错，也不用内置演示行冒充真实台账 */
   const [loadError, setLoadError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
@@ -104,11 +96,6 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
   // 证书与放行卡控弹窗状态
   const [certModalOpen, setCertModalOpen] = useState(false);
   const [certData, setCertData] = useState<QualityCertificateData | null>(null);
-  const [releaseGateResult, setReleaseGateResult] = useState<{
-    docNo: string;
-    canRelease: boolean;
-    reason: string;
-  } | null>(null);
 
   // 加载数据
   const loadData = useCallback(async () => {

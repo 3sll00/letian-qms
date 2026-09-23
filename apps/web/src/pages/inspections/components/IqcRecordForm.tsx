@@ -1,7 +1,6 @@
 ﻿import React, { useEffect, useState } from 'react';
 import { ArrowLeft, Printer, ShieldCheck, Atom, Gauge, Box } from 'lucide-react';
 import { CertificatePrintModal } from '../../../components/certificate/CertificatePrintModal';
-import { PrintTemplateModal } from '../../../components/common/PrintTemplateModal';
 import { IndicatorActualField } from '../../../components/common/IndicatorActualField';
 import { PlanMatchBanner } from '../../../components/common/PlanMatchBanner';
 import { ApprovalButton } from '../../../components/common/ApprovalButton';
@@ -18,7 +17,6 @@ import {
   summarizeJudgements,
   type PlanIndicatorRow,
 } from '../../../lib/planMatch';
-import type { InspectionItemDecision } from '@letian/contracts';
 
 interface IqcRecordFormProps {
   initialItem?: any;
@@ -147,7 +145,6 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
 
   // 打印预览控制
   const [printModalOpen, setPrintModalOpen] = useState(false);
-  const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const [certData, setCertData] = useState<QualityCertificateData | null>(null);
 
   // 写入路径状态（docs/35 §4 M3）：提交中 / 失败文案 / 成功回执，均为真实请求结果
@@ -351,13 +348,6 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
               setApprover({ name: result.approverName ?? approver.name, at: result.approvedAt ?? approver.at })
             }
           />
-          <button
-            type="button"
-            onClick={() => setTemplateModalOpen(true)}
-            className="px-3.5 py-1.5 rounded bg-blue-50 border border-blue-200 text-blue-700 text-xs font-medium hover:bg-blue-100 flex items-center gap-1.5 transition-colors shadow-sm"
-          >
-            <Printer className="w-3.5 h-3.5" /> 预览与打印质量保证证书 (PDF)
-          </button>
         </div>
       </div>
 

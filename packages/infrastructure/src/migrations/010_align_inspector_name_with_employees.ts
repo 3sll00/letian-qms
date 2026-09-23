@@ -28,7 +28,7 @@ export async function up(db: Kysely<any>): Promise<void> {
   `.execute(db);
 }
 
-export async function down(db: Kysely<any>): Promise<void> {
+export async function down(_db: Kysely<any>): Promise<void> {
   // 数据对齐类迁移不可逆：被覆盖的是 007 的统一兜底值（'张强'），本身没有业务语义，
   // 无法推断出每一行的“原值”。此处保留空实现，让 Migrator 的 down 流程可正常推进。
 }

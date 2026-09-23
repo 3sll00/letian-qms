@@ -1,14 +1,11 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Printer,
   FileDown,
   X,
-  CheckCircle2,
   FileSpreadsheet,
   FileText,
   Layers,
-  Sparkles,
-  Check,
   Eye,
   Settings2,
 } from 'lucide-react';
@@ -61,7 +58,6 @@ export const PrintTemplateModal: React.FC<PrintTemplateModalProps> = ({
   onClose,
   orderId,
   orderNo = 'OQC-20260706-0001',
-  inspectionType = 'OQC',
   initialData,
 }) => {
   const [templates, setTemplates] = useState<QualityTemplate[]>(DEFAULT_TEMPLATES);
@@ -75,7 +71,7 @@ export const PrintTemplateModal: React.FC<PrintTemplateModalProps> = ({
     'CHEMICAL_COMPOSITION',
   ]);
   const [exportFormat, setExportFormat] = useState<'PDF' | 'EXCEL'>('PDF');
-  const [loading, setLoading] = useState(false);
+  const [, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
 
   useEffect(() => {

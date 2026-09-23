@@ -65,6 +65,10 @@
     保证**筛选结果与台账列显示的字样一致**；按契约枚举精确查询仍可用 `status` / `statuses`（见文档 16 §5.1）。
 - `POST /api/v1/inspections`: 创建新检验单（自动深拷贝生成 `plan_snapshot`）。
 - `GET /api/v1/inspections/:id`: 获取检验单完整详情（包含检验特征项、实测矩阵、挂载委外元数据）。
+- `POST /api/v1/inspections/:id/submit-measurements` / `POST /api/v1/inspections/:id/status`: 录入实测值与终判的**真实写路径**。
+  - IQC / OQC / 委外三个录入表单的「提交」都走这两步；回执直接显示服务端返回的检验单号与判定，前端不 alert 假成功（口径见 `docs/35` §4）。
+- `POST /api/v1/inspections/:id/approve`: 质量负责人签核（写入 `approver_id` / `approver_name` / `approved_at`，并在同一事务写一条 `diff_patch.event='QUALITY_APPROVAL'` 的审计留痕）。
+  - 签核人 = 当前登录用户：请求体**不接受**「自称的签核人」；角色门禁 `QA_MANAGER` / `ADMIN` / `SYSTEM`，其余角色 403；重复签核幂等覆盖（换人 / 换时间），历史动作留在审计日志里（口径见 `docs/35` §5）。
 - `PATCH /api/v1/inspections/:id/measurements`: 批量录入或暂存抽样实测数值。
 - `POST /api/v1/inspections/:id/evaluate`: 触发 AQL 与公差自动裁决，更新单据状态为 `PASS` 或 `FAIL`。
 
@@ -236,6 +240,16 @@
 - `POST /api/v1/reports/render-pdf/:inspectionId`: 渲染并输出带防伪矢量印章的官方质检报告。
 
 ---
+
+### 3.9 主数据档案与企业档案 (`/api/v1/master-data`)
+
+- `GET /api/v1/master-data/{suppliers|customers|inventory|workshops|employees|categories}`: 各类主数据只读清单。
+- `GET /api/v1/master-data/company-profile`: 读取**企业档案单行主数据**（质量 / 制造证书抬头、印章文字、「供货单位·产地」的唯一来源）。
+  - **无行时返回 `null`**（不是空对象、更不是编造默认值）：调用方据此提示「企业档案未维护」，并让证书对应单元格留白。
+- `PUT /api/v1/master-data/company-profile`: 维护企业档案（服务端 upsert）。
+  - **只更新请求体显式给出的字段**（空串 = 清空）；`email` 受契约 `z.string().email()` 约束，**留空须不下发该字段**（传空串会被判非法 → 400）。
+  - `updated_by` / `updated_at` 由服务端按**当前登录用户**与 `now()` 写入，客户端不可传入。
+  - 设计口径见 `docs/35` §6，物理表定义见 `docs/03` §2.14。
 
 ## 4. 高级复合过滤 DSL 规范 (Query Filter DSL)
 

@@ -71,7 +71,6 @@ export const integrationController: FastifyPluginAsync<{ container: ApiContainer
   const { container } = options;
   const integration = container.repositories.integration;
   const masterData = container.repositories.masterData;
-  const orders = container.repositories.orders;
 
   // 1. 集成配置列表（契约 IntegrationConfigSchema；密钥不回显）
   fastify.get('/configs', async (_request, reply) => {

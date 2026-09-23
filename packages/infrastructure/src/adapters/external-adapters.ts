@@ -246,7 +246,7 @@ export class SalesSystemAdapter implements ISalesPort {
     ];
   }
 
-  async fetchDeliveryOrders(filter: { startDate: Date; endDate: Date }): Promise<DeliveryOrderRef[]> {
+  async fetchDeliveryOrders(_filter: { startDate: Date; endDate: Date }): Promise<DeliveryOrderRef[]> {
     return [
       {
         deliveryNo: 'DO-2026-001',

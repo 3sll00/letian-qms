@@ -2,8 +2,8 @@ import { CompanyProfileView } from "./CompanyProfileView";
 import { WorkshopArchiveView } from "./WorkshopArchiveView";
 import { EmployeeArchiveView } from "./EmployeeArchiveView";
 import { CreateMasterDataModal, type MasterDataTab } from "./CreateMasterDataModal";
-﻿import React, { useState, useEffect, useMemo } from 'react';
-import { Database, Search, RotateCcw, Folder, RefreshCw, CheckCircle2 } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Folder, RefreshCw, CheckCircle2 } from 'lucide-react';
 import { api, errorMessage } from '../../lib/api';
 
 interface MasterDataProps {
@@ -184,7 +184,7 @@ export function MasterDataPage({ initialTab = 'supplier' }: MasterDataProps) {
 // ------------------------------------------------------------------
 // 1. 供应商档案
 // ------------------------------------------------------------------
-function SupplierArchiveView({ refreshKey, onOpenCreate }: { refreshKey?: number; onOpenCreate?: () => void }) {
+function SupplierArchiveView({ refreshKey }: { refreshKey?: number; onOpenCreate?: () => void }) {
   const [keyword, setKeyword] = useState('');
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [loading, setLoading] = useState(false);
@@ -351,7 +351,7 @@ function SupplierArchiveView({ refreshKey, onOpenCreate }: { refreshKey?: number
 // ------------------------------------------------------------------
 // 2. 客户档案
 // ------------------------------------------------------------------
-function CustomerArchiveView({ refreshKey, onOpenCreate }: { refreshKey?: number; onOpenCreate?: () => void }) {
+function CustomerArchiveView({ refreshKey }: { refreshKey?: number; onOpenCreate?: () => void }) {
   const [keyword, setKeyword] = useState('');
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(false);
@@ -518,7 +518,7 @@ function CustomerArchiveView({ refreshKey, onOpenCreate }: { refreshKey?: number
 // ------------------------------------------------------------------
 // 3. 存货档案 (分类树 + 物料列表)
 // ------------------------------------------------------------------
-function InventoryArchiveView({ refreshKey, onOpenCreate }: { refreshKey?: number; onOpenCreate?: () => void }) {
+function InventoryArchiveView({ refreshKey }: { refreshKey?: number; onOpenCreate?: () => void }) {
   const [keyword, setKeyword] = useState('');
   const [categories, setCategories] = useState<CategoryTreeNodeView[]>([]);
   const [selectedCategoryCode, setSelectedCategoryCode] = useState<string>('ALL');

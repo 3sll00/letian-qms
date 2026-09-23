@@ -1,0 +1,37 @@
+# 行尾（EOL）口径：索引只存 LF，工作区检出一律 LF。
+#
+# 仓库是 TS/Node + Markdown 的跨平台工程，混行会污染「按字节精确匹配」的脚本：
+# core.autocrlf=true 会在 git 比对时把 CR 归一，于是 `git status` 看不见脏，
+# 但 fs.readFileSync 会把 CR 带进字符串，`includes` / `replace` 会静默不命中
+# （docs/35 §13 R6 记录过一次真实踩坑）。
+#
+# 权威检查：`pnpm verify:eol`（scripts/testing/eol-check.cjs）—— 读 `git ls-files --eol`，
+# 索引出现非 LF blob、或工作区出现 w/crlf / w/mixed 的文本文件即判失败。
+#
+# 注意：`eol=lf` 的优先级高于 `core.autocrlf`，因此本文件生效后无需改本机 git 配置。
+* text=auto eol=lf
+
+# 二进制：禁止行尾转换与「按文本 diff」（它们的字节里出现 0x0D 0x0A 是数据，不是行尾）
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.bmp   binary
+*.webp  binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.eot   binary
+*.pdf   binary
+*.zip   binary
+*.gz    binary
+*.7z    binary
+*.rar   binary
+*.exe   binary
+*.dll   binary
+*.node  binary
+*.icns  binary
+*.xlsx  binary
+*.docx  binary
+*.pptx  binary

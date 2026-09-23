@@ -1,5 +1,5 @@
 import assert from 'node:assert';
-import { calculateJsonDiff, isSensitiveField, maskValue } from '../audit/audit-diff.js';
+import { calculateJsonDiff, isSensitiveField } from '../audit/audit-diff.js';
 
 console.log('Testing calculateJsonDiff & masking...');
 

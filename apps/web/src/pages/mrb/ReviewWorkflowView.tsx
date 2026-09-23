@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { GitMerge, Plus, ShieldCheck, CheckCircle2, ArrowRight, UserCheck, Settings2, RefreshCw } from 'lucide-react';
+import { GitMerge, ArrowRight, UserCheck, RefreshCw } from 'lucide-react';
 import type { ReviewFlow, ReviewFlowNode } from '@letian/contracts';
 import { api, errorMessage } from '../../lib/api';
 

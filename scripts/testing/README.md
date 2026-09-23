@@ -15,12 +15,15 @@ node scripts/testing/ipqc-ledger-verify.cjs  # 过程检验（IPQC）下料 / �
 node scripts/testing/mrb-verify.cjs          # MRB 不合格品处置（离线 Mock 模式）
 node scripts/testing/mrb-wiring-verify.cjs   # MRB 字段 / 契约 / API 打通验收（真实库 + 真实 HTTP）
 node scripts/testing/audit_check.js          # 源码静态审计
+node scripts/testing/leftovers2-probe.cjs     # docs/35 遗留项二轮收口（真实库 + 真实页面读写，跑完需 db:seed 复位）
+node scripts/testing/leftovers2-mock-probe.cjs # 同一批收口的离线 Mock 冒烟（需 dev:mock 跑在 :5200）
+node scripts/testing/eol-check.cjs             # 仓库行尾（EOL）门禁：读 git ls-files --eol，不碰业务代码
 ```
 
 前三个脚本需要后端 `:3100` 与前端 `:5200` 已启动；`mrb-wiring-verify.cjs` 需要**后端 API 已启动**（默认 `:3101`，
 用 `PORT=3101 pnpm --filter @letian/api run dev` 另起一个实例，勿指向常驻 `:3100`）且数据库已迁移到最新并执行过
 `pnpm db:seed`（脚本按演示数据断言，跑完会还原数据；自建来源单的验收行亦同批清理）。
-根脚本入口：`pnpm run verify:oqc` / `verify:inspections` / `verify:ipqc-ledger` / `verify:mrb` / `verify:mrb-wiring` / `audit:code`。
+根脚本入口：`pnpm run verify:oqc` / `verify:inspections` / `verify:ipqc-ledger` / `verify:mrb` / `verify:mrb-wiring` / `verify:outsource-no` / `verify:leftovers2` / `verify:leftovers2:mock` / `verify:eol` / `audit:code`。
 
 退出码 `0` = 通过，非 `0` = 存在 FAIL / 超预算（明细见输出与 `scripts/logs/`，该目录已 gitignore）。
 
@@ -175,6 +178,17 @@ node scripts/testing/audit_check.js --json
 
 ## 基线
 
+### 与 `pnpm lint` 的分工（同一条口径只留一个执行点）
+
+`any` 的**执行点只有本脚本**（预算 138 + 基线文件 + 「不得新增」语义）；`.eslintrc.json` 里
+`@typescript-eslint/no-explicit-any` 相应设为 `warn`，只做可视化提示。
+此前两侧都判 `any` 且阈值不同（eslint = 0），结果是「audit 说在预算内、lint 说 234 个 error」，
+`pnpm lint` 因而长期不可用（详见 `docs/35` §12）。
+
+`pnpm lint` 现在以 **0 error** 通过：`no-unused-vars` 的死代码逐条清掉（不是关规则）、
+`no-irregular-whitespace` 的 BOM 字符清除、`scripts/logs/`（产物目录）移出扫描范围；
+剩余 warning 为 `any` 175 + `no-console` 122（`docs/35` §13 R8）。
+
 `scripts/testing/audit-baseline.json` 记录「允许存在的存量违规上限」。
 默认模式的语义是**不得新增**，而不是「假装没有」；只有评审后才可用 `--update-baseline` 上调。
 明细报告输出到 `scripts/logs/audit-report.txt`（已 gitignore）。
@@ -214,3 +228,63 @@ MRB 不合格品处置、质量追溯看板、质检方案设计。
 其历史 6 张截图中有 5 张只有 2163 字节（空白/未渲染页）却标注 `PASSED`。
 现版把判定与退出码绑定、把控制台未捕获异常纳入判定，并把导航关键词同步到当前 UI 标签
 （如 `MRB评审工单` → `MRB不合格品处置`）。
+---
+
+# 五、遗留项二轮收口探针（`leftovers2-probe.cjs` / `leftovers2-mock-probe.cjs`）
+
+（等价入口：`pnpm run verify:leftovers2` / `pnpm run verify:leftovers2:mock`）
+
+对应 `docs/35-遗留项二轮收口设计（ERP号段校验 + 三表单写路径 + 企业档案主数据 + 证书入口统一）.md`：
+把该文档 §12 的每一条「实测」固化成可重跑的断言，避免结论只活在一次性日志里。
+
+| 脚本 | 环境 | 覆盖 | 断言数 | 是否写库 |
+|:---|:---|:---|:---|:---|
+| `leftovers2-probe.cjs` | 真实库 + API `:3100` + 前端 `:5200/:5201` | 企业档案 GET/PUT 与页面回执、签核 403/200 与落库与审计 append-only、IQC 提交回执、四处台账「证书」入口 + 缺失提示条、委外新建 + 物料编码回填 | 29 | **是** |
+| `leftovers2-mock-probe.cjs` | 离线 Mock（MSW）`dev:mock` `:5200`，不需要 API / 数据库 | `GET/PUT /master-data/company-profile`、`POST /inspections/:id/approve` 三条新增 Mock 路由在真实浏览器可用 | 4 | 否（只改浏览器内存） |
+
+**为什么两个都要跑**：真实库探针证明「接口 + 物理列」打通，离线 Mock 探针证明「无后端时演示链路仍然可用」——
+本轮新增的三条路由正是 `docs/35` §11「同步面」要求 Mock 与真实实现同时存在的部分。缺任何一侧，
+离线演示或真实环境就会单边失真。
+
+**启动方式（Mock 侧）**：必须让没有 mock 的接口打不到真实后端，否则真实 API 的 `401` 会触发前端安全登出，
+页面退回登录页、断言全灭（这与 `mrb-verify.cjs` 的隔离要求同源）：
+
+```powershell
+$env:VITE_API_TARGET="http://127.0.0.1:5999"; pnpm --filter @letian/web run dev:mock   # 5999 = 未监听端口
+```
+
+探针在点击「进入系统」后会先确认已经进入应用（`<header>` 存在），否则以退出码 `3` 打印上述命令后退出，
+不接受「停在登录页但断言继续跑」的假结果。
+
+**复位纪律**：`leftovers2-probe.cjs` 会写库（企业档案字段、签核三列、提交回执），**跑完必须 `pnpm db:seed`**，
+否则下一次探针或演示会读到被改过的种子值；`leftovers2-mock-probe.cjs` 不写库，无需复位。
+
+**前置不可达时的行为**：两者都在启动浏览器前先探测前端端口，不可达时以退出码 `3` 直接 FATAL 退出并打印补救命令，
+不再让 Chrome 空等到超时（旧的「跑完即删」一次性脚本正是因为静默等待而难以判断失败原因）。
+
+---
+
+# 六、仓库行尾（EOL）门禁（`eol-check.cjs`）
+
+```powershell
+pnpm verify:eol            # 等价 node scripts/testing/eol-check.cjs
+```
+
+判定口径（权威来源 = git 自己，读 `git ls-files --eol`）：
+
+1. 根 `.gitattributes` 必须存在且声明 `* text=auto eol=lf`；
+2. 所有已跟踪**文本**文件的**索引 blob** 必须是 `i/lf`（索引 = 仓库的存档形态）；
+3. 所有已跟踪**文本**文件的**工作区**不得出现 `w/crlf` 或 `w/mixed`。
+
+二进制（git 判 `-text`）不参与判定：它字节里的 `0D 0A` 是数据，不是行尾。
+
+**为什么需要它**：本仓库长期没有 `.gitattributes`，而本机 `core.autocrlf=true` 会在比对时把 CR 归一，
+于是 `git status` 完全看不见行尾脏。但脚本按字节读文件时 CR 会进字符串，`includes` / `replace` 这类
+精确匹配就会**静默不命中**（`docs/35` §13 R6 记录过一次真实踩坑：一次归一脚本把 74 个已跟踪文本文件的行尾误抹平，
+最后靠 `git cat-file blob :<file>` 按索引逐个重建才恢复）。
+
+**修法**：确认 `.gitattributes` 在位后，把这些文件**整文件写回 LF**（读字节 → 只把 CRLF 还原成 LF → 写回，
+二进制与含 NUL 的文件跳过），再重跑本门禁。不要改本机 `core.autocrlf` —— `.gitattributes` 的 `eol=lf` 优先级更高，
+改本机配置对已跟踪文本文件不起作用。
+
+退出码：`0` = 收敛；`1` = 存在违规（明细见输出与 `scripts/logs/eol-check.log`）；`2` = 非 git 仓库 / git 不可用。

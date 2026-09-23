@@ -14,6 +14,7 @@ import {
   CustomerSchema,
   WorkshopSchema,
   EmployeeSchema,
+  AuthUserSchema,
   InventoryCategorySchema,
   type InspectionOrder,
   type MRBReview,
@@ -144,6 +145,101 @@ export const rawInspectionOrders = [
     ],
     createdAt: '2023-10-12T08:00:00.000Z',
     updatedAt: '2023-10-12T08:45:00.000Z',
+  },
+  {
+    // 与种子同行的「待检验」来料单（真实库 INS-20231013-0001）：离线演示必须能走「录入 -> 签核」
+    id: '71000000-0000-4000-8000-0000000000a4',
+    orderNo: 'INS-20231013-0001',
+    inspectionType: 'IQC' as const,
+    materialCode: 'MAT-304SS-05',
+    materialName: '不锈钢线材 Φ5.0mm',
+    specification: 'Φ5.0mm / 盘圆 / 304HC',
+    unit: 'KG',
+    batchNo: 'B20231013-01',
+    supplierCode: 'SUP-001',
+    supplierName: '宝钢特钢有限公司',
+    inboundNo: 'RK-20231013-001',
+    inboundDate: '2023-10-13',
+    customerCode: undefined,
+    sampleQty: 50,
+    isMandatoryGate: false,
+    status: 'PENDING' as const,
+    inspectorName: '陈静',
+    planVersionId: 'c3d4e5f6-a1b2-4c3d-ae4f-5a6b7c8d9e0f',
+    planSnapshot: {
+      planId: 'd4e5f6a1-b2c3-4d4e-bf5a-6b7c8d9e0f1a',
+      planCode: 'QP-IQC-304SS-V2',
+      planName: '不锈钢冷镦盘圆丝来料抽样规程',
+      versionId: 'c3d4e5f6-a1b2-4c3d-ae4f-5a6b7c8d9e0f',
+      versionNo: 'V2.4',
+      samplingScheme: 'GB_T_2828',
+      aqlLevel: 'II',
+      strictness: 'NORMAL',
+      snapshotAt: '2023-10-13T08:00:00.000Z',
+      items: [
+        {
+          seq: 1,
+          itemCode: 'DIA-001',
+          name: '直径',
+          dataType: 'NUMERIC' as const,
+          metricCategory: 'DIMENSION' as const,
+          standardText: 'Φ5.00±0.02mm',
+          nominalValue: 5.0,
+          upperTolerance: 0.02,
+          lowerTolerance: -0.02,
+          sampleSize: 50,
+          unit: 'mm',
+          isMandatory: true,
+        },
+        {
+          seq: 2,
+          itemCode: 'TEN-001',
+          name: '抗拉强度',
+          dataType: 'NUMERIC' as const,
+          metricCategory: 'TENSILE_STRENGTH' as const,
+          standardText: '≥650MPa',
+          nominalValue: 650,
+          upperTolerance: 200,
+          lowerTolerance: 0,
+          sampleSize: 5,
+          unit: 'MPa',
+          isMandatory: true,
+        },
+      ],
+    },
+    // 待检验：指标项已按方案快照生成，但实测值全空（与真实库 PENDING 单同口径）
+    items: [
+      {
+        id: 'a4b5c6d7-e8f9-4a0b-9c1d-2e3f4a5b6c7d',
+        seq: 1,
+        itemCode: 'DIA-001',
+        name: '直径',
+        dataType: 'NUMERIC' as const,
+        metricCategory: 'DIMENSION' as const,
+        standardText: 'Φ5.00±0.02mm',
+        nominalValue: 5.0,
+        upperTolerance: 0.02,
+        lowerTolerance: -0.02,
+        sampleSize: 50,
+        unit: 'mm',
+      },
+      {
+        id: 'b5c6d7e8-f9a0-4b1c-8d2e-3f4a5b6c7d8e',
+        seq: 2,
+        itemCode: 'TEN-001',
+        name: '抗拉强度',
+        dataType: 'NUMERIC' as const,
+        metricCategory: 'TENSILE_STRENGTH' as const,
+        standardText: '≥650MPa',
+        nominalValue: 650,
+        upperTolerance: 200,
+        lowerTolerance: 0,
+        sampleSize: 5,
+        unit: 'MPa',
+      },
+    ],
+    createdAt: '2023-10-13T08:00:00.000Z',
+    updatedAt: '2023-10-13T08:05:00.000Z',
   },
   {
     id: 'f6a1b2c3-d4e5-4f6a-b17c-8d9e0f1a2b3c',
@@ -1854,6 +1950,38 @@ const rawEmployees: EmployeeDisplay[] = [
 export const mockEmployees: EmployeeDisplay[] = rawEmployees.map((e) => {
   EmployeeSchema.parse(e);
   return e;
+});
+
+/** 登录页可选用户（AuthUserSchema 同形）；id 与真实库 employees 一致，供 Mock 自解析身份 */
+export interface AuthUserDisplay {
+  id: string;
+  name: string;
+  employeeCode: string;
+  department: string;
+  roleCode: string;
+  roleName: string;
+}
+
+/**
+ * 登录页名单：与种子 `employees` + `roles` 同 UUID、同姓名、同主角色。
+ * 为什么必须有这一份：离线 Mock 下 `/auth/users` 若不落地，登录页会退化到「以默认身份进入」，
+ * 而 `/auth/login` 拿不到名单就只能编造姓名 —— 回执会写出与页面顶栏不一致的「谁做的」。
+ */
+const rawAuthUsers: AuthUserDisplay[] = [
+  { id: '11000000-0000-4000-8000-000000000001', name: '张强', employeeCode: 'EMP-1042', department: '品质保证部', roleCode: 'QA_MANAGER', roleName: '质量主管' },
+  { id: '11000000-0000-4000-8000-000000000002', name: '李伟', employeeCode: 'EMP-1088', department: '生产部', roleCode: 'PROCESS_ENGINEER', roleName: '工艺工程师' },
+  { id: '11000000-0000-4000-8000-000000000003', name: '刘芳', employeeCode: 'EMP-1095', department: '品质保证部', roleCode: 'OQC_INSPECTOR', roleName: 'OQC检验员' },
+  { id: '11000000-0000-4000-8000-000000000004', name: '王建国', employeeCode: 'EMP-1102', department: '生产部', roleCode: 'WORKSHOP_LEADER', roleName: '车间班组长' },
+  { id: '11000000-0000-4000-8000-000000000005', name: '赵志明', employeeCode: 'EMP-1108', department: '生产部', roleCode: 'IPQC_INSPECTOR', roleName: 'IPQC检验员' },
+  { id: '11000000-0000-4000-8000-000000000006', name: '孙德胜', employeeCode: 'EMP-1115', department: '生产部', roleCode: 'PROCESS_ENGINEER', roleName: '工艺工程师' },
+  { id: '11000000-0000-4000-8000-000000000007', name: '周海波', employeeCode: 'EMP-1121', department: '生产部', roleCode: 'SURFACE_TREATMENT_ENGINEER', roleName: '表面处理工程师' },
+  { id: '11000000-0000-4000-8000-000000000008', name: '陈静', employeeCode: 'EMP-1130', department: '品质保证部', roleCode: 'IQC_INSPECTOR', roleName: 'IQC检验员' },
+  { id: '11111111-1111-1111-1111-111111111111', name: '张三 (测试质检员)', employeeCode: 'EMP-9999', department: '品质保证部', roleCode: 'QA_MANAGER', roleName: '质量主管' },
+];
+
+export const mockAuthUsers: AuthUserDisplay[] = rawAuthUsers.map((u) => {
+  AuthUserSchema.parse(u);
+  return u;
 });
 
 export interface MaterialDisplay extends Material {

@@ -73,7 +73,6 @@ function shortUserId(id: string): string {
   return id.length > 8 ? `${id.slice(0, 8)}…` : id;
 }
 
-const WILDCARD: OptionItem = { value: '*', label: '全部（* 通配）' };
 
 // ==================================================================
 // 三维多选标签编辑器（编辑弹窗 / 按角色批量配置共用）

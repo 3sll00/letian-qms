@@ -19,6 +19,7 @@ import {
   IntegrationConfigSchema,
   IntegrationSyncLogSchema,
   CompanyProfileSchema,
+  AuthUserSchema,
   MaterialSchema,
   SupplierSchema,
   CustomerSchema,
@@ -45,6 +46,7 @@ import {
   mockEmployees,
   mockMaterials,
   mockCompanyProfile,
+  mockAuthUsers,
   mockCategories,
   mockEquipmentMappings,
   mockInterceptionRules,
@@ -107,6 +109,20 @@ check('批次追溯图谱 mockTraceabilityGraph (TraceabilityGraphResponseSchema
  * 特采样本单独校验：它是「特采节点必须能举证 MRB 单号 + 客户书面授权件」这条口径的活样本
  * （docs/24 §4 R4），字段被改空时这里必须失败，而不是等到现场演示才发现举不出证。
  */
+/*
+ * 登录名单必须与真实库同 UUID：离线 Mock 的「谁做的」全靠这张表解析，
+ * 少掉 QA_MANAGER 会让签核回执退回编造的兜底姓名（docs/35 §5）。
+ */
+check('登录名单 mockAuthUsers (AuthUserSchema)', () => {
+  parseEach('mockAuthUsers', AuthUserSchema, mockAuthUsers);
+  if (!mockAuthUsers.some((u) => u.roleCode === 'QA_MANAGER')) {
+    throw new Error('登录名单缺少 QA_MANAGER（质量负责人签核的授权角色）');
+  }
+  if (!mockAuthUsers.some((u) => u.id === '11000000-0000-4000-8000-000000000001')) {
+    throw new Error('登录名单缺少缺省演示身份「张强」(11000000-...-0001) —— 与后端 authController 口径不一致');
+  }
+});
+
 check('特采样本图谱 mockConcessionGraph (TraceabilityGraphResponseSchema)', () => {
   const parsed = TraceabilityGraphResponseSchema.parse(mockConcessionGraph);
   const node = parsed.nodes.find((item) => item.nodeStatus === 'CONCESSION');

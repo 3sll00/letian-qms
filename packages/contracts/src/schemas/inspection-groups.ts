@@ -1,5 +1,3 @@
-import { InspectionTypeEnum } from './inspection';
-import { z } from 'zod';
 
 export type InspectionGroupKey = 'ALL' | 'IQC' | 'IPQC' | 'OUTSOURCE' | 'OQC';
 
