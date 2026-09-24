@@ -425,12 +425,40 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
       if (measuredRows.length > 0) {
         await api.post(`/inspections/${encodeURIComponent(orderId)}/submit-measurements`, {
           isDraft: hasBlankRows,
+          // 填写值只在**正式判定**时下发：草稿只暂存实测值、不做判定，也就没有数量口径（docs/21 §14）
+          ...(hasBlankRows
+            ? {}
+            : {
+                passQty: decision === "合格" && qty !== null ? qty : 0,
+                failQty: decision === "合格" ? 0 : qty !== null ? qty : 0,
+              }),
           items: measuredRows.map((row) => {
             const numeric = parseMeasuredNumber(row.actual);
+            // 继承留痕（docs/47 §3.6 / AC-08 / R5）：带出项标记来源类型 + 带出原值 + 是否被人工改过；
+            // 非带出项标 MANUAL_ENTRY —— 落库后证书与审计能区分「上游继承值」与「本单人工录入值」。
+            const inheritKey =
+              inheritedValues[`chem_${row.title}`] !== undefined
+                ? `chem_${row.title}`
+                : `mech_${row.title}`;
+            const inheritedVal = inheritedValues[inheritKey];
+            const inheritedSource =
+              heatTraceSource?.sourceType === "IQC_RAW_MATERIAL"
+                ? "IQC_RAW_MATERIAL"
+                : "OUTSOURCE_HEAT_TREATMENT";
             return {
               itemCode: row.itemCode,
               ...(numeric !== undefined && row.planItem.dataType === "NUMERIC" ? { measuredVal: numeric } : {}),
               measuredText: row.actual,
+              inheritedFrom: (inheritedVal !== undefined ? inheritedSource : "MANUAL_ENTRY") as
+                | "OUTSOURCE_HEAT_TREATMENT"
+                | "IQC_RAW_MATERIAL"
+                | "MANUAL_ENTRY",
+              ...(inheritedVal !== undefined
+                ? {
+                    originalInheritedValue: inheritedVal,
+                    isManuallyModified: modifiedItems.has(inheritKey),
+                  }
+                : {}),
             };
           }),
         });
