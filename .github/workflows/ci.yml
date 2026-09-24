@@ -86,3 +86,113 @@ jobs:
           # 已知漂移登记上限：当前 1 处（KD-01 看板统计口径漂移），防止新漂移静默塞入
           OPENAPI_KNOWN_DRIFT_MAX: "1"
         run: pnpm verify:openapi
+
+  # Schemathesis 契约 fuzz（docs/49 §12）：与 quality-gate 并行，
+  # 独立测试库 letian_qms_contract_test + 独立 API :3101，写路径 fuzz
+  # 全程不碰 letian_qms_db。本地口径：pnpm contract:db:prepare / contract:api /
+  # contract:run（tools/contract/*.ps1 为 Windows 编排壳，此处为等效 bash 步骤）。
+  contract-fuzz:
+    name: Schemathesis Contract Fuzz (isolated DB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:14-alpine
+        env:
+          POSTGRES_USER: letian_user
+          POSTGRES_PASSWORD: letian_secure_pass_2026
+          POSTGRES_DB: letian_qms_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9.0.0
+          run_install: false
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Schemathesis
+        run: pip install schemathesis==4.28.0
+
+      - name: Prepare contract test database
+        env:
+          PGPASSWORD: letian_secure_pass_2026
+          DATABASE_URL: postgresql://letian_user:letian_secure_pass_2026@localhost:5432/letian_qms_contract_test?schema=public
+        run: |
+          psql -h localhost -p 5432 -U letian_user -d letian_qms_db -X -w \
+            -c "CREATE DATABASE letian_qms_contract_test"
+          pnpm db:migrate
+          pnpm db:seed
+
+      - name: Start contract API on :3101
+        env:
+          PORT: "3101"
+          NODE_ENV: development
+          DATABASE_URL: postgresql://letian_user:letian_secure_pass_2026@localhost:5432/letian_qms_contract_test?schema=public
+        run: |
+          pnpm --filter @letian/api dev > /tmp/contract-api-3101.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:3101/health > /dev/null; then
+              echo "contract API ready"; exit 0
+            fi
+            sleep 1
+          done
+          echo "contract API failed to start:"; cat /tmp/contract-api-3101.log; exit 1
+
+      - name: Run Schemathesis contract fuzz
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
+        run: |
+          st run docs/api/letian-qms-openapi.yaml \
+            --config-file tools/contract/schemathesis.toml \
+            --origin http://localhost:3101 \
+            --workers 4 \
+            --max-time 300 \
+            --max-examples 20 \
+            --report junit,json \
+            --report-dir tools/contract/reports/run-ci-${{ github.run_id }}
+
+      - name: Upload Schemathesis reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: schemathesis-reports
+          path: tools/contract/reports/
+          retention-days: 14
