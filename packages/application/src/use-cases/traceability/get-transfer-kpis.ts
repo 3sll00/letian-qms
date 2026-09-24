@@ -31,8 +31,10 @@ export class GetTransferKpisUseCase {
       const getStageKey = (type: string): string => {
         if (type.startsWith('IQC')) return 'IQC';
         if (type.startsWith('IPQC')) return 'IPQC';
-        if (type.startsWith('OQC_MACH') || type.startsWith('OQC_HEAT') || type.startsWith('OQC_SF')) return 'OQC_OUTSOURCE';
-        if (type.startsWith('OQC_SH')) return 'OQC_SH';
+        if (type === 'OQC_SH') return 'OQC_SH';
+        // 委外七分类（OQC_SF / OQC_HEAT / OQC_BLACK / OQC_ZINC / OQC_NICKEL / OQC_PHOSPH / OQC_DACRO / OQC_MACH）
+        // 全部归 OQC_OUTSOURCE —— 此前只认 SF/HEAT/MACH 三个，其余四个委外类型会掉进 OTHER
+        if (type.startsWith('OQC_')) return 'OQC_OUTSOURCE';
         return 'OTHER';
       };
 

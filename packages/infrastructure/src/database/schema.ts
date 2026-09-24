@@ -222,6 +222,27 @@ export interface InspectionOrdersTable {
   approverId?: string | null;
   approverName?: string | null;
   approvedAt?: Date | null;
+  // 034 出货检验炉批号数据关联（docs/47）：炉批号 + 溯源留痕 + SQL 侧归一生成列。
+  // 此前 furnace_heat_batch_no 由迁移 004 建列后**全仓无写入路径**（列恒 NULL，见 docs/47 D1），
+  // 迁移 034 起由「建单透传 + 表头更新」两条写路径落值；归一列是生成列，应用层只读不写。
+  /** 炉批号：钢材冶炼炉号 / 热处理炉批号；无炉批概念时为空 */
+  furnaceHeatBatchNo?: string | null;
+  /** 归一化炉批号（生成列：upper + 去空格 / 连字符 / 下划线 / 全角空格）；仅供等值查询 */
+  furnaceHeatBatchNoNorm?: Generated<string | null>;
+  /** 本单炉批号数据的带出源：OUTSOURCE_HEAT_TREATMENT / IQC_RAW_MATERIAL；未带出为空 */
+  heatSourceType?: string | null;
+  /** 本单炉批号数据带出的源检验单号；未带出为空 */
+  heatSourceOrderNo?: string | null;
+  // 035 「合格后传递」建单留痕（docs/48 §4.1）：建单那一次判定的存档。
+  // **只作留痕与展示，永远不作判据**（判据一律按 §2 实时重算）；未走建单门禁的单据（如 MRB 复检单）四列为空。
+  /** 建单时命中的链路锚点值（未命中时回落本单批次号） */
+  chainKey?: string | null;
+  /** 建单时命中的锚点类型：BATCH / HEAT / WORK_ORDER */
+  chainKeyKind?: string | null;
+  /** 建单时认定的权威上游检验单号（复检轮次指向复检单；无上游单为空） */
+  upstreamOrderNo?: string | null;
+  /** 建单时的判定理由码（TransferGateCode） */
+  upstreamGateCode?: string | null;
 }
 
 // ============================================================================
@@ -613,6 +634,7 @@ export interface Database {
   materialCodeRenumberings: MaterialCodeRenumberingsTable;
   materialCategoryReassignments: MaterialCategoryReassignmentsTable;
   outsourceReferenceRenumberings: OutsourceReferenceRenumberingsTable;
+  transferOverrideTickets: TransferOverrideTicketsTable;
 }
 
 // ============================================================================
@@ -655,6 +677,35 @@ export type WarehouseRow = Selectable<WarehousesTable>;
 export type NewWarehouseRow = Insertable<WarehousesTable>;
 export type ReportTemplateInsert = Insertable<ReportTemplatesTable>;
 export type ReportTemplateUpdate = Updateable<ReportTemplatesTable>;
+
+export interface TransferOverrideTicketsTable {
+  id: Generated<string>;
+  ticketNo: string;
+  batchNo: string;
+  materialCode: string;
+  inspectionType: string;
+  workOrderNo: string | null;
+  furnaceHeatNo: string | null;
+  upstreamOrderNo: string | null;
+  upstreamGateCode: string;
+  reason: string;
+  applicantId: string;
+  applicantName: string | null;
+  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'CONSUMED';
+  reviewerId: string | null;
+  reviewerName: string | null;
+  reviewNotes: string | null;
+  approvalDocNo: string | null;
+  consumedOrderId: string | null;
+  consumedOrderNo: string | null;
+  createdAt: Generated<Date>;
+  reviewedAt: Date | null;
+  consumedAt: Date | null;
+}
+
+export type TransferOverrideTicketRow = Selectable<TransferOverrideTicketsTable>;
+export type TransferOverrideTicketInsert = Insertable<TransferOverrideTicketsTable>;
+export type TransferOverrideTicketUpdate = Updateable<TransferOverrideTicketsTable>;
 
 
 export type MaterialInsert = Insertable<MaterialsTable>;

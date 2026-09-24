@@ -12,9 +12,15 @@ import {
   summarizeJudgements,
   type PlanIndicatorRow,
 } from '../../../lib/planMatch';
-import type { InspectionType } from '@letian/contracts';
+import type { InspectionType, TransferDecision } from '@letian/contracts';
 import { api, errorMessage } from '../../../lib/api';
 import { loadCompanyProfile, type CompanyProfile } from '../../../lib/companyProfile';
+import {
+  TRANSFER_GATE_LABEL,
+  TRANSFER_GATE_TONE,
+  gateUpstreamText,
+  permitEvidenceText,
+} from '../../../lib/transferGateFormat';
 
 interface OutsourceInspectionFormProps {
   initialItem?: any;
@@ -147,6 +153,11 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
   const [spec, setSpec] = useState(fromList(initialItem?.specification ?? initialItem?.spec));
   const [materialGrade, setMaterialGrade] = useState(fromList(initialItem?.materialGrade ?? initialItem?.material));
   const [batchNo, setBatchNo] = useState(fromList(initialItem?.batchNo));
+  // 炉批号（Heat No，inspection_orders.furnace_heat_batch_no，docs/47 D12）：
+  // 委外热处理单是出货检验三级关联的**第一优先级数据源**（OQC_HEAT → IQC → 无），
+  // 本字段此前连输入框都没有 —— 第一优先级环节没有输入口，R1 永远命不中。
+  // OQC_HEAT 必填、其余委外类型选填（docs/47 §4.7 / P1）。
+  const [heatNo, setHeatNo] = useState(fromList(initialItem?.furnaceHeatNo ?? initialItem?.heatNo));
   // 回厂日期（inspection_orders.return_date，docs/36 §1.2）：物理列 / 契约 / 接口自 009 起就已就绪，
   // 但此前表单没有该输入 —— 新建单该列恒为 NULL，台账「回厂日期」恒显示「—」。
   const [returnDate, setReturnDate] = useState(fromList(initialItem?.returnDate));
@@ -232,6 +243,13 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
   /** 已成功落库的检验单（点「完成并返回列表」时回调 onSubmit 退出表单） */
   const [submitted, setSubmitted] = useState<{ orderId: string; orderNo: string } | null>(null);
 
+  // 建单前传递预览（docs/48 §4.6 / §8 P0 第 6 项）：新建单时按「批次 + 物料」预演服务端闸门，
+  // 避免填完整页方案实测值才被 422 打回。预览走只读接口（服务端不写审计、不加锁、不 4xx），
+  // 且**不阻断**录入 —— 置灰只是提示，拦截以服务端 422 为唯一判据（§8 硬约束 6）。
+  const isNewOrder = !(typeof initialItem?.id === 'string' && initialItem.id !== '');
+  const [permitDecision, setPermitDecision] = useState<TransferDecision | null>(null);
+  const [permitError, setPermitError] = useState('');
+
   // 打印预览控制
   const [printModalOpen, setPrintModalOpen] = useState(false);
   const [manufacturingCertData, setManufacturingCertData] = useState<ManufacturingCertData | null>(null);
@@ -269,6 +287,53 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
     orderId: initialItem?.id ?? null,
     readOnly,
   });
+
+  /**
+   * 传递预览请求：只在「新建单 + 批次号非空」时发；输入停顿 400ms 再请求，避免逐字敲击打服务端。
+   * 只申请「本环节能不能开始」，不申请任何豁免 —— 前端拿到的就是服务端建单时会用的同一份判定。
+   */
+  useEffect(() => {
+    if (!isNewOrder || batchNo.trim() === '') {
+      setPermitDecision(null);
+      setPermitError('');
+      return;
+    }
+    const batch = batchNo.trim();
+    const material = materialCode.trim();
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const res = await api.post<{ items?: { decision?: TransferDecision }[] }>(
+            '/inspections/transfer-permits',
+            {
+              items: [
+                {
+                  inspectionType,
+                  batchNo: batch,
+                  ...(material !== '' ? { materialCode: material } : {}),
+                },
+              ],
+            }
+          );
+          if (cancelled) return;
+          setPermitDecision(res.items?.[0]?.decision ?? null);
+          setPermitError('');
+        } catch (err) {
+          if (cancelled) return;
+          setPermitDecision(null);
+          setPermitError(errorMessage(err));
+        }
+      })();
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [isNewOrder, inspectionType, batchNo, materialCode]);
+
+  /** 服务端已明确不允许建单：界面据此置灰提交按钮。绕过界面直接调接口仍会被服务端 422 拒绝 */
+  const permitBlocked = permitDecision !== null && permitDecision.allowed === false;
 
   // 存货主数据：选择器的选项来源。主数据不可用时保持空列表（界面提示未维护），绝不回落硬编码物料。
   useEffect(() => {
@@ -404,6 +469,8 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
     if (vendor !== undefined && vendor !== '') setVendorName(vendor);
     if (order.processType !== undefined && order.processType !== '') setProcessType(order.processType);
     setBatchNo(order.batchNo);
+    // 炉批号只认本单物理列（docs/47 D3/D12）：无值即留空，不用 batchNo 等近似字段顶替
+    setHeatNo(order.furnaceHeatNo ?? '');
     setQuantity(`${order.sampleQty}${order.unit !== undefined ? ` ${order.unit}` : ''}`);
     if (order.inspectorName !== undefined && order.inspectorName !== '') setInspector(order.inspectorName);
     // 检验日期：本单落库的 inspected_date 优先；只有历史行（该列为空）才回落
@@ -556,6 +623,14 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
       setSubmitError('请先填写委外批次号（检验单落库的批次号）');
       return;
     }
+    // docs/47 §4.7：委外热处理单（OQC_HEAT）炉批号必填 —— 它是出货检验按
+    // 「委外热处理 -> 来料检验」优先级链带出上游实测数据的**唯一关联锚点**，
+    // 不填则本单即便终判合格，下游出货检验也永远关联不到它（D12 断链重演）。
+    // 其余委外工艺分类（发黑 / 镀锌 / 磷化…）与炉次无必然因果，选填。
+    if (inspectionType === 'OQC_HEAT' && heatNo.trim() === '') {
+      setSubmitError('委外热处理单必须填写炉批号 (Heat No)：出货检验按它关联本单的力学 / 化学实测数据');
+      return;
+    }
     const qty = parseQuantity(quantity);
     if (qty === null) {
       setSubmitError('交付数量里没有可解析的数值（形如「500 PCS」），请先补全');
@@ -586,6 +661,8 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
           ...(materialGrade.trim() !== '' ? { materialGrade } : {}),
           ...(techStandard.trim() !== '' ? { techStandard } : {}),
           ...(inspectDate.trim() !== '' ? { inspectedDate: inspectDate } : {}),
+          // 炉批号建单即落库（docs/47 D1/D12）：后续 PATCH /header 再由服务端重新解析同炉上游并写溯源留痕
+          ...(heatNo.trim() !== '' ? { furnaceHeatNo: heatNo.trim() } : {}),
           ...(inspector.trim() !== '' ? { inspectorName: inspector } : {}),
           // 命中的方案版本 ID 原样回传，服务端按该版本固化 planSnapshot 快照
           ...(planVersionId !== null ? { planVersionId } : {}),
@@ -595,6 +672,19 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
         }
         orderId = created.id;
       }
+
+      // 表头业务事实落库（docs/47 §4.6 / §5）：炉批号 / 材质牌号 / 执行技术标准 / 检验日期。
+      // 新建单时这些值已随 POST /inspections 落过一次，这里再 PATCH 一遍有两个作用：
+      //   ① 存量单（initialItem 带 id）此前**没有任何表头写路径**，PATCH 是唯一落库口；
+      //   ② 溯源留痕（heat_source_type / heat_source_order_no）由服务端按「委外热处理 ->
+      //      来料检验」优先级**重新解析**写入 —— 本单（委外热处理）因此会记录
+      //      「本炉材料来自哪张来料检验单」，前端不自称来源。
+      await api.patch(`/inspections/${encodeURIComponent(orderId)}/header`, {
+        furnaceHeatNo: heatNo.trim(),
+        ...(materialGrade.trim() !== '' ? { materialGrade: materialGrade.trim() } : {}),
+        ...(techStandard.trim() !== '' ? { techStandard: techStandard.trim() } : {}),
+        ...(inspectDate.trim() !== '' ? { inspectedDate: inspectDate.trim() } : {}),
+      });
 
       // 只填了 5 点膜厚时，5 点平均值已由 planRowsForJudge 回填到对应方案指标行（见上方口径说明），
       // 避免「界面量了 5 个点、库里一个数都没落」的静默丢数。
@@ -607,6 +697,13 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
       if (measuredRows.length > 0) {
         await api.post(`/inspections/${encodeURIComponent(orderId)}/submit-measurements`, {
           isDraft: hasBlankRows,
+          // 填写值只在**正式判定**时下发：草稿只暂存实测值、不做判定，也就没有数量口径（docs/21 §14）
+          ...(hasBlankRows
+            ? {}
+            : {
+                passQty: decision === '合格' ? qty : 0,
+                failQty: decision === '不合格' ? qty : 0,
+              }),
           items: measuredRows.map((row) => {
             const numeric =
               row.planItem.dataType === 'NUMERIC' ? parseMeasuredNumber(row.actual) : undefined;
@@ -693,6 +790,59 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
 
       {/* 质检方案匹配状态：命中才渲染指标清单，未命中则引导配置方案 */}
       <PlanMatchBanner state={planMatch} materialCode={materialCode} inspectionType={inspectionType} />
+
+      {/*
+        建单前传递预览（docs/48 §4.6 / §8 P0 第 6 项）：只对**新建单**渲染 —— 存量单的闸门在它建单时已经判过，
+        这里再判一次只会变成「拿今天的上游状态改写昨天的事实」。文案与色板全部来自服务端判定码，前端不判定。
+      */}
+      {isNewOrder && (
+        <div
+          className={`rounded-lg border px-4 py-3 text-xs space-y-1 ${
+            permitBlocked
+              ? 'border-rose-200 bg-rose-50 text-rose-700'
+              : permitDecision !== null && permitDecision.code === 'UPSTREAM_MISSING'
+              ? 'border-slate-200 bg-slate-50 text-slate-600'
+              : permitDecision !== null
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+              : 'border-slate-200 bg-slate-50 text-slate-500'
+          }`}
+        >
+          <div className="flex items-center gap-2 font-medium">
+            <ShieldCheck className="w-3.5 h-3.5" />
+            <span>传递闸门（建单前预览）</span>
+            {permitDecision !== null && (
+              <span
+                className={`px-2 py-0.5 rounded text-[11px] ${TRANSFER_GATE_TONE[permitDecision.code].badge}`}
+              >
+                {TRANSFER_GATE_LABEL[permitDecision.code]}
+              </span>
+            )}
+          </div>
+          {permitDecision === null && permitError === '' && (
+            <div>填写「委外批次号」（可再补物料编码）后，自动按服务端闸门预演本单能否建单。</div>
+          )}
+          {permitError !== '' && (
+            <div>
+              预览不可用：{permitError} —— 预览失败不阻断录入，建单时服务端仍会校验并拦截。
+            </div>
+          )}
+          {permitDecision !== null && (
+            <>
+              <div>{gateUpstreamText(permitDecision)}</div>
+              <div>{permitDecision.reason}</div>
+              {permitEvidenceText(permitDecision) !== '' && <div>{permitEvidenceText(permitDecision)}</div>}
+              <div className="font-mono text-[11px] opacity-70">
+                判定码 {permitDecision.code} · 锚点 {permitDecision.chainKeyKind}:{permitDecision.chainKey}
+              </div>
+              {permitBlocked && (
+                <div>
+                  提交按钮已置灰；即便绕过界面直接调接口，服务端也会以 422 拒绝建单（界面置灰不算数）。
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
 
       {/*
         只读回看（readOnly）把「指标清单 + 标准值 + 实测值 + 判定」整段置为不可编辑：
@@ -927,6 +1077,24 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
               onChange={(e) => setBatchNo(e.target.value)}
               placeholder="取本单批次号"
               className="w-full bg-slate-50/50 border border-slate-200 rounded px-2.5 py-1.5 text-slate-800 focus:bg-white focus:outline-none focus:border-blue-500"
+            />
+          </div>
+          <div>
+            <label className="block text-slate-500 mb-1">
+              炉批号 (Heat No){inspectionType === 'OQC_HEAT' && <span className="text-rose-500 ml-0.5">*</span>}
+            </label>
+            <input
+              type="text"
+              value={heatNo}
+              onChange={(e) => setHeatNo(e.target.value)}
+              placeholder={
+                inspectionType === 'OQC_HEAT'
+                  ? '热处理炉批号（必填：出货检验按它关联本单实测数据）'
+                  : '选填：本单对应的材料冶炼炉号'
+              }
+              className={`w-full bg-slate-50/50 border rounded px-2.5 py-1.5 text-slate-800 font-mono focus:bg-white focus:outline-none focus:border-blue-500 ${
+                inspectionType === 'OQC_HEAT' ? 'border-blue-300' : 'border-slate-200'
+              }`}
             />
           </div>
           <div>
@@ -1423,7 +1591,8 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
             onClick={() => {
               void handleSubmitInternal();
             }}
-            disabled={submitting}
+            disabled={submitting || permitBlocked}
+            title={permitBlocked ? '上游未放行：服务端会以 422 拒绝建单（docs/48 §2.3 传递判定矩阵）' : undefined}
             className="px-4 py-1.5 rounded bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
           >
             {submitting ? '提交中…' : '保存并提交委外判定'}

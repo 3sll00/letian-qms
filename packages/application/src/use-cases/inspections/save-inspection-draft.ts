@@ -17,6 +17,11 @@ export interface SaveInspectionDraftCommand
     defectReason?: string;
     remark?: string;
     inspectorRemark?: string;
+    /** 炉批号继承来源标记（docs/47 §3.6）：草稿暂存同样保留带出 / 人工来源 */
+    inheritedFrom?: 'OUTSOURCE_HEAT_TREATMENT' | 'IQC_RAW_MATERIAL' | 'MANUAL_ENTRY';
+    inheritedHeatValue?: number | string;
+    isManuallyModified?: boolean;
+    modificationReason?: string;
   }>;
   inspectorRemark?: string;
   operatorId: string;
@@ -73,9 +78,11 @@ export class SaveInspectionDraftUseCase {
       });
 
       try {
-        // 同 record-measurements：新建工单初始态为 PENDING，聚合根只允许 INSPECTING / DRAFT 录入，
-        // 因此首次暂存草稿时按状态机允许的 PENDING -> INSPECTING 边推进，再写入草稿实测值。
-        if (order.getStatus() === 'PENDING') {
+        // 同 record-measurements：未开检的工单有两类 —— 初始态 PENDING 的新建单，与 MRB 返工回边后的
+        // 复检轮次 RE_INSPECTING（见 docs/21 §11）。聚合根只允许 INSPECTING / DRAFT 录入，
+        // 故首次暂存草稿时按状态机允许的边推进（PENDING / RE_INSPECTING -> INSPECTING），再写入草稿实测值。
+        const currentStatus = order.getStatus();
+        if (currentStatus === 'PENDING' || currentStatus === 'RE_INSPECTING') {
           order.startInspection();
         }
 
@@ -84,6 +91,16 @@ export class SaveInspectionDraftUseCase {
             itemCode: item.itemCode,
             ...(item.measuredVal !== undefined ? { measuredVal: item.measuredVal } : {}),
             ...(item.measuredText !== undefined ? { measuredText: item.measuredText } : {}),
+            ...(item.inheritedFrom !== undefined ? { inheritedFrom: item.inheritedFrom } : {}),
+            ...(item.inheritedHeatValue !== undefined
+              ? { inheritedHeatValue: item.inheritedHeatValue }
+              : {}),
+            ...(item.isManuallyModified !== undefined
+              ? { isManuallyModified: item.isManuallyModified }
+              : {}),
+            ...(item.modificationReason !== undefined
+              ? { modificationReason: item.modificationReason }
+              : {}),
           });
         }
       } catch (err: unknown) {

@@ -1,7 +1,10 @@
 import type { InspectionOrder, MRBReview as MRBReviewDTO } from '@letian/contracts';
 import type { ISecurityContext } from '../../security/security-context.js';
 import type { IUnitOfWorkContext } from '../../tx/unit-of-work.js';
-import { triggerMrbReviewInTransaction } from './trigger-mrb-review.js';
+import {
+  alignMrbDefectQtyWithSourceOrder,
+  triggerMrbReviewInTransaction,
+} from './trigger-mrb-review.js';
 
 export interface AutoInitiateMrbReviewOptions {
   /** 拟定处置（落 `mrb_reviews.disposition` 初值），缺省 `REWORK` */
@@ -46,21 +49,24 @@ export async function autoInitiateMrbReview(
   const orderId = order.id ?? order.orderNo;
 
   const existing = await ctx.mrbReviews.findByOrderNo(order.orderNo);
+  // 复用分支同样走「不合格数量 = 源单 fail_qty」的口径对齐（docs/21 §14）：终判路径是「先查后建」，
+  // 若只把对齐放在 trigger 内部，旧时序（先建单、后落填写值）留下的那张单就永远得不到订正。
   const mrbReview =
-    existing ??
-    (await triggerMrbReviewInTransaction(
-      ctx,
-      {
-        inspectionOrderId: orderId,
-        applicantId: applicant.id,
-        applicantName: applicant.name,
-        ...(options.preliminaryDisposition !== undefined
-          ? { preliminaryDisposition: options.preliminaryDisposition }
-          : {}),
-        ...(options.reviewNotes !== undefined ? { reviewNotes: options.reviewNotes } : {}),
-      },
-      securityCtx
-    ));
+    existing !== null
+      ? await alignMrbDefectQtyWithSourceOrder(ctx, existing, order)
+      : await triggerMrbReviewInTransaction(
+          ctx,
+          {
+            inspectionOrderId: orderId,
+            applicantId: applicant.id,
+            applicantName: applicant.name,
+            ...(options.preliminaryDisposition !== undefined
+              ? { preliminaryDisposition: options.preliminaryDisposition }
+              : {}),
+            ...(options.reviewNotes !== undefined ? { reviewNotes: options.reviewNotes } : {}),
+          },
+          securityCtx
+        );
 
   // 台账条目转「已入评审」并回填 MRB 单号；markInitiated 同时接受池条目 ID 与源检验单 ID（UUID 守卫）
   await ctx.pendingDefects.markInitiated(orderId, mrbReview.id, applicant.name);

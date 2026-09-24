@@ -5,6 +5,7 @@ import type {
   PendingDefectPoolRepository,
   BatchTraceRepository,
   ReviewFlowRepository,
+  TransferOverrideRepository,
 } from '@letian/domain';
 import type { IOutboxRepository } from './outbox.js';
 import type { ILockPort } from './lock-port.js';
@@ -73,6 +74,8 @@ export interface IUnitOfWorkContext {
   readonly materials: IMaterialLookupPort;
   /** 供应商主数据只读查询（建单时解析供应商名称快照） */
   readonly suppliers: ISupplierLookupPort;
+  /** 质量负责人豁免通道（TBD-09，036 审批流） */
+  readonly transferOverrides: TransferOverrideRepository;
 }
 
 /**

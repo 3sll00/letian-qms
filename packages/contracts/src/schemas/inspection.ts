@@ -355,6 +355,34 @@ export const InspectionPlanSnapshotSchema = z.object({
 
 export const PlanSnapshotSchema = InspectionPlanSnapshotSchema;
 
+/**
+ * 炉批号数据关联（docs/47）—— 溯源来源枚举。
+ *
+ * 与领域层 `HeatBatchTraceService` 的 `HEAT_TRACE_SOURCE_TYPES` 同源同值：
+ *   OUTSOURCE_HEAT_TREATMENT = L1 委外检验·热处理（OQC_HEAT）
+ *   IQC_RAW_MATERIAL         = L2 来料检验（IQC）
+ *   NONE                     = L3 两处均无记录（界面静默空态，不显示关联数据）
+ */
+export const HeatTraceAppliedSourceTypeEnum = z.enum([
+  'OUTSOURCE_HEAT_TREATMENT',
+  'IQC_RAW_MATERIAL',
+]);
+export const HeatTraceSourceTypeEnum = z.enum([
+  'OUTSOURCE_HEAT_TREATMENT',
+  'IQC_RAW_MATERIAL',
+  'NONE',
+]);
+
+/**
+ * 炉批号上游异常提示的理由码（docs/47 §3.9 / TBD-01，P1）。
+ * 只提示、不带值、不阻断；跨环节阻断是 docs/48 的职责，两者不合并。
+ */
+export const HeatTraceWarningCodeEnum = z.enum([
+  'UPSTREAM_FAILED',
+  'UPSTREAM_UNDER_MRB',
+  'UPSTREAM_INSPECTING',
+]);
+
 export const InspectionOrderSchema = z.object({
   id: z.string().uuid().optional(),
   orderNo: z.string().min(1, '检验单号不能为空').openapi({
@@ -368,7 +396,12 @@ export const InspectionOrderSchema = z.object({
     example: '不锈钢线材 Φ5.0mm',
   }),
   batchNo: z.string().min(1, '批次号不能为空'),
-  furnaceHeatNo: z.string().optional().openapi({ description: '炉批号 (支持智能关联溯源)' }),
+  furnaceHeatNo: z.string().optional().openapi({
+    description:
+      '炉批号 (Heat No)：钢材冶炼炉号 / 热处理炉批号，落 inspection_orders.furnace_heat_batch_no（迁移 004 建列、034 起有写入路径与归一索引）。' +
+      '出货检验录入该字段即按 docs/47 的三级优先级关联上游检验记录（委外热处理 OQC_HEAT -> 来料检验 IQC -> 无记录）',
+    example: 'HT02-20231008-A',
+  }),
   // 006 来料检验 (IQC) 入库单号 / 入库日期 / 规格型号对账字段扩展
   // 「采购入库单号」与「入库单号」是同一业务对象，统一收敛为入库单号（迁移 021 已重命名物理列）
   inboundNo: z.string().optional().openapi({ description: '入库单号 (来自 ERP 采购入库单 Dlyndx.Number)', example: 'RK-20260706-001' }),
@@ -431,6 +464,15 @@ export const InspectionOrderSchema = z.object({
     description: '检验日期 YYYY-MM-DD（落库 inspection_orders.inspected_date）；为空时读侧才回落 completedAt/createdAt',
     example: '2026-09-23',
   }),
+  // 034 炉批号溯源留痕（docs/47 §3.6 R5）：本单炉批号数据「带出自哪张上游检验单」。
+  // 由 PATCH /inspections/{id}/header 在服务端重新解析后写入，不接受客户端自称来源。
+  heatSourceType: HeatTraceAppliedSourceTypeEnum.optional().openapi({
+    description: '炉批号数据带出源类型（委外热处理 / 来料检验）；未发生带出时缺省',
+  }),
+  heatSourceOrderNo: z.string().optional().openapi({
+    description: '炉批号数据带出的源检验单号；未发生带出时缺省',
+    example: 'OQC-HT-20260705-0003',
+  }),
   // 029 质量负责人签核（docs/35 §5）：由 POST /inspections/{id}/approve 写入**真实签核动作**；
   // 未签核即缺省 —— 证书留白，绝不打印任何人名
   approverId: z.string().uuid().optional().openapi({ description: '质量负责人（员工主数据 id），未签核时缺省' }),
@@ -439,6 +481,60 @@ export const InspectionOrderSchema = z.object({
     example: '李质量',
   }),
   approvedAt: z.string().optional().openapi({ description: '签核时间 (ISO 8601)', example: '2026-09-22T08:00:00.000Z' }),
+  // 「合格后传递」读取派生字段（docs/48 §4.2）：台账 / 看板 / MES 用同一份判定结果，
+  // 全部由服务端实时按领域纯函数推导（P1 起可与留痕列比对），**不是**物理列、不接受写入。
+  canTransfer: z.boolean().optional().openapi({
+    description:
+      '本单**所在环节**的传递许可：上游已放行（合格 / MRB 让步接收 / 返工复检合格）或上游缺失时按 TBD-01 放行。只读派生，不落库',
+  }),
+  blockedBy: z
+    .object({
+      code: z.string().openapi({ description: '阻断理由码（TransferGateCode）', example: 'UPSTREAM_FAILED' }),
+      stage: z.string().openapi({ description: '阻断来源环节', example: 'IQC' }),
+      orderNo: z.string().nullish().openapi({ description: '权威上游单号', example: 'IQC-20260923-0001' }),
+      status: z.string().nullish().openapi({ description: '权威上游单当前状态', example: 'FAILED' }),
+    })
+    .optional()
+    .openapi({ description: '被阻断时的结构化上游信息（blockedBy.code 供 MES / 看板分支）' }),
+  predecessorOrderNo: z.string().optional().openapi({
+    description: '权威上游检验单号（返工轮次时指向复检单，不是原单）',
+    example: 'IQC-20260923-0001',
+  }),
+  chainKey: z.string().optional().openapi({
+    description: '命中的链路锚点值（BATCH / HEAT / WORK_ORDER 中优先级最高者）',
+    example: 'BATCH-TEST2609-001',
+  }),
+  transferCode: z.string().optional().openapi({
+    description:
+      '传递判定理由码（TransferGateCode）。与 canTransfer 成对下发：`canTransfer=true` 且 `transferCode=UPSTREAM_MISSING` 就是「放行但上游环节缺失」的显式标记（TBD-01），界面据此显示缺失徽标而不是默认当作正常',
+    example: 'UPSTREAM_MISSING',
+  }),
+  // 035 建单传递留痕（docs/48 §4.1）：**建单那一次**判定的持久化存档。与上面
+  // canTransfer / transferCode / chainKey 的「当前实时判定」是**两个语义** —— 上游状态会变
+  // （MRB 结案 / 复检终判 / 下游被冻结都会改写它），所以历史存档单独挂在本键下，
+  // 绝不与实时字段同名（同名会让「当初凭什么放行」与「现在还能不能传」在界面上无法区分）。
+  // 只读物理列；MRB 返工复检单等未走建单门禁的单据缺省，界面显示 —（不补一个猜出来的结论）。
+  transferTrace: z
+    .object({
+      chainKey: z.string().optional().openapi({ description: '建单时命中的链路锚点值（未命中时回落本单批次号）' }),
+      chainKeyKind: z
+        .string()
+        .optional()
+        .openapi({ description: '建单时命中的锚点类型：BATCH / HEAT / WORK_ORDER' }),
+      upstreamOrderNo: z
+        .string()
+        .optional()
+        .openapi({ description: '建单时认定的权威上游检验单号（复检轮次指向复检单；无上游单时缺省）' }),
+      upstreamGateCode: z
+        .string()
+        .optional()
+        .openapi({ description: '建单时的判定理由码（TransferGateCode）' }),
+    })
+    .optional()
+    .openapi({
+      description:
+        '建单传递留痕（迁移 035 物理列 chain_key / chain_key_kind / upstream_order_no / upstream_gate_code，只读）：回答「这批货当初凭什么放行」',
+    }),
   completedAt: z.string().optional().openapi({
     description:
       '台账「完成时间」列：该工序报工/报检登记时间（MES 同步链路以 t_check_report.check_date 写入）；终判完成时由状态流转刷新',
@@ -465,6 +561,21 @@ export const InspectionOrderSchema = z.object({
 // 5. 检验请求与响应 DTO Schemas
 // ============================================================================
 
+/** 质量负责人传递门禁特批豁免直接输入（docs/48 §8 P2 / TBD-09） */
+export const TransferOverrideInputSchema = z
+  .object({
+    reason: z
+      .string()
+      .min(5, '豁免原因至少5个字符')
+      .openapi({ description: '豁免原因（必填，至少5字，记入审计）', example: '客户紧急试制，质量总监李工特批放行' }),
+    approverId: z.string().uuid().openapi({ description: '审批人 UUID（须具备 QA_MANAGER 或 ADMIN 权限）' }),
+    approverName: z.string().optional().openapi({ description: '审批人姓名快照' }),
+    approvalDocNo: z.string().optional().openapi({ description: '书面特批单据编号', example: 'QA-OVR-20260924-001' }),
+    ticketId: z.string().uuid().optional().openapi({ description: '关联的已审批豁免工单 ID（若走完审批流）' }),
+    ticketNo: z.string().optional().openapi({ description: '关联的已审批豁免工单编号（如 TOT-20260924-0001）' }),
+  })
+  .openapi('TransferOverrideInput');
+
 export const CreateInspectionOrderRequestSchema = z.object({
   // 检验单号可省略：省略时由服务端按编号规则 `{PREFIX}-{YYYYMMDD}-{NNNN}` 申请当日流水号，
   // 显式传入时以其为准（兼容 ERP/MES 下发的外部单号）。规则见 @letian/domain 的 inspection-order-number。
@@ -481,7 +592,11 @@ export const CreateInspectionOrderRequestSchema = z.object({
       '物料名称/品名 (来自 ERP Ptype.FullName -> materials.material_name)；省略时由服务端按 materialCode 从存货档案补齐，显式传入时以传入值为准',
   }),
   batchNo: z.string().min(1),
-  furnaceHeatNo: z.string().optional().openapi({ description: '炉批号' }),
+  furnaceHeatNo: z.string().optional().openapi({
+    description:
+      '炉批号 (Heat No)（落 inspection_orders.furnace_heat_batch_no）：建单即落库，供出货检验按 docs/47 的优先级链关联上游检验记录',
+    example: 'HT02-20231008-A',
+  }),
   supplierCode: z.string().optional(),
   customerCode: z.string().optional(),
   sampleQty: z.number().positive(),
@@ -544,6 +659,9 @@ export const CreateInspectionOrderRequestSchema = z.object({
     example: '11111111-1111-1111-1111-111111111111',
   }),
   isMandatoryGate: z.boolean().optional(),
+  transferOverride: TransferOverrideInputSchema.optional().openapi({
+    description: '质量负责人传递门禁特批豁免凭据（TBD-09，允许绕过上游阻断）',
+  }),
 }).openapi('CreateInspectionOrderRequest');
 
 export const RecordInspectionItemRequestSchema = z.object({
@@ -564,10 +682,28 @@ export const RecordInspectionItemRequestSchema = z.object({
   modificationReason: z.string().optional(),
 }).openapi('RecordInspectionItemRequest');
 
+/**
+ * 实测值批量录入 / 判定请求（`POST /inspections/:id/submit-measurements`）。
+ *
+ * `passQty` / `failQty` 是**检验员在录入弹窗里填写的合格数量 / 不合格数量**（docs/17 §7、docs/21 §14）：
+ * 判定为不合格时它们随判定一并落 `inspection_orders.pass_qty / fail_qty`，并成为
+ * 「判定即自动创建的 MRB 单」的「不合格数量」—— 与服务端终判口径**同源**。缺省时服务端按
+ * 抽样数量派生兜底（`failQty = sampleQty - passQty - exemptQty`），首次判定时该兜底值恒等于
+ * 抽样数（检测数），故**凡是能拿到填写值的调用方都必须下发**，否则 MRB 单会显示成检测数。
+ */
 export const BatchRecordInspectionItemsRequestSchema = z.object({
   orderId: z.string().uuid(),
   items: z.array(RecordInspectionItemRequestSchema).min(1, '录入指标项不能为空'),
   isDraft: z.boolean().default(false),
+  passQty: z
+    .number()
+    .min(0)
+    .optional()
+    .openapi({ description: '检验员填写的合格数量（落 inspection_orders.pass_qty，优先于服务端派生值）' }),
+  failQty: z.number().min(0).optional().openapi({
+    description: '检验员填写的不合格数量（落 inspection_orders.fail_qty，并作为自动创建 MRB 单的「不合格数量」）',
+    example: 60,
+  }),
 }).openapi('BatchRecordInspectionItemsRequest');
 /**
  * 质量负责人签核请求（docs/35 §5）。
@@ -634,25 +770,113 @@ export const MandatoryGateCheckResponseSchema = z.object({
   mandatoryGate: z.boolean(),
   allowNextStep: z.boolean(),
   reason: z.string().optional(),
+  // 「合格后传递」收敛（docs/48 §4.2 / 硬约束 4）：放行关卡与传递门禁由**同一份**领域纯函数产出，
+  // 下面三个字段把结构化理由一并下发，MES 不必解析中文 reason 才能分支。
+  gateCode: z.string().optional().openapi({
+    description: '传递判定理由码（TransferGateCode）：UPSTREAM_PASSED / UPSTREAM_CONCESSION / UPSTREAM_FAILED …',
+    example: 'UPSTREAM_CONCESSION',
+  }),
+  predecessorOrderNo: z.string().optional().openapi({
+    description: '权威上游检验单号（返工轮次时指向复检单）',
+    example: 'OQC-SH-20260923-9001',
+  }),
+  mrbNo: z.string().optional().openapi({ description: '相关 MRB 评审单号', example: 'MRB20260923-001' }),
 }).openapi('MandatoryGateCheckResponse');
 
 /**
- * 炉批号历史追溯带出结果 Schema
+ * 炉批号数据关联（docs/47）—— 溯源来源枚举。
+ *
+ * 与领域层 `HeatBatchTraceService` 的 `HEAT_TRACE_SOURCE_TYPES` 同源同值：
+ *   OUTSOURCE_HEAT_TREATMENT = L1 委外检验·热处理（OQC_HEAT）
+ *   IQC_RAW_MATERIAL         = L2 来料检验（IQC）
+ *   NONE                     = L3 两处均无记录（界面静默空态，不显示关联数据）
  */
-export const FurnaceHeatTraceResultSchema = z.object({
-  furnaceHeatNo: z.string().openapi({ description: '查询的炉批号' }),
-  matchSource: z.enum(['OUTSOURCE_HEAT_TREATMENT', 'IQC_RAW_MATERIAL', 'NONE']).openapi({ description: '匹配来源' }),
-  sourceOrderNo: z.string().optional().openapi({ description: '来源检验单号' }),
-  mechanicalData: z.array(z.object({
-    itemCode: z.string(),
-    name: z.string(),
-    measuredVal: z.number().optional(),
-    unit: z.string().optional(),
-    standardRequirement: z.string().optional(),
-  })).default([]).openapi({ description: '带出的机械性能数据项' }),
-  chemicalData: z.array(z.object({
-    element: z.string(),
-    elementName: z.string(),
-    measuredVal: z.number(),
-  })).default([]).openapi({ description: '带出的化学成分数据项' }),
-}).openapi('FurnaceHeatTraceResult');
+/**
+ * 炉批号历史追溯带出结果 Schema（**唯一一份**）。
+ *
+ * 历史教训（docs/47 D9）：本契约原先另有一份 `FurnaceHeatTraceResultSchema`
+ * （字段为 `furnaceHeatNo / matchSource / mechanicalData / chemicalData`），
+ * 与 `/inspections/heat-batch-trace` 实际返回体（`heatBatchNo / sourceType / inheritedItems`）
+ * 完全不是一套 —— 前端只能靠口头约定对齐。本轮收敛为**按真实返回体定义**的这一份，
+ * 旧 Schema 下线（禁止再出现两套字段口径）。
+ */
+export const FurnaceHeatTraceResponseSchema = z
+  .object({
+    heatBatchNo: z.string().openapi({
+      description: '被查询的炉批号（回显原值，非归一值）',
+      example: 'HT02-20231008-A',
+    }),
+    sourceType: HeatTraceSourceTypeEnum.openapi({
+      description: '关联来源：委外热处理 / 来料检验 / 无记录',
+    }),
+    matchScope: z.enum(['MATERIAL', 'GLOBAL']).openapi({
+      description:
+        '命中范围：MATERIAL = 同物料命中；GLOBAL = 跨物料命中（或未带物料编码），界面据此提示确认炉次归属',
+    }),
+    sourceOrderNo: z.string().optional().openapi({
+      description: '来源检验单号',
+      example: 'OQC-HT-20260705-0003',
+    }),
+    sourceOrderId: z.string().optional().openapi({ description: '来源检验单主键' }),
+    sourceMaterialCode: z.string().optional().openapi({
+      description: '源单物料编码（跨物料命中时供界面确认归属）',
+    }),
+    inspectedAt: z.string().optional().openapi({
+      description: '源单检验日期 / 终判时间（优先业务检验日期）',
+      example: '2026-07-05',
+    }),
+    inheritedItems: z
+      .array(
+        z.object({
+          itemCode: z.string(),
+          name: z.string(),
+          metricCategory: MetricCategoryEnum,
+          measuredVal: z.number().optional(),
+          measuredText: z.string().optional(),
+          unit: z.string().optional(),
+        })
+      )
+      .default([])
+      .openapi({
+        description:
+          '带出的历史实测项（白名单：力学性能 / 硬度 / 抗拉强度 / 化学成分；只带有实测值的项）',
+      }),
+    upstreamWarning: z
+      .object({
+        code: HeatTraceWarningCodeEnum,
+        orderNos: z.array(z.string()).openapi({
+          description: '命中的单据号（升序，最多 10 条）',
+        }),
+        message: z.string().openapi({
+          description: '中文可读提示，界面直接展示（不在前端二次拼文案）',
+        }),
+      })
+      .optional()
+      .openapi({
+        description:
+          '上游异常提示（TBD-01）：同一炉批号存在「不合格 / MRB 未结案 / 未终判」记录时给出，只提示不带值、不阻断；无异常时缺省',
+      }),
+  })
+  .openapi('FurnaceHeatTraceResponse');
+
+/**
+ * 检验单表头业务事实更新请求（`PATCH /inspections/{id}/header`）。
+ *
+ * 口径（docs/47 §4.6）：炉批号为关联锚点，服务端在写入时**重新解析**带出源并落
+ * `heat_source_type` / `heat_source_order_no` —— 请求体不接受客户端自称的溯源来源。
+ */
+export const UpdateInspectionHeaderRequestSchema = z.object({
+  furnaceHeatNo: z.string().max(64).optional().openapi({
+    description: '炉批号（Heat No）；落 inspection_orders.furnace_heat_batch_no，空串表示清空',
+    example: 'HT02-20231008-A',
+  }),
+  materialGrade: z.string().max(64).optional().openapi({ description: '材质牌号', example: 'ML40Cr' }),
+  techStandard: z.string().max(128).optional().openapi({
+    description: '执行产品技术标准',
+    example: 'GB/T 3098.1-2010',
+  }),
+  inspectedDate: z.string().max(32).optional().openapi({
+    description: '检验日期 YYYY-MM-DD',
+    example: '2026-09-23',
+  }),
+}).openapi('UpdateInspectionHeaderRequest');

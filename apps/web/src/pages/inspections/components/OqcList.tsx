@@ -4,10 +4,13 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { CertificatePrintModal } from '../../../components/certificate/CertificatePrintModal';
+import { DateInput } from '../../../components/common/DateInput';
 import { QualityCertificateData } from '../../../lib/inspectionTypes';
 import { buildOqcCertificateData } from '../../../lib/certificateDataService';
 import { loadCompanyProfile } from '../../../lib/companyProfile';
 import { api } from '../../../lib/api';
+import { TransferGateBadge } from '../../../components/common/TransferGateBadge';
+import type { TransferStateFields } from '../../../lib/transferGateFormat';
 
 export interface OqcItem {
   id: string;
@@ -39,6 +42,16 @@ export interface OqcItem {
   approvedAt?: string;
   rawStatus?: string;
   judgment?: string | null;
+  /**
+   * 「合格后传递」派生字段（docs/48 §4.6，服务端 `withTransferState` 回填）：
+   * canTransfer / transferCode / blockedBy / predecessorOrderNo / chainKey。
+   * 字段缺失 = 服务端未下发判定（**不等于「允许」**），徽标据此显示 —。
+   */
+  canTransfer?: boolean | null;
+  transferCode?: string | null;
+  predecessorOrderNo?: string | null;
+  chainKey?: string | null;
+  blockedBy?: TransferStateFields['blockedBy'];
 }
 
 
@@ -75,6 +88,7 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
   const [salesOrderNoQuery, setSalesOrderNoQuery] = useState('');
   const [customerQuery, setCustomerQuery] = useState('');
   const [orderNoQuery, setOrderNoQuery] = useState('');
+  const [heatNoQuery, setHeatNoQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('全部');
   const [dateFilter, setDateFilter] = useState('');
 
@@ -83,12 +97,14 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
     salesOrderNo: string;
     customerName: string;
     salesOrderPoNo: string;
+    furnaceHeatNo: string;
     dispatchDate: string;
     status: string;
   }>({
     salesOrderNo: '',
     customerName: '',
     salesOrderPoNo: '',
+    furnaceHeatNo: '',
     dispatchDate: '',
     status: '全部',
   });
@@ -111,6 +127,8 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
         salesOrderNo: appliedFilters.salesOrderNo || undefined,
         customerName: appliedFilters.customerName || undefined,
         salesOrderPoNo: appliedFilters.salesOrderPoNo || undefined,
+        // 炉批号筛选（docs/47 §4.2⑤ / P2）：后端按 furnace_heat_batch_no 模糊匹配
+        furnaceHeatNo: appliedFilters.furnaceHeatNo || undefined,
         dispatchDate: appliedFilters.dispatchDate || undefined,
       });
 
@@ -168,6 +186,12 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
             approvedAt: item.approvedAt || '',
             rawStatus: item.status,
             judgment: item.overallDecision,
+            // 传递派生字段原样透传，前端不做任何推导（docs/48 §2.1：规则在领域、执法在应用、其余只呈现）
+            canTransfer: item.canTransfer ?? null,
+            transferCode: item.transferCode ?? null,
+            predecessorOrderNo: item.predecessorOrderNo ?? null,
+            chainKey: item.chainKey ?? null,
+            blockedBy: item.blockedBy ?? null,
           };
         });
         setItems(mapped);
@@ -202,6 +226,7 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
       salesOrderNo: salesOrderNoQuery.trim(),
       customerName: customerQuery.trim(),
       salesOrderPoNo: orderNoQuery.trim(),
+      furnaceHeatNo: heatNoQuery.trim(),
       dispatchDate: dateFilter,
       status: statusFilter,
     });
@@ -211,12 +236,14 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
     setSalesOrderNoQuery('');
     setCustomerQuery('');
     setOrderNoQuery('');
+    setHeatNoQuery('');
     setStatusFilter('全部');
     setDateFilter('');
     setAppliedFilters({
       salesOrderNo: '',
       customerName: '',
       salesOrderPoNo: '',
+      furnaceHeatNo: '',
       dispatchDate: '',
       status: '全部',
     });
@@ -370,6 +397,16 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
           />
         </div>
         <div className="flex items-center gap-2">
+          <span className="text-slate-600 font-medium whitespace-nowrap">炉批号</span>
+          <input
+            type="text"
+            placeholder="Heat No"
+            value={heatNoQuery}
+            onChange={(e) => setHeatNoQuery(e.target.value)}
+            className="w-36 px-3 py-1.5 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 text-slate-700 placeholder:text-slate-400 text-sm"
+          />
+        </div>
+        <div className="flex items-center gap-2">
           <span className="text-slate-600 font-medium whitespace-nowrap">检验状态</span>
           <select
             value={statusFilter}
@@ -389,11 +426,13 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
         </div>
         <div className="flex items-center gap-2">
           <span className="text-slate-600 font-medium whitespace-nowrap">单据日期</span>
-          <input
-            type="date"
+          <DateInput
+            wrapClassName="w-36"
+            placeholderClassName="text-sm"
+            placeholder="选择单据日期"
             value={dateFilter}
             onChange={(e) => setDateFilter(e.target.value)}
-            className="w-36 px-3 py-1.5 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 text-slate-700 text-sm bg-white"
+            className="px-3 py-1.5 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 text-slate-700 text-sm bg-white"
           />
         </div>
         <div className="flex items-center gap-2 ml-auto">
@@ -428,6 +467,7 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
                 <th className="py-4 px-4 text-left whitespace-nowrap">数量</th>
                 <th className="py-4 px-4 text-left whitespace-nowrap">ERP状态</th>
                 <th className="py-4 px-4 text-left whitespace-nowrap">检验状态</th>
+                <th className="py-4 px-4 text-left whitespace-nowrap">传递</th>
                 <th className="py-4 px-4 text-left whitespace-nowrap">检验人</th>
                 <th className="py-4 px-6 text-left whitespace-nowrap">操作</th>
               </tr>
@@ -440,7 +480,11 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
                     key={item.id}
                     onClick={() => setSelectedId(item.id)}
                     className={`cursor-pointer transition-colors ${
-                      isSelected ? 'bg-[#F0F4FF]' : 'bg-white hover:bg-slate-50/70'
+                      isSelected
+                        ? 'bg-[#F0F4FF]'
+                        : item.canTransfer === false
+                        ? 'bg-rose-50/40 hover:bg-rose-50/60'
+                        : 'bg-white hover:bg-slate-50/70'
                     }`}
                   >
                     {/* 检验单号 */}
@@ -535,6 +579,11 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
                           不合格
                         </span>
                       )}
+                    </td>
+
+                    {/* 传递（docs/48 §4.6）：本环节的上游是否已放行；文案与色板只翻译服务端判定码 */}
+                    <td className="py-5 px-4 whitespace-nowrap">
+                      <TransferGateBadge state={item} />
                     </td>
 
                     {/* 检验人 */}

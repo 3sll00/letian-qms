@@ -9,9 +9,21 @@ import {
   InspectionStatusEnum,
   ApproveInspectionOrderRequestSchema,
   FinalizeInspectionStatusRequestSchema,
+  FurnaceHeatTraceResponseSchema,
+  UpdateInspectionHeaderRequestSchema,
+  TransferPermitBatchRequestSchema,
+  TransferPermitBatchResponseSchema,
+  CreateTransferOverrideTicketRequestSchema,
+  ReviewTransferOverrideTicketRequestSchema,
+  BatchFreezeTerminatedChainsResponseSchema,
   type InspectionOrder,
+  type TransferPermitBatchRequest,
 } from '@letian/contracts';
-import { NotFoundError, ValidationFailedError } from '@letian/application';
+import {
+  NotFoundError,
+  ValidationFailedError,
+  transferPermitQueryOfOrder,
+} from '@letian/application';
 import type { ApiContainer } from '../container';
 import { operatorOf } from '../lib/operator';
 import {
@@ -67,6 +79,8 @@ const InspectionQuerySchema = z.object({
   dateFrom: z.string().regex(DATE_PATTERN, 'dateFrom 必须是 YYYY-MM-DD 格式').optional(),
   dateTo: z.string().regex(DATE_PATTERN, 'dateTo 必须是 YYYY-MM-DD 格式').optional(),
   batchNo: z.string().optional(),
+  /** 炉批号模糊匹配（出货检验台账「炉批号」筛选框，docs/47 §4.2⑤ / P2） */
+  furnaceHeatNo: z.string().optional(),
   /** 入库单号模糊匹配（来料检验台账「入库单号」列，006 字段扩展；迁移 021 起物理列为 inbound_no） */
   inboundNo: z.string().optional(),
   materialCode: z.string().optional(),
@@ -98,6 +112,11 @@ const InspectionQuerySchema = z.object({
   /** 出库日期精确匹配（YYYY-MM-DD，出货检验台账专用） */
   dispatchDate: z.string().optional(),
   erpStatus: z.string().optional(),
+  /**
+   * 是否回填「合格后传递」派生字段（canTransfer / transferCode / blockedBy / predecessorOrderNo，docs/48 §4.6）。
+   * 默认回填；显式传 `false` 可关闭（批量导出类脚本不需要门禁状态时省掉判定开销）。
+   */
+  withTransfer: z.enum(['true', 'false']).optional(),
 });
 
 const InspectionParamsSchema = z.object({
@@ -157,6 +176,66 @@ const INSPECTION_STATUS_OPTIONS: readonly string[] = [
   'COMPLETED',
 ];
 
+/**
+ * 给台账行补「合格后传递」派生字段（docs/48 §4.6）。
+ *
+ * 判定由领域纯函数给出（`CheckTransferPermitUseCase` = 唯一真相的**读侧**），控制器只做字段拼装：
+ *   - `canTransfer`  ：本单所在环节的传递许可（true = 上游已放行，或上游缺失按 TBD-01 放行）；
+ *   - `transferCode` ：理由码。`allowed=true` + `UPSTREAM_MISSING` 就是「放行但上游缺失」，
+ *                     界面据此显示缺失徽标 —— 只看布尔值会把「没查到上游」误当成「已放行」；
+ *   - `blockedBy`    ：被阻断时的结构化上游（code / stage / orderNo / status）；
+ *   - `predecessorOrderNo` / `chainKey`：权威上游单号与命中的锚点值。
+ *
+ * 一页最多 100 行，用 `executeBatch`（单事务内批量）而不是逐行调用：逐行 = 100 个事务。
+ */
+async function withTransferState(
+  container: ApiContainer,
+  rows: readonly InspectionOrder[]
+): Promise<InspectionOrder[]> {
+  if (rows.length === 0) {
+    return [...rows];
+  }
+  const permits = await container.useCases.checkTransferPermit.executeBatch(
+    rows.map((row) =>
+      transferPermitQueryOfOrder({
+        inspectionType: row.inspectionType,
+        batchNo: row.batchNo,
+        ...(row.materialCode !== undefined ? { materialCode: row.materialCode } : {}),
+        ...(row.furnaceHeatNo !== undefined ? { furnaceHeatNo: row.furnaceHeatNo } : {}),
+        ...(row.workOrderNo !== undefined ? { workOrderNo: row.workOrderNo } : {}),
+        orderNo: row.orderNo,
+      })
+    )
+  );
+
+  return rows.map((row, index) => {
+    const decision = permits[index]?.decision;
+    if (decision === undefined) {
+      return row;
+    }
+    const enriched: InspectionOrder = {
+      ...row,
+      canTransfer: decision.allowed,
+      transferCode: decision.code,
+      chainKey: decision.chainKey,
+      ...(decision.predecessorOrderNo !== undefined
+        ? { predecessorOrderNo: decision.predecessorOrderNo }
+        : {}),
+      ...(decision.allowed
+        ? {}
+        : {
+            blockedBy: {
+              code: decision.code,
+              stage: decision.precedentStage ?? decision.stage,
+              orderNo: decision.predecessorOrderNo ?? null,
+              status: decision.predecessorStatus ?? null,
+            },
+          }),
+    };
+    return enriched;
+  });
+}
+
 export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer }> = async (
   fastify,
   options
@@ -165,6 +244,12 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
   const orders = container.repositories.orders;
 
   // 查询炉批号溯源联动历史数据 (出货检验录入炉批号时调用)
+  //
+  //   口径唯一真相：docs/47 §3.2 ~ §3.4。三处此前错位，本轮一并修正（D4/D5/D6/D7/D8/D9）：
+  //   ① 关联键是 `furnace_heat_batch_no`（**不是** `batch_no`）—— 用 findByBatchNo 查炉批号
+  //      既查不到、又会把「碰巧同名」的批次号单据当成上游来源；
+  //   ② 查询走迁移 034 的**归一化生成列**，大小写 / 空格 / 全角空格 / 连字符差异视为同一炉批号；
+  //   ③ `materialCode` 真正参与匹配：先同物料，同物料无命中才放宽到跨物料并回 `matchScope = GLOBAL`。
   fastify.get(
     '/heat-batch-trace',
     {
@@ -172,17 +257,46 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
         querystring: z.object({
           heatBatchNo: z.string().min(1, '炉批号不能为空'),
           materialCode: z.string().optional(),
+          /**
+           * 正在编辑的本单 id：从「上游异常提示」（TBD-01）候选里**排除自己**。
+           *
+           * 本单自身通常处于 `INSPECTING`（正在录入），若不排除，任何一次查询都会把
+           * 自己判成「上游存在尚未终判的检验记录」，在同一炉号上给出假提示
+           * （组③ 这类"上游两处均无"的演示单会凭空冒出 Banner，直接违背 AC-04 的静默空态）。
+           */
+          excludeOrderId: z.string().optional(),
         }),
       },
     },
     async (request, reply) => {
-      const query = request.query as { heatBatchNo: string; materialCode?: string };
-      const matchedOrders = await orders.findByBatchNo(query.heatBatchNo);
+      const query = request.query as {
+        heatBatchNo: string;
+        materialCode?: string;
+        excludeOrderId?: string;
+      };
+      const materialCode =
+        query.materialCode !== undefined && query.materialCode.trim() !== ''
+          ? query.materialCode
+          : undefined;
+
+      // 仓储侧**不按物料过滤**：物料维度由领域服务分层处理（先同物料 → 同物料无命中才跨物料并标 GLOBAL，
+      // 见 docs/47 §3.4 / AC-10）。在 SQL 就把跨物料行滤掉会让「跨物料命中」永远不可达。
+      const matchedOrders = await orders.findByFurnaceHeatNo(query.heatBatchNo);
+      const excludeOrderId = query.excludeOrderId?.trim() ?? '';
+      const scopedOrders =
+        excludeOrderId === ''
+          ? matchedOrders
+          : matchedOrders.filter((order) => order.id !== excludeOrderId);
       const traceResult = HeatBatchTraceService.resolveHeatBatchData({
         heatBatchNo: query.heatBatchNo,
-        historicalOrders: matchedOrders,
+        ...(materialCode !== undefined ? { materialCode } : {}),
+        historicalOrders: scopedOrders,
       });
-      return reply.status(200).send(traceResult);
+
+      // 契约校验后再下发：字段口径一旦与 FurnaceHeatTraceResponseSchema 分叉，
+      // 在服务端就报错（而不是让前端拿到一个「看起来能用」的漂移体）。
+      // 白名单三类指标均在 MetricCategoryEnum 内，正常情况下不会触发校验失败。
+      return reply.status(200).send(FurnaceHeatTraceResponseSchema.parse(traceResult));
     }
   );
 
@@ -244,6 +358,7 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
         ...(query.dateTo !== undefined ? { dateTo: query.dateTo } : {}),
         ...(query.partner !== undefined ? { partnerKeyword: query.partner } : {}),
         ...(query.batchNo !== undefined ? { batchNo: query.batchNo } : {}),
+        ...(query.furnaceHeatNo !== undefined ? { furnaceHeatNo: query.furnaceHeatNo } : {}),
         ...(query.inboundNo !== undefined ? { inboundNo: query.inboundNo } : {}),
         ...(query.materialCode !== undefined ? { materialCode: query.materialCode } : {}),
         ...(query.outsourceNo !== undefined ? { outsourceNo: query.outsourceNo } : {}),
@@ -266,13 +381,17 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
         ...(query.inspectionState !== undefined ? { inspectionState: query.inspectionState } : {}),
       });
 
+      // 「合格后传递」派生字段（docs/48 §4.6）：默认回填；withTransfer=false 时整页跳过判定
+      const items =
+        query.withTransfer === 'false' ? result.list : await withTransferState(container, result.list);
+
       return reply.status(200).send({
         total: result.total,
         page: query.page,
         pageSize: query.pageSize,
-        items: result.list,
+        items,
         // 兼容别名：早期契约消费方使用 list，与 items 指向同一份当页数据
-        list: result.list,
+        list: items,
         statusCounts: result.statusCounts,
       });
     }
@@ -355,6 +474,10 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
           ...(body.materialGrade !== undefined ? { materialGrade: body.materialGrade } : {}),
           ...(body.techStandard !== undefined ? { techStandard: body.techStandard } : {}),
           ...(body.inspectedDate !== undefined ? { inspectedDate: body.inspectedDate } : {}),
+          // 炉批号（Heat No，docs/47 §3.1 / §4.6）：契约早已声明 CreateInspectionOrderRequest.furnaceHeatNo，
+          // 建单即落 inspection_orders.furnace_heat_batch_no —— 与 006/008/030 同型，
+          // 控制器不透传则「界面上填了炉号、提交后库里仍然为空」（D1/D2）。
+          ...(body.furnaceHeatNo !== undefined ? { furnaceHeatNo: body.furnaceHeatNo } : {}),
           // 台账「检验人」列（inspection_orders.inspector_id / inspector_name）：契约早已声明 inspectorName，
           // 但此前控制器两条都没透传，建单传入的检验人被静默丢弃 -> 台账「检验人」恒为 --（见 docs/30 §3）
           ...(body.inspectorId !== undefined ? { inspectorId: body.inspectorId } : {}),
@@ -375,13 +498,143 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
             ...(body.processStep !== undefined ? { processStep: body.processStep } : {}),
             ...(body.completedAt !== undefined ? { completedAt: body.completedAt } : {}),
           },
+          // 传递门禁特批豁免凭据（docs/48 §8 P2）：契约早已声明 transferOverride，但此前控制器未透传
+          // —— 与 006/008/030 同型缺陷：APPROVED 豁免工单号传了也被静默丢弃，建单仍按 422 阻断（探针 AC-P2-05）。
+          ...(body.transferOverride !== undefined ? { transferOverride: body.transferOverride } : {}),
           operatorId: operator.userId,
           operatorName: operator.userName,
         },
         securityCtx
       );
 
-      return reply.status(201).send(order);
+      // 「合格后传递」判定回吐（docs/48 §4.6）：建单成功后把本次闸门判定随单返回，
+      // 调用方（MES / 前端 / 验收脚本）不必再发一次查询就能知道这张单「凭什么被放行」：
+      // UPSTREAM_PASSED（上游合格）/ UPSTREAM_CONCESSION（特采受限放行）/
+      // UPSTREAM_REWORK_PASSED（返工复检合格）/ UPSTREAM_MISSING（上游缺失，按 TBD-01 放行留痕）。
+      //
+      // 为什么用 try/catch 包住：单据此时**已提交**，这里只是读侧补充信息；
+      // 若判定查询失败就抛 500，会让调用方以为建单失败而重试，反而制造重复单据。
+      try {
+        const permit = await container.useCases.checkTransferPermit.execute(
+          transferPermitQueryOfOrder({
+            inspectionType: order.inspectionType,
+            batchNo: order.batchNo,
+            ...(order.materialCode !== undefined ? { materialCode: order.materialCode } : {}),
+            ...(order.furnaceHeatNo !== undefined ? { furnaceHeatNo: order.furnaceHeatNo } : {}),
+            ...(order.workOrderNo !== undefined ? { workOrderNo: order.workOrderNo } : {}),
+            orderNo: order.orderNo,
+          })
+        );
+        return reply.status(201).send({ ...order, transferDecision: permit.decision });
+      } catch {
+        return reply.status(201).send(order);
+      }
+    }
+  );
+
+  // 2.5 「合格后传递」传递许可批量预览（docs/48 §4.6）
+  //
+  //   纯读接口：不写审计、不写 Outbox、不加排他锁 —— 供列表页 / 看板 / 建单前预览 / MES 关卡共用。
+  //   接口本身**不执法**（执法在建单用例与放行关卡），因此这里绝不因「不允许」返回 4xx：
+  //   预览要回答的是「能不能传、被谁挡的」，阻断语义由调用方按 decision.code 自行处理。
+  fastify.post(
+    '/transfer-permits',
+    {
+      schema: {
+        body: TransferPermitBatchRequestSchema,
+      },
+    },
+    async (request, reply) => {
+      const body = request.body as TransferPermitBatchRequest;
+      const permits = await container.useCases.checkTransferPermit.executeBatch(
+        body.items.map((item) => ({
+          inspectionType: item.inspectionType,
+          batchNo: item.batchNo,
+          ...(item.materialCode !== undefined ? { materialCode: item.materialCode } : {}),
+          ...(item.furnaceHeatNo !== undefined ? { furnaceHeatNo: item.furnaceHeatNo } : {}),
+          ...(item.workOrderNo !== undefined ? { workOrderNo: item.workOrderNo } : {}),
+          ...(item.orderNo !== undefined ? { orderNo: item.orderNo } : {}),
+        }))
+      );
+
+      // 契约校验后再下发：判定字段一旦与 TransferDecisionSchema 分叉，在服务端就报错，
+      // 而不是让前端拿到一个「看起来能用」的漂移体（与 /heat-batch-trace 同一纪律）。
+      return reply.status(200).send(TransferPermitBatchResponseSchema.parse({ items: permits }));
+    }
+  );
+
+  // 2.6 特批豁免工单：提报申请（docs/48 §4.4、TBD-09）
+  fastify.post(
+    '/transfer-overrides/tickets',
+    async (request, reply) => {
+      const body = CreateTransferOverrideTicketRequestSchema.parse(request.body);
+      const operator = operatorOf(request);
+      const securityCtx = await buildRequestSecurityContext(request, container);
+      const ticket = await container.useCases.createTransferOverrideTicket.execute(
+        {
+          ...body,
+          applicantId: operator.userId,
+          applicantName: operator.userName,
+        },
+        securityCtx
+      );
+      return reply.status(201).send(ticket);
+    }
+  );
+
+  // 2.7 特批豁免工单：列表查询
+  fastify.get(
+    '/transfer-overrides/tickets',
+    async (request, reply) => {
+      const query = request.query as any;
+      const result = await container.useCases.listTransferOverrideTickets.execute({
+        batchNo: query?.batchNo,
+        status: query?.status,
+        page: query?.page ? Number(query.page) : 1,
+        pageSize: query?.pageSize ? Number(query.pageSize) : 20,
+      });
+      return reply.status(200).send(result);
+    }
+  );
+
+  // 2.8 特批豁免工单：审批流（APPROVED / REJECTED）
+  fastify.post(
+    '/transfer-overrides/tickets/:ticketNo/review',
+    async (request, reply) => {
+      const { ticketNo } = request.params as { ticketNo: string };
+      const body = ReviewTransferOverrideTicketRequestSchema.parse(request.body);
+      const operator = operatorOf(request);
+      const securityCtx = await buildRequestSecurityContext(request, container);
+      assertQualityApprover(operator);
+      const ticket = await container.useCases.reviewTransferOverrideTicket.execute(
+        ticketNo,
+        {
+          action: body.action,
+          reviewNotes: body.reviewNotes,
+          approvalDocNo: body.approvalDocNo,
+          reviewerId: operator.userId,
+          reviewerName: operator.userName,
+        },
+        securityCtx
+      );
+      return reply.status(200).send(ticket);
+    }
+  );
+
+  // 2.9 下游终止链路安全冻结批处理（docs/48 §5.3、TBD-06）
+  fastify.post(
+    '/batch-freeze-terminated-chains',
+    async (request, reply) => {
+      const body = (request.body ?? {}) as any;
+      const securityCtx = await buildRequestSecurityContext(request, container);
+      const result = await container.useCases.batchFreezeTerminatedChains.execute(
+        {
+          batchNo: body?.batchNo,
+          dryRun: body?.dryRun,
+        },
+        securityCtx
+      );
+      return reply.status(200).send(BatchFreezeTerminatedChainsResponseSchema.parse(result));
     }
   );
 
@@ -455,13 +708,32 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
         orderId: id,
         // 逐个字段条件展开：契约解析结果是 `T | undefined`，而命令行类型开启
         // exactOptionalPropertyTypes，必须省略 undefined 才能通过类型检查
-        items: body.items.map((item) => ({
-          itemCode: item.itemCode,
-          ...(item.measuredVal !== undefined ? { measuredVal: item.measuredVal } : {}),
-          ...(item.measuredText !== undefined ? { measuredText: item.measuredText } : {}),
-          ...(item.defectReason !== undefined ? { defectReason: item.defectReason } : {}),
-          ...(item.remark !== undefined ? { remark: item.remark } : {}),
-        })),
+        items: body.items.map((item) => {
+          // 炉批号继承留痕（docs/47 §3.6 / D10）：契约接受三个等价别名的「带出原值」，
+          // 与两个别名的「修改原因」—— 在这里归一到领域参数（inheritedHeatValue / modificationReason），
+          // 下游用例与聚合根只认一份口径。此前整段被丢弃，带出项落库后来源不可考。
+          const inheritedHeatValue =
+            item.originalInheritedValue ?? item.inheritedHeatValue ?? item.inheritedValue;
+          const modificationReason = item.modificationReason ?? item.modifiedReason;
+          return {
+            itemCode: item.itemCode,
+            ...(item.measuredVal !== undefined ? { measuredVal: item.measuredVal } : {}),
+            ...(item.measuredText !== undefined ? { measuredText: item.measuredText } : {}),
+            ...(item.defectReason !== undefined ? { defectReason: item.defectReason } : {}),
+            ...(item.remark !== undefined ? { remark: item.remark } : {}),
+            ...(item.inheritedFrom !== undefined ? { inheritedFrom: item.inheritedFrom } : {}),
+            ...(inheritedHeatValue !== undefined ? { inheritedHeatValue } : {}),
+            ...(item.isManuallyModified !== undefined
+              ? { isManuallyModified: item.isManuallyModified }
+              : {}),
+            ...(modificationReason !== undefined ? { modificationReason } : {}),
+          };
+        }),
+        // 检验员填写的合格 / 不合格数量随判定一并落库（docs/21 §14）。契约里本就有这两栏，
+        // 此前控制器没往下透传，于是「判定即建单」的 MRB 只能取到领域派生兜底值 ——
+        // 首次判定时该值恒等于整批抽样数，页面上看起来就是「不合格数量 = 检测数」。
+        ...(body.passQty !== undefined ? { passQty: body.passQty } : {}),
+        ...(body.failQty !== undefined ? { failQty: body.failQty } : {}),
         operatorId: operator.userId,
         operatorName: operator.userName,
       };
@@ -470,6 +742,62 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
       const updated: InspectionOrder = body.isDraft
         ? await container.useCases.saveInspectionDraft.execute(command, securityCtx)
         : await container.useCases.recordMeasurementsAndJudge.execute(command, securityCtx);
+
+      return reply.status(200).send(updated);
+    }
+  );
+
+  // 4.5 表头业务事实更新 (PATCH /:id/header)：炉批号 / 材质牌号 / 执行技术标准 / 检验日期
+  //
+  //   docs/47 §4.5 / §4.6 的写入口。此前出货检验表头**没有任何写路径**：录入人在界面上
+  //   填的炉号只进页面状态与证书，提交后既不落库、也无法被下游单据按炉批号关联（D1）。
+  //
+  //   两条信任边界：
+  //   ① 溯源留痕（heat_source_type / heat_source_order_no）由用例**在服务端重新解析**，
+  //      请求体不接受客户端自称的带出源（与「签核人取自会话」同一条口径）；
+  //   ② PBAC 仍然按单据可访问性核验（与 GET /:id 同一判定），不因为「只改几个字段」而放宽。
+  fastify.patch(
+    '/:id/header',
+    {
+      schema: {
+        params: InspectionParamsSchema,
+        body: UpdateInspectionHeaderRequestSchema,
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params as z.infer<typeof InspectionParamsSchema>;
+      const body = request.body as z.infer<typeof UpdateInspectionHeaderRequestSchema>;
+      const operator = operatorOf(request);
+      const securityCtx = await buildRequestSecurityContext(request, container);
+
+      const order = await orders.findById(id);
+      if (!order) {
+        throw new NotFoundError(`检验单不存在: ${id}`);
+      }
+
+      const material = await container.repositories.masterData.findMaterialByCode(order.materialCode);
+      const categoryCode = material?.categoryCode ?? 'STANDARD_PARTS';
+
+      securityCtx.assertAccess({
+        targetCategory: categoryCode,
+        targetMaterialCode: order.materialCode,
+        ...(order.supplierCode !== undefined ? { targetSupplierCode: order.supplierCode } : {}),
+        operationName: '更新检验单炉批号表头字段',
+      });
+
+      // 逐字段条件展开：exactOptionalPropertyTypes 下不能显式传 undefined
+      const updated = await container.useCases.updateInspectionHeatFields.execute(
+        {
+          orderId: id,
+          ...(body.furnaceHeatNo !== undefined ? { furnaceHeatNo: body.furnaceHeatNo } : {}),
+          ...(body.materialGrade !== undefined ? { materialGrade: body.materialGrade } : {}),
+          ...(body.techStandard !== undefined ? { techStandard: body.techStandard } : {}),
+          ...(body.inspectedDate !== undefined ? { inspectedDate: body.inspectedDate } : {}),
+          operatorId: operator.userId,
+          operatorName: operator.userName,
+        },
+        securityCtx
+      );
 
       return reply.status(200).send(updated);
     }
@@ -579,6 +907,91 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
 
       const updated = await orders.findById(id);
       return reply.status(200).send(updated);
+    }
+  );
+
+  /**
+   * 质量负责人豁免通道申请（TBD-09，036 审批流）
+   * POST /api/v1/inspections/transfer-overrides
+   */
+  fastify.post(
+    '/transfer-overrides',
+    async (request, reply) => {
+      const operator = operatorOf(request);
+      const body = request.body as any;
+      const result = await container.useCases.createTransferOverrideTicket.execute({
+        batchNo: body.batchNo,
+        materialCode: body.materialCode,
+        inspectionType: body.inspectionType,
+        ...(body.workOrderNo ? { workOrderNo: body.workOrderNo } : {}),
+        ...(body.furnaceHeatNo ? { furnaceHeatNo: body.furnaceHeatNo } : {}),
+        ...(body.upstreamOrderNo ? { upstreamOrderNo: body.upstreamOrderNo } : {}),
+        reason: body.reason,
+        applicantId: body.applicantId ?? operator.userId,
+        ...(body.applicantName ? { applicantName: body.applicantName } : { applicantName: operator.userName }),
+      });
+      return reply.status(201).send(result);
+    }
+  );
+
+  /**
+   * 质量主管审批豁免申请
+   * POST /api/v1/inspections/transfer-overrides/:id/review
+   */
+  fastify.post(
+    '/transfer-overrides/:id/review',
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const operator = operatorOf(request);
+      const body = request.body as any;
+      const result = await container.useCases.reviewTransferOverrideTicket.execute(id, {
+        action: body.action,
+        reviewerId: body.reviewerId ?? operator.userId,
+        ...(body.reviewerName ? { reviewerName: body.reviewerName } : { reviewerName: operator.userName }),
+        ...(body.reviewNotes ? { reviewNotes: body.reviewNotes } : {}),
+        ...(body.approvalDocNo ? { approvalDocNo: body.approvalDocNo } : {}),
+      });
+      return reply.status(200).send(result);
+    }
+  );
+
+  /**
+   * 豁免申请台账列表
+   * GET /api/v1/inspections/transfer-overrides
+   */
+  fastify.get(
+    '/transfer-overrides',
+    async (request, reply) => {
+      const query = request.query as any;
+      const result = await container.useCases.listTransferOverrideTickets.execute({
+        ...(query.batchNo ? { batchNo: query.batchNo } : {}),
+        ...(query.materialCode ? { materialCode: query.materialCode } : {}),
+        ...(query.status ? { status: query.status } : {}),
+        page: query.page ? Number(query.page) : 1,
+        pageSize: query.pageSize ? Number(query.pageSize) : 20,
+      });
+      return reply.status(200).send(result);
+    }
+  );
+
+  /**
+   * 链路终止的下游在制单据安全冻结批处理（TBD-06）
+   * POST /api/v1/inspections/batch-freeze-terminated
+   */
+  fastify.post(
+    '/batch-freeze-terminated',
+    async (request, reply) => {
+      const operator = operatorOf(request);
+      const body = (request.body as any) ?? {};
+      const securityCtx = await buildRequestSecurityContext(request, container);
+      const result = await container.useCases.batchFreezeTerminatedChains.execute(
+        {
+          ...(body.batchNo ? { batchNo: body.batchNo } : {}),
+          dryRun: body.dryRun === true,
+        },
+        securityCtx
+      );
+      return reply.status(200).send(BatchFreezeTerminatedChainsResponseSchema.parse(result));
     }
   );
 };

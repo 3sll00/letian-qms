@@ -2,8 +2,12 @@ import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { ApiContainer } from '../container';
 import { operatorOf } from '../lib/operator';
-import { NotFoundError } from '@letian/application';
+import { NotFoundError, ConflictError } from '@letian/application';
 import { ReviewFlowSchema } from '@letian/contracts';
+
+const ReviewFlowIdParamsSchema = z.object({
+  id: z.string().uuid('流程定义ID必须为有效的UUID'),
+});
 
 export const reviewFlowsController: FastifyPluginAsync<{ container: ApiContainer }> = async (
   fastify,
@@ -32,8 +36,8 @@ export const reviewFlowsController: FastifyPluginAsync<{ container: ApiContainer
   });
 
   // 3. 按 ID 获取单条流程
-  fastify.get('/:id', async (request, reply) => {
-    const { id } = request.params as { id: string };
+  fastify.get('/:id', { schema: { params: ReviewFlowIdParamsSchema } }, async (request, reply) => {
+    const { id } = request.params as z.infer<typeof ReviewFlowIdParamsSchema>;
     const flow = await repo.findById(id);
     if (!flow) {
       throw new NotFoundError(`流程定义不存在: ${id}`);
@@ -53,7 +57,16 @@ export const reviewFlowsController: FastifyPluginAsync<{ container: ApiContainer
       const flow = request.body as z.infer<typeof ReviewFlowSchema>;
       const operator = operatorOf(request);
 
-      await repo.save(flow);
+      try {
+        await repo.save(flow);
+      } catch (err) {
+        // save() 的 upsert 只挂 (flowCode, version) 约束；客户端自带 id 撞主键时
+        // PG 抛 23505，必须转 409 而非漏成 500
+        if ((err as { code?: string })?.code === '23505') {
+          throw new ConflictError(`评审流程定义冲突：id 已被占用或不满足唯一约束: ${flow.id ?? flow.flowCode}`);
+        }
+        throw err;
+      }
 
       await container.repositories.auditLogs.append({
         id: crypto.randomUUID(),
@@ -81,8 +94,8 @@ export const reviewFlowsController: FastifyPluginAsync<{ container: ApiContainer
   );
 
   // 5. 切换流程激活状态
-  fastify.post('/:id/toggle-active', async (request, reply) => {
-    const { id } = request.params as { id: string };
+  fastify.post('/:id/toggle-active', { schema: { params: ReviewFlowIdParamsSchema } }, async (request, reply) => {
+    const { id } = request.params as z.infer<typeof ReviewFlowIdParamsSchema>;
     const flow = await repo.findById(id);
     if (!flow) {
       throw new NotFoundError(`流程定义不存在: ${id}`);

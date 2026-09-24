@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { CertificatePrintModal } from '../../../components/certificate/CertificatePrintModal';
 import { PlanMatchBanner } from '../../../components/common/PlanMatchBanner';
+import { TransferGateBadge } from '../../../components/common/TransferGateBadge';
 import { buildIpqcCertificateData } from '../../../lib/certificateDataService';
 import type { QualityCertificateData } from '../../../lib/inspectionTypes';
 import { api, errorMessage } from '../../../lib/api';
@@ -129,6 +130,21 @@ interface InspectionItemData {
     unit?: string;
     result?: string;
   }>;
+  /**
+   * 「合格后传递」派生字段（docs/48 §4.6，服务端 `withTransferState` 回填）：
+   * canTransfer / transferCode / blockedBy / predecessorOrderNo / chainKey。
+   * 台账行由接口原样直出（本文件不做字段重映射），字段缺失 = 服务端未下发判定（不等于「允许」）。
+   */
+  canTransfer?: boolean | null;
+  transferCode?: string | null;
+  predecessorOrderNo?: string | null;
+  chainKey?: string | null;
+  blockedBy?: {
+    code?: string | null;
+    stage?: string | null;
+    orderNo?: string | null;
+    status?: string | null;
+  } | null;
 }
 
 /**
@@ -325,6 +341,13 @@ function buildIpqcLedgerColumns(sub: IpQcLedgerSub, handlers: IpQcLedgerHandlers
         const statusInfo = formatIpqcStatus(row.status);
         return <StatusBadge status={statusInfo.label} tone={statusInfo.tone} />;
       },
+    },
+    {
+      // 传递（docs/48 §4.6）：本环节的上游是否已放行 —— 徽标只翻译服务端判定码，前端不判定
+      key: 'transfer',
+      title: '传递',
+      tdClass: 'whitespace-nowrap',
+      render: (row) => <TransferGateBadge state={row} />,
     }
   );
 
@@ -622,6 +645,10 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
       if (measured.length > 0) {
         await api.post(`/inspections/${inspectingOrder.id}/submit-measurements`, {
           isDraft: false,
+          // 检验员填写的合格 / 不合格数量随判定一并下发（docs/21 §14）：不下发时服务端只能按抽样数
+          // 派生兜底，首次判定恰好等于整批抽样数，自动建单的 MRB 就会把「不合格数量」显示成检测数。
+          passQty: inspectPassQty,
+          failQty: inspectFailQty,
           items: measured.map((row) => {
             const numeric = row.planItem.dataType === 'NUMERIC' ? parseMeasuredNumber(row.actual) : undefined;
             return {
@@ -1331,7 +1358,12 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
                 </tr>
               ) : (
                 items.map((row) => (
-                  <tr key={row.id} className="hover:bg-slate-50/70 transition-colors">
+                  <tr
+                    key={row.id}
+                    className={`transition-colors ${
+                      row.canTransfer === false ? 'bg-rose-50/40 hover:bg-rose-50/60' : 'hover:bg-slate-50/70'
+                    }`}
+                  >
                     {bulkInspectEnabled && (
                       <td className={`${LEDGER_TD_CLASS} text-center`}>
                         <input

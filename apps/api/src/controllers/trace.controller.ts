@@ -1,6 +1,6 @@
 import { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import { TraceDirectionEnum } from '@letian/contracts';
+import { ChainStatusResponseSchema, TraceDirectionEnum } from '@letian/contracts';
 import type { ApiContainer } from '../container';
 import { operatorOf } from '../lib/operator';
 import {
@@ -37,6 +37,19 @@ const TraceBatchSearchQuerySchema = z.object({
 
 const TraceOrderParamsSchema = z.object({
   orderNo: z.string().min(1, '订单号不能为空'),
+});
+
+/**
+ * 看板「传递链状态」查询条件（docs/48 §4.6）。
+ *
+ * `batchNo` 是链路入口（追溯主键），`materialCode` 用于多物料混批时收窄到某一物料；
+ * `furnaceHeatNo` / `workOrderNo` 只在无批次号链路（锚点 A2/A3）时提供。
+ */
+const ChainStatusQuerySchema = z.object({
+  batchNo: z.string().min(1, '批次号不能为空'),
+  materialCode: z.string().min(1).optional(),
+  furnaceHeatNo: z.string().min(1).optional(),
+  workOrderNo: z.string().min(1).optional(),
 });
 
 /**
@@ -133,6 +146,45 @@ export const traceController: FastifyPluginAsync<{ container: ApiContainer }> = 
     }
   );
 
+  // 看板「传递链状态」：一次取回该链路各环节排序 + 每环节的传递判定（docs/48 §4.6 P1）。
+  // 静态路径 /chain-status 必须早于参数路径 /:batchNo 注册，避免被参数路由抢先匹配。
+  fastify.get(
+    '/chain-status',
+    {
+      schema: {
+        querystring: ChainStatusQuerySchema,
+      },
+    },
+    async (request, reply) => {
+      const query = request.query as z.infer<typeof ChainStatusQuerySchema>;
+      const operator = operatorOf(request);
+      const securityCtx = await buildRequestSecurityContext(request, container);
+
+      const status = await container.useCases.getChainStatus.execute(
+        {
+          batchNo: query.batchNo,
+          ...(query.materialCode !== undefined ? { materialCode: query.materialCode } : {}),
+          ...(query.furnaceHeatNo !== undefined ? { furnaceHeatNo: query.furnaceHeatNo } : {}),
+          ...(query.workOrderNo !== undefined ? { workOrderNo: query.workOrderNo } : {}),
+        },
+        securityCtx
+      );
+
+      logAuthorizationCheck(container, {
+        userId: operator.userId,
+        userName: operator.userName,
+        roleCode: operator.role,
+        resourceType: 'BATCH_TRACE',
+        resourceId: `chain-status:${query.batchNo}`,
+        action: 'READ',
+        decision: 'ALLOWED',
+        detail: `批次 [${query.batchNo}] 传递链状态查询成功：${status.stages.length} 个环节，总体状态 ${status.summary.state}`,
+      });
+
+      return reply.status(200).send(ChainStatusResponseSchema.parse(status));
+    }
+  );
+
   fastify.get(
     '/:batchNo',
     {
@@ -173,4 +225,10 @@ export const traceController: FastifyPluginAsync<{ container: ApiContainer }> = 
       return reply.status(200).send(graph);
     }
   );
+
+  // 4. 「合格后传递」传递链 KPI 聚合（docs/48 §6、docs/49 §11）
+  fastify.get('/transfer-kpis', async (_request, reply) => {
+    const kpis = await container.useCases.getTransferKpis.execute();
+    return reply.status(200).send(kpis);
+  });
 };

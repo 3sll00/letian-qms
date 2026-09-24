@@ -72,4 +72,17 @@ jobs:
         env:
           NODE_ENV: test
           DATABASE_URL: postgresql://letian_user:letian_secure_pass_2026@localhost:5432/letian_qms_db?schema=public
+          # MRB 不合格数量白盒对账（docs/49 §8.3）：豁免零容忍 —— 当前 0 豁免故设 0；
+          # 一旦出现豁免，先判定是数据问题还是口径问题，再决定是否放宽该阈值。
+          MRB_PARITY_EXEMPT_MAX: "0"
         run: pnpm test
+
+      - name: Run OpenAPI Contract Conformance Check
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://letian_user:letian_secure_pass_2026@localhost:5432/letian_qms_db?schema=public
+          # CI 空库设 0（允许 0 单空转，规格自检+离线可证伪性仍必跑）；有数据的库建议设 1
+          OPENAPI_CONFORMANCE_MIN_CASES: "0"
+          # 已知漂移登记上限：当前 1 处（KD-01 看板统计口径漂移），防止新漂移静默塞入
+          OPENAPI_KNOWN_DRIFT_MAX: "1"
+        run: pnpm verify:openapi

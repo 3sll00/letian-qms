@@ -8,11 +8,12 @@
     "build:mock": "tsc && vite build --mode mock",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "pnpm run validate:mocks && node scripts/verify-plan-snapshot.mjs && node scripts/verify-plan-version-actions.mjs && node scripts/verify-trace-format.mjs",
+    "test": "pnpm run validate:mocks && node scripts/verify-plan-snapshot.mjs && node scripts/verify-plan-version-actions.mjs && node scripts/verify-trace-format.mjs && node scripts/verify-transfer-format.mjs",
     "validate:mocks": "node --import tsx src/mocks/validate.ts",
     "verify:snapshot": "node scripts/verify-plan-snapshot.mjs",
     "verify:plan-versions": "node scripts/verify-plan-version-actions.mjs",
     "verify:trace-format": "node scripts/verify-trace-format.mjs",
+    "verify:transfer-format": "node scripts/verify-transfer-format.mjs",
     "dev:mock": "vite --mode mock"
   },
   "dependencies": {

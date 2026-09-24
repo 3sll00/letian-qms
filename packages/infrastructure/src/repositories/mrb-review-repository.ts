@@ -110,6 +110,20 @@ export class KyselyMRBReviewRepository implements IMRBReviewRepository {
     return row ? this.mapRow(row) : null;
   }
 
+  public async findTerminatedReviews(batchNo?: string): Promise<readonly MRBReview[]> {
+    let query = this.db
+      .selectFrom('mrbReviews')
+      .selectAll()
+      .where('disposition', 'in', ['SCRAP', 'RETURN_TO_VENDOR']);
+
+    if (batchNo !== undefined && batchNo !== '') {
+      query = query.where('batchNo', '=', batchNo);
+    }
+
+    const rows = await query.orderBy('updatedAt', 'desc').execute();
+    return rows.map((r) => this.mapRow(r));
+  }
+
   /**
    * 读侧投影：MRB 列表分页 + KPI 统计（仅用于 API 列表页）
    *
@@ -288,6 +302,29 @@ export class KyselyMRBReviewRepository implements IMRBReviewRepository {
       .executeTakeFirst();
 
     return row ? this.mapRow(row) : null;
+  }
+
+  /**
+   * 按来源检验单号**批量**取评审单（传递门禁专用，docs/48 §4.4）。
+   *
+   * 批量而非逐个：门禁一次要判定多个上游候选单（同环节多张单 + 多环节），逐个查询就是 N+1。
+   * 排序固定 `updated_at DESC`，调用方按 sourceOrderNo 取首条即「最新结论」——
+   * 同一来源单可能有多张评审单（返工再判不合格时按 TBD-05 新开），取最新是唯一正确口径。
+   */
+  public async findBySourceOrderNos(orderNos: readonly string[]): Promise<readonly MRBReview[]> {
+    const keys = [...new Set(orderNos.map((value) => value.trim()).filter((value) => value !== ''))];
+    if (keys.length === 0) {
+      return [];
+    }
+
+    const rows = await this.db
+      .selectFrom('mrbReviews')
+      .selectAll()
+      .where('sourceOrderNo', 'in', keys)
+      .orderBy('updatedAt', 'desc')
+      .execute();
+
+    return rows.map((row) => this.mapRow(row));
   }
 
   public async save(review: MRBReview): Promise<void> {

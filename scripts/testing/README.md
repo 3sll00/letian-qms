@@ -22,12 +22,15 @@ node scripts/testing/plan-match-ui-probe.cjs    # 质检方案匹配界面级验
 node scripts/testing/dev-mode-check.cjs         # 真库形态自检：当前前端到底是「真连后端写库」还是「离线 Mock 演示」（只读）
 node scripts/testing/erp-readonly-check.cjs     # ERP 只读静态门禁：还有没有旁路能直连 / 回写 ERP（只读）
 node scripts/testing/erp-sync-verify.cjs        # ERP -> QMS 只读同步端到端验收（真跑同步 + 对账 + 幂等，跑完自清）
+node scripts/testing/inspection-detail-probe.cjs # 检验单检视页方案快照渲染：正例 / 负例（真实库 + 真实页面 + 响应替身，只读）
+node scripts/testing/heat-batch-trace-verify.cjs # 出货检验炉批号溯源联动（服务端 41 条：AC-01~12 + TBD-01）
+node scripts/testing/oqc-heat-no-ui-verify.cjs    # 同链路的**界面级**验收（Banner / 清空回滚 / 回显，20 条，只读）
 ```
 
 前三个脚本需要后端 `:3100` 与前端 `:5200` 已启动；`mrb-wiring-verify.cjs` 需要**后端 API 已启动**（默认 `:3101`，
 用 `PORT=3101 pnpm --filter @letian/api run dev` 另起一个实例，勿指向常驻 `:3100`）且数据库已迁移到最新并执行过
 `pnpm db:seed`（脚本按演示数据断言，跑完会还原数据；自建来源单的验收行亦同批清理）。
-根脚本入口：`pnpm run verify:oqc` / `verify:inspections` / `verify:ipqc-ledger` / `verify:mrb` / `verify:mrb-wiring` / `verify:plan-match` / `verify:dev-mode` / `verify:outsource-no` / `verify:leftovers2` / `verify:leftovers2:mock` / `verify:erp-readonly` / `verify:erp-sync` / `verify:eol` / `audit:code`（另有 `pnpm db:recent` 速查最近落库行）。
+根脚本入口：`pnpm run verify:oqc` / `verify:inspections` / `verify:ipqc-ledger` / `verify:mrb` / `verify:mrb-wiring` / `verify:plan-match` / `verify:inspection-detail` / `verify:heat-trace` / `verify:oqc-heat-ui` / `verify:dev-mode` / `verify:outsource-no` / `verify:leftovers2` / `verify:leftovers2:mock` / `verify:erp-readonly` / `verify:erp-sync` / `verify:eol` / `audit:code`（另有 `pnpm db:recent` 速查最近落库行）。
 
 退出码 `0` = 通过，非 `0` = 存在 FAIL / 超预算（明细见输出与 `scripts/logs/`，该目录已 gitignore）。
 
@@ -252,11 +255,11 @@ MRB 不合格品处置、质量追溯看板、质检方案设计。
 
 | 脚本 | 环境 | 覆盖 | 断言数 | 是否写库 |
 |:---|:---|:---|:---|:---|
-| `leftovers2-probe.cjs` | 真实库 + API `:3100` + 前端 `:5200/:5201` | 企业档案 GET/PUT 与页面回执、签核 403/200 与落库与审计 append-only、IQC 提交回执、四处台账「证书」入口 + 缺失提示条、委外新建 + 物料编码回填 | 29 | **是** |
-| `leftovers2-mock-probe.cjs` | 离线 Mock（MSW）`dev:mock` `:5200`，不需要 API / 数据库 | `GET/PUT /master-data/company-profile`、`POST /inspections/:id/approve` 三条新增 Mock 路由在真实浏览器可用 | 4 | 否（只改浏览器内存） |
+| `leftovers2-probe.cjs` | 真实库 + API `:3100` + 前端 `:5200/:5201` | 企业档案接口口径（GET 已维护行 + 非法邮箱 400；**维护界面已于 2026-09-23 下线**，改为断言侧边栏无该菜单）、签核 403/200 与落库与审计 append-only、IQC 提交回执、四处台账「证书」入口 + 缺失提示条、委外新建 + 物料编码回填 | 20 | **是** |
+| `leftovers2-mock-probe.cjs` | 离线 Mock（MSW）`dev:mock` `:5200`，不需要 API / 数据库 | `GET /master-data/company-profile`、`POST /inspections/:id/approve` 两条 Mock 路由在真实浏览器可用 + 侧边栏无「企业档案 / ERP基础档案」入口 | 3 | 否（只改浏览器内存） |
 
 **为什么两个都要跑**：真实库探针证明「接口 + 物理列」打通，离线 Mock 探针证明「无后端时演示链路仍然可用」——
-本轮新增的三条路由正是 `docs/35` §11「同步面」要求 Mock 与真实实现同时存在的部分。缺任何一侧，
+`docs/35` §11「同步面」要求 Mock 与真实实现同时存在的两条路由（企业档案 GET、签核 POST）缺任何一侧，
 离线演示或真实环境就会单边失真。
 
 **启动方式（Mock 侧）**：必须让没有 mock 的接口打不到真实后端，否则真实 API 的 `401` 会触发前端安全登出，
@@ -269,7 +272,7 @@ $env:VITE_API_TARGET="http://127.0.0.1:5999"; pnpm --filter @letian/web run dev:
 探针在点击「进入系统」后会先确认已经进入应用（`<header>` 存在），否则以退出码 `3` 打印上述命令后退出，
 不接受「停在登录页但断言继续跑」的假结果。
 
-**复位纪律**：`leftovers2-probe.cjs` 会写库（企业档案字段、签核三列、提交回执），**跑完必须 `pnpm db:seed`**，
+**复位纪律**：`leftovers2-probe.cjs` 会写库（签核三列、提交回执、委外新建单），**跑完必须 `pnpm db:seed`**，
 否则下一次探针或演示会读到被改过的种子值；`leftovers2-mock-probe.cjs` 不写库，无需复位。
 
 **前置不可达时的行为**：两者都在启动浏览器前先探测前端端口，不可达时以退出码 `3` 直接 FATAL 退出并打印补救命令，
@@ -377,3 +380,190 @@ pnpm verify:eol            # 等价 node scripts/testing/eol-check.cjs
 端到端验收 `Ptype -> materials` 最小闭环：真跑 `pnpm erp:sync:ptype`（本地样例源，无需 ERP 连接）→ 逐字段对账 →
 幂等复跑 → 改源触发更新 → 校验 CLI 的只读审计行 → 清理测试行。实测 **8/8 PASS**（首轮 `inserted=3`；二次
 `unchanged=3` 且总行数不变；改源 `updated=1`；清理后残留 0）。**只碰 `material_code LIKE 'ERP-FIX-%'` 的测试行。**
+
+---
+
+# 九、检验单检视页（只读回看）方案快照渲染探针（`inspection-detail-probe.cjs`）
+
+回答「打开一张检验单的【检视与评定】，页面到底渲染的是**本单建单时固化的方案快照**，还是拿当前生效方案顶替 / 干脆空白」。
+根因、口径与修复工具见 `docs/46-演示检验单方案快照与指标行补齐设计.md`（数据级体检是 `pnpm db:demo:check`，本脚本是它的**界面级**对应物）。
+
+| 项 | 说明 |
+|:---|:---|
+| 入口 | `pnpm verify:inspection-detail`（或 `node scripts/testing/inspection-detail-probe.cjs`） |
+| 前置 | 后端 `:3100` + 前端 `:5200` 已启动；目标单 `INS-20260921-0001`（可用 `ORDER_NO=` 覆盖）在库且快照完整 |
+| 被测入口 | `陈静`（IQC 检验员）→【来料检验(IQC)】台账 → 目标行内【详情】（即"检视与评定"页 `IqcRecordForm.tsx`） |
+| 断言数 | 19 |
+| 是否写库 | **否**（只导航 + 读 DOM + 调只读接口 + 浏览器内响应替身） |
+
+## 两条用例
+
+| 用例 | 做法 | 判定 |
+|:---|:---|:---|
+| P1 正例 | 以 `陈静` 打开 `INS-20260921-0001` 的检视页 | 横幅 `data-status=ready`、`data-source=SNAPSHOT`、展示快照方案 `QP-IQC-304SS` v2.4、指标条「检验项总数 **4** 项」、三分区渲染 直径 / 抗拉强度 / 碳含量 / 表面粗糙度，且**不出现**「检验单方案快照加载失败」「清单未就绪」「无需录入」 |
+| P2 负例 | `Fetch.enable` + `Fetch.fulfillRequest` 把 `GET /inspections/{id}` 的响应体换成**空快照**形态（`planSnapshot: {}` + `items: []`，即裸 SQL 造数落下的形状）后重开检视页 | 横幅必走「检验单方案快照加载失败」、`data-status=error`、**不渲染任何指标行**（不拿当前方案顶替）、分区空态为「未就绪」3 处，且**不得**谎称「无需录入」 |
+
+**P2 为什么用响应替身**：修复后库里已不存在空快照的行，而「读侧遇到空快照会渲染成哪一支分支」这条**回归护栏**必须长期可重跑。
+替身只替换**响应字节**，不写库、不改接口 —— 验证的正是契约 fail-closed 分支：宁可显式报错，也不按结构不明的数据回看判定依据。
+
+## 输出
+
+| 文件 | 说明 |
+|:---|:---|
+| `inspection-detail-snapshot-fixed.png` | 修复后检视页（横幅「本单方案快照」+ 4 项待检指标） |
+| `inspection-detail-snapshot-missing.png` | 空快照分支（标题「检验单方案快照加载失败」+ 三分区「未就绪」空态） |
+| `inspection-detail-probe.log` | 逐条 PASS / FAIL 明细 |
+
+截图同时落在 `docs/screenshots/`（入库，作验收证据）与 `scripts/logs/`（已 gitignore）。
+
+退出码：`0` = 19 条断言全通过；`1` = 存在失败项或探针异常；`3` = 环境不可用（前后端未监听 / 浏览器起不来）。
+
+---
+
+# 十、炉批号关联链路验收（`heat-batch-trace-verify.cjs` / `oqc-heat-no-ui-verify.cjs`）
+
+出货检验「填炉批号 → 带出上游委外热处理 / 来料检验实测值」这条链路（口径与断链清单见 `docs/47`，**P0 + P1/P2 验收 = AC-01 ~ AC-13 全量**）。
+两个脚本一个验服务端、一个验界面：服务端能证明「数据对了」，但 AC-09（清空回滚）与 AC-11（回显 / 台账 / 留痕）的一半是**界面事实**，只能在实际渲染出来的 DOM 上验。
+另有集成测试 `apps/api/test/integration/heat-batch-trace-link.test.ts`（真实 PostgreSQL，8 场景：L1/L2/L3 三级链路、多命中取最近终判、跨物料 `GLOBAL`、FAILED 源单排除、`PATCH /header` 留痕、`inheritedFrom` 落库回读、契约逐字段校验），随 `pnpm --filter @letian/api test` 运行。
+
+```bash
+node scripts/testing/heat-batch-trace-verify.cjs   # 服务端：41 条
+node scripts/testing/oqc-heat-no-ui-verify.cjs     # 界面：20 条（无头 Chrome，CDP_PORT 可覆盖调试端口）
+```
+
+## 前置与演示数据
+
+| 项 | 内容 |
+|:---|:---|
+| 环境 | 后端 `:3100` + 前端 `:5200` 已启动；数据库已迁移到最新（含 `034`） |
+| 演示单 | `pnpm db:demo:heat-trace`（幂等）播种五组共 11 张 `TEST2609-` 演示单：组① `TEST-HT-2609-001`（`OQC_HEAT` ×3 + `IQC` ×1 + 出货目标单 + **MRB 未结案的 `OQC_HEAT`**）、组② `TEST-HT-2609-002`（仅 `IQC`）、组③ `TEST-HT-2609-003`（两处均无）、组④ `TEST-HT-2609-004`（**同炉不合格 `OQC_HEAT` + 出货目标单**，供 TBD-01 空态提示用）、组⑤ `OQC-SH-20260923-9005`（AC-08 `inheritedFrom` 留痕验收目标单，验收脚本写入带出标记、终判不落） |
+| 清理 | `pnpm db:test:purge`（默认 dry-run；`-- --yes` 先 `pg_dump` 备份再删，删后复查残留与真实行数）；收窄用 `-- --prefix=TEST2609-HT-` |
+| 是否写库 | `heat-batch-trace-verify` **是**（会 `PATCH` 一次表头并复位，不落终判）；`oqc-heat-no-ui-verify` **否**（只开录入页、填/清/回填炉号，从不点「提交」） |
+
+## 服务端断言（41 条）
+
+- AC-01：命中 `OQC_HEAT` → `sourceType = OUTSOURCE_HEAT_TREATMENT` + 源单号 + `matchScope = MATERIAL`；
+- AC-02：L1 命中时**不混入** L2（IQC）的指标项（`inheritedCodes = []` / `leaked = []`）；
+- AC-03：只有 `IQC` 时回退 L2，带出值**与源单逐项一致**（`CHE-002=1.035` / `TEN-002=1022` / `HAR-002=36.05`）；
+- AC-04：两处均无 → `NONE` 空态（HTTP 200、无值、不报错）；
+- AC-05：同炉批号 3 张 `OQC_HEAT` → 取**最近一次终判**那张（另两张必须排除）；
+- AC-06：4 种写法变体（大小写 / 前后空格 / 全角空格 / 纯空格）归一后命中**同一源单**；
+- AC-07：FAILED 源单不参与带出（`sourceOrderNo` 缺省，不得被引用为带出源）；
+- AC-08：`inheritedFrom` 真写入（组⑤目标单 PATCH 炉号 → 草稿暂存逐项带 `inheritedFrom` / `originalInheritedValue` / `isManuallyModified` → 重开回读断言落库，终判不落可复跑）；
+- AC-09：清空炉号 → 200、炉号与留痕一并归零、复位成功；
+- AC-10：跨物料命中 → `matchScope = GLOBAL` + `sourceMaterialCode` 回吐；对照项（同物料）仍为 `MATERIAL`；
+- AC-11：`PATCH /inspections/{id}/header` 落库 → 重开回显四字段 → 留痕 `heatSourceType` / `heatSourceOrderNo` 落库 → 台账行「炉号」列取真实字段（不回落 `batchNo`）；
+- AC-12：`GET /traceability/batches?batchNo={炉批号}` 命中演示批次（`furnace_heat_batch_no` 已入检索面）；
+- **TBD-01（同炉异常提示，6 条）**：组①（同炉有 MRB 未结案单）→ 带出照常 + `upstreamWarning.code = UPSTREAM_UNDER_MRB`，文案必须说明「数据来自最近终判合格的记录」；组④（同炉有不合格单）→ 空态 `NONE` + `UPSTREAM_FAILED` 提示且**不带任何值**；对照项证明「不带 `excludeOrderId` 会把本单自己判成上游未终判」——界面因此必须带本单 ID，排除后 AC-04 的静默空态不被污染。
+
+## 界面断言（20 条）
+
+- AC-11：目标单可从台账打开录入页、炉批号回显**库值**（与接口 `furnaceHeatNo` 逐字段相等）、Banner 显示「委外热处理」+ 源单号（修 D8「恒显示来料检验」；`srcLine` 正则同时认「已依据炉号…自动带入」与零带出分支「已按炉号…关联到前道工序检验记录」，两分支都回吐源单据号）、无「加载失败 / 不符合契约」横幅；
+- AC-09：清空炉号 → 输入框为空、Banner 消失、带出值与「已手动修改」计数清零；回填后 Banner 恢复；
+- AC-04：填上游无记录的炉号 → 界面静默空态（无 Banner、不报错）；
+- TBD-03：炉批号标签默认显示 ★（可配置开关 `VITE_OQC_HEAT_NO_REQUIRED` 的默认态，见 `docs/47` §9.2）；
+- **TBD-01（同炉异常提示，5 条）**：琥珀色提示条与蓝色带出 Banner **并存**（只提示、不阻断）；空态（组④）只出提示条、不出蓝色 Banner（提示 ≠ 带值）；两条文案分别带上真实命中单号 `OQC-HT-20260923-9104` / `OQC-HT-20260923-9105`；
+- 收尾自检：本次界面走查**未改动库中单据**（炉号与状态保持原值）。
+
+## 输出
+
+| 文件 | 说明 |
+|:---|:---|
+| `heat-batch-trace-verify.log` / `oqc-heat-no-ui-verify.log` | 逐条 PASS / FAIL 明细 |
+| `oqc-heat-ui-01-open.png` | 打开录入页：Banner「委外热处理 + 源单号」+ 回显炉号 + ★ |
+| `oqc-heat-ui-02-cleared.png` | 清空炉号后：Banner 消失、计数清零 |
+| `oqc-heat-ui-03-restored.png` | 回填炉号后：Banner 与联动恢复 |
+
+退出码：`0` = 全通过；`1` = 存在 FAIL；`2` = 探针异常 / 环境不可用。
+---
+
+# 十一、MRB「不合格数量」白盒断言（`mrb-defect-qty-verify.cjs`）
+
+`pnpm verify:mrb-defect-qty`（= `node scripts/testing/mrb-defect-qty-verify.cjs`，**只读，不写库**）。
+
+口径唯一真相见 `docs/21` §13.2 / §14.3 / §14.7：MRB 单与不合格台账的「不合格数量」**恒取源检验单的 `fail_qty`**，
+台账分母取**抽样数** `sample_qty`（不是报检总数，`docs/03` §2.3），比率随之重算。
+
+为什么单独一个脚本：这条不变式跨三张表（`mrb_reviews` / `pending_mrb_items` / `inspection_orders`），
+界面与接口各只看得到自己那一列；写路径一旦再次漂移（§14.2 的缺陷就是时序问题），页面上看不出来。
+
+| 断言 | 内容 |
+|:---|:---|
+| 基线 | 样本量 > 0（避免空库「假通过」） |
+| A | MRB 单 `defect_qty` = 源单 `fail_qty`（来源单已终判不合格且 `fail_qty > 0`），并给出覆盖率 |
+| B | 不合格台账 `defect_qty` = 源单 `fail_qty` 且 `total_qty` = 源单 `sample_qty`（分母口径） |
+| C | 无孤儿：每条 MRB / 台账都能按 `order_no` / `source_order_id` 命中源单 |
+| D | 比率自洽：`defect_rate ≈ round(fail_qty / sample_qty × 100, 4)` |
+| E | 可比性清单：来源单「未终判 / 未判不合格」的行无口径可派生，**必须显式列出**（默认提示；`--strict` 下失败） |
+| F | `--self-check` **变异自检**：事务内注入 5 处「口径被破坏」的假数据，A~D 必须变红，结束 `ROLLBACK`，库内零改动 |
+
+```bash
+pnpm verify:mrb-defect-qty              # 默认：A~D 必须全过，E 仅提示
+pnpm verify:mrb-defect-qty -- --strict   # E 非空即失败（用于客户验收 / 上线前）
+pnpm verify:mrb-defect-qty -- --self-check
+```
+
+退出码：`0` = 断言 A~D 全过；`1` = 存在违规（或 `--strict` 下 E 非空）；`2` = 用法 / IO / 连库失败。
+
+---
+
+# 十二、「合格后传递」链路门禁验收（`transfer-gate-verify.cjs`）
+
+`pnpm verify:transfer-gate`（需要后端 `:3100` + 真实库；**会写库，但只写 `GATE2609-` 前缀夹具**）。
+
+覆盖 `docs/48` §6 的验收用例 **AC-01 ~ AC-13、AC-16 ~ AC-19**（用户点名的这一批），
+判据只来自**真实 HTTP 响应 + 真实落库回读**：夹具用 SQL 直插构造上游状态，被测行为的**动作与判据全部走 API**，不绕过门禁。
+
+| 项 | 内容 |
+|:---|:---|
+| 夹具前缀 | `GATE2609-`（与演示批次 `TEST2609-` 完全隔离：互不覆盖、互不清理） |
+| 写库范围 | `inspection_orders` / `mrb_reviews` / `pending_mrb_items` / `batch_trace_nodes` / `audit_logs` / `outbox_events`，**全部带 `GATE2609-` 前缀**，收尾自动清理 |
+| 不触碰 | 不进/不改任何无前缀的真实行（`INS-*` / `IQC-*` / `OQC-*` 等） |
+
+关键断言（节选）：
+
+- **AC-01/02/05**：上游合格 / 不合格 / 检验中 / 上游缺失（TBD-01 放行 + `UPSTREAM_MISSING` 显式标记）；
+- **AC-06**：台账行同步下发 `canTransfer` / `transferCode` / `chainKey` / `blockedBy`（界面徽标据此渲染）；
+- **AC-07/08**：MRB 未结案阻断 → 让步接收**受限放行**（`permitEvidence.kind = MRB_CONCESSION` + `attachmentRequired = true`；授权件被清空后仍 422）；追溯节点由 `FAILED` 升 `CONCESSION`；
+- **AC-09/10/11/18**：返工 → 复检单不自锁（`-R{n}` 轮次）→ 复检未终判仍阻断 → 复检合格放行（`predecessorOrderNo` 指向**复检单**）→ 再判不合格一律不放行；源单随闭环归档 `COMPLETED`；
+- **AC-12/13**：退货 / 报废 → `422 CHAIN_TERMINATED` + `terminateChain = true`，下游已建未终判单**冻结不删除**（审计留痕 + Outbox `CHAIN_TERMINATED` 带 `frozenOrderNos`）；
+- **AC-16**：同批次同环节多张单取**最近一次终判**（与 `created_at` 升序无关），反转后结论随之反转；
+- **AC-17**：`GET /release-gates/{batchNo}` 与门禁**同源**：阻断 409 problem+json（`gate-failed` + `gateCode`）、放行 200（`releaseScope = STANDARD` / 特采 `CONCESSION`），且阻断审计不再随异常回滚；
+- **AC-19**：并发建单结论一致（同一理由码 + 同一上游单）、无部分写入、放行场景不撞号。
+
+退出码：`0` = 全通过；`1` = 存在 FAIL；`2` = 探针异常 / 环境不可用。
+日志：`scripts/logs/transfer-gate-verify.log`（如重定向保存）。
+---
+
+# 十三、看板「传递链状态」接口验收（`chain-status-verify.cjs`）
+
+`pnpm verify:chain-status`（需要后端 `:3100` + 演示集 `pnpm db:demo:heat-trace`；**只读，不写库**）。
+
+覆盖 `GET /api/v1/traceability/chain-status`（`docs/48` §4.6 P1 新增）的**契约形状 + 排序 + 口径一致性**：
+
+| 组 | 断言要点 |
+|:---|:---|
+| 契约 | 必填字段到位（`batchNo` / `anchor` / `stages` / `summary` / `generatedAt`）；`anchor.kind = BATCH`（批次入口） |
+| 排序 | `stages` 按工艺序位升序，且**逐环节独立复算**与 `stage-sequence.ts` 同源 |
+| **口径同源（核心）** | 同一张单，`chain-status.stages[].decision` 与台账行 `GET /inspections?orderNo=` 的 `canTransfer` / `transferCode` **逐字段一致** —— 两者漂移即「看板说能传、现场建单被拒」 |
+| 语义分离 | `state=BLOCKED` 必须对应环节**自身**判定码（`stateCode`，如 `UPSTREAM_FAILED`），`summary.blockedBy` 取同一码；**不得**下发「进入该环节的闸门码」（历史缺陷：`state=BLOCKED` 却给 `UPSTREAM_MISSING`） |
+| 状态 vs 闸门 | 出货单自身检验中 → `state=PENDING`，同时其闸门 `decision.allowed=true`（两个问题分别回答） |
+| 空态 / 校验 | 未知批次 → 200 + `stages=[]` + `summary.state=MISSING`；缺 `batchNo` → 400；无 token → 401 |
+
+退出码：`0` = 全通过；`1` = 存在 FAIL；`2` = 探针异常 / 环境不可用。
+
+# 十四、质量追溯看板「传递链闸门」界面级验收（oard-transfer-gate-ui-verify.cjs）
+
+`pnpm verify:board-transfer-gate`（需要前端 :5200 + 后端 :3100 + 本地 Chrome；**纯只读 DOM，不写库**）。
+
+基于 Chrome DevTools Protocol（CDP）对 http://127.0.0.1:5200 质量追溯看板进行无头走查，覆盖 4 类典型业务链路的**端到端渲染事实**：
+
+| 场景 | 批次 | 验证断言 |
+|:---|:---|:---|
+| **A. 放行态** | TEST2609-001 | 成功开图；顶栏呈现「传递链闸门（合格后传递）」区块；状态徽标「已放行」；展示 BATCH 锚点 |
+| **B. 阻断态** | TEST2609-020 | 顶栏呈现「传递链闸门」区块；状态徽标「已阻断」；汇总统计「阻断 1」 |
+| **C. 终止态** | TEST2609-018 | 呈现「整链已终止（MRB 退货 / 报废），下游禁止建单、已建单需冻结」红色告警；状态徽标「链路终止」 |
+| **D. 检验中态** | TEST2609-002 | 顶栏呈现「传递链闸门」区块；状态徽标「检验中」；汇总统计「检验中 1」 |
+
+退出码：  = 16/16 全通过；1 = 存在 FAIL；2 = CDP 异常 / 环境不可用。
+日志：scripts/logs/board-transfer-gate-ui-verify.log。

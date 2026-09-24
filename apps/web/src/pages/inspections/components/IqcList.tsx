@@ -1,10 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { RefreshCw, Search, RotateCcw, GitFork, X } from 'lucide-react';
 import { CertificatePrintModal } from '../../../components/certificate/CertificatePrintModal';
+import { DateInput } from '../../../components/common/DateInput';
 import { buildIqcCertificateData } from '../../../lib/certificateDataService';
 import { loadCompanyProfile } from '../../../lib/companyProfile';
 import type { QualityCertificateData } from '../../../lib/inspectionTypes';
 import { api } from '../../../lib/api';
+import { TransferGateBadge } from '../../../components/common/TransferGateBadge';
+import type { TransferStateFields } from '../../../lib/transferGateFormat';
 
 export interface IqcItem {
   id: string;
@@ -31,6 +34,16 @@ export interface IqcItem {
   approverName?: string;
   /** 签核时间（inspection_orders.approved_at） */
   approvedAt?: string;
+  /**
+   * 「合格后传递」派生字段（docs/48 §4.6，服务端 `withTransferState` 回填）：
+   * canTransfer / transferCode / blockedBy / predecessorOrderNo / chainKey。
+   * 字段缺失 = 服务端未下发判定（**不等于「允许」**），徽标据此显示 —。
+   */
+  canTransfer?: boolean | null;
+  transferCode?: string | null;
+  predecessorOrderNo?: string | null;
+  chainKey?: string | null;
+  blockedBy?: TransferStateFields['blockedBy'];
 }
 
 /**
@@ -69,6 +82,17 @@ interface InspectionOrderRow {
   items?: InspectionItemRow[];
   approverName?: string | null;
   approvedAt?: string | null;
+  /** 「合格后传递」派生字段（docs/48 §4.6，服务端 `withTransferState` 回填）：只读，前端不推导 */
+  canTransfer?: boolean | null;
+  transferCode?: string | null;
+  predecessorOrderNo?: string | null;
+  chainKey?: string | null;
+  blockedBy?: {
+    code?: string | null;
+    stage?: string | null;
+    orderNo?: string | null;
+    status?: string | null;
+  } | null;
 }
 
 /** 工单实测项：只声明证书组装会读取的字段，避免 any 泛滥（值域见 @letian/contracts InspectionItemSchema） */
@@ -284,6 +308,12 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
           items: Array.isArray(o.items) ? o.items : undefined,
           approverName: o.approverName !== undefined && o.approverName !== null ? String(o.approverName) : '',
           approvedAt: o.approvedAt !== undefined && o.approvedAt !== null ? String(o.approvedAt) : '',
+          // 传递派生字段原样透传，前端不做任何推导（docs/48 §2.1：规则在领域、执法在应用、其余只呈现）
+          canTransfer: o.canTransfer ?? null,
+          transferCode: o.transferCode ?? null,
+          predecessorOrderNo: o.predecessorOrderNo ?? null,
+          chainKey: o.chainKey ?? null,
+          blockedBy: o.blockedBy ?? null,
         };
       });
       setItems(mapped);
@@ -429,11 +459,12 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
 
           <div>
             <label className="block text-xs font-medium text-slate-500 mb-1">入库日期</label>
-            <input
-              type="date"
+            <DateInput
+              wrapClassName="w-full"
+              placeholder="选择入库日期"
               value={date}
               onChange={(e) => setDate(e.target.value)}
-              className="w-full px-3 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500"
+              className="px-3 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500"
             />
           </div>
         </div>
@@ -498,6 +529,7 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
                 <th className="py-3 px-4 font-normal">供应商</th>
                 <th className="py-3 px-4 font-normal">批次号</th>
                 <th className="py-3 px-4 font-normal text-center">检验状态</th>
+                <th className="py-3 px-4 font-normal">传递</th>
                 <th className="py-3 px-4 font-normal">检验人</th>
                 <th className="py-3 px-4 font-normal text-right pr-6">操作</th>
               </tr>
@@ -505,7 +537,7 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
             <tbody className="divide-y divide-slate-100">
               {pagedRows.length === 0 && (
                 <tr>
-                  <td colSpan={13} className="py-10 text-center text-slate-400">
+                  <td colSpan={14} className="py-10 text-center text-slate-400">
                     {loading ? '数据加载中…' : '没有符合条件的来料检验记录'}
                   </td>
                 </tr>
@@ -513,7 +545,9 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
               {pagedRows.map((item) => (
                 <tr
                   key={item.id}
-                  className="hover:bg-slate-50/60 transition-colors whitespace-nowrap"
+                  className={`transition-colors whitespace-nowrap ${
+                    item.canTransfer === false ? 'bg-rose-50/40 hover:bg-rose-50/60' : 'hover:bg-slate-50/60'
+                  }`}
                 >
                   <td className="py-3 px-4">
                     <input
@@ -565,11 +599,15 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
                   <td className="py-3 px-4 text-center">
                     {renderStatusBadge(item.status)}
                   </td>
-                  {/* 11. 检验人 */}
+                  {/* 11. 传递（docs/48 §4.6）：本环节的上游是否已放行；文案与色板只翻译服务端判定码 */}
+                  <td className="py-3 px-4">
+                    <TransferGateBadge state={item} />
+                  </td>
+                  {/* 12. 检验人 */}
                   <td className="py-3 px-4 text-slate-600">
                     {item.inspectorName}
                   </td>
-                  {/* 12. 操作 */}
+                  {/* 13. 操作 */}
                   <td className="py-3 px-4 text-right pr-6">
                     <div className="flex items-center justify-end gap-3 text-xs">
                       {item.status === '待检验' && (

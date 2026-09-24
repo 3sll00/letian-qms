@@ -153,6 +153,8 @@ export interface OrderListQuery {
   inspectionTypes?: readonly string[];
   status?: string;
   batchNo?: string;
+  /** 炉批号（furnace_heat_batch_no）模糊匹配：出货检验台账「炉批号」筛选框（docs/47 §4.2⑤ / P2） */
+  furnaceHeatNo?: string;
   materialCode?: string;
   /** 委外加工单号（ERP 委外工单号）模糊匹配 */
   outsourceNo?: string;
@@ -630,6 +632,11 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
       }
       if (query.batchNo !== undefined) {
         list.push(eb('batchNo', 'ilike', `%${escapeLike(query.batchNo)}%`));
+      }
+      // 炉批号筛选走原值列模糊匹配（与台账「炉号」列的显示口径一致）；
+      // 归一等值是 heat-batch-trace 关联键的事，台账筛选不按归一列收窄
+      if (query.furnaceHeatNo !== undefined && query.furnaceHeatNo !== '') {
+        list.push(eb('furnaceHeatBatchNo', 'ilike', `%${escapeLike(query.furnaceHeatNo)}%`));
       }
       if (query.materialCode !== undefined) {
         list.push(eb('materialCode', 'ilike', `%${escapeLike(query.materialCode)}%`));

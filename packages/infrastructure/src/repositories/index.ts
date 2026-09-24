@@ -13,3 +13,4 @@ export * from './authorization-log-repository.js';
 export * from './outbox-repository.js';
 export * from './integration-repository.js';
 export * from './dashboard-repository.js';
+export * from './transfer-override-repository.js';

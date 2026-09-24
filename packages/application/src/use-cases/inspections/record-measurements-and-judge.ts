@@ -19,6 +19,13 @@ export interface RecordMeasurementsAndJudgeCommand
     defectReason?: string;
     remark?: string;
     inspectorRemark?: string;
+    /** 炉批号继承来源标记（docs/47 §3.6）：带出 = 上游单据类型，人工填写 = MANUAL_ENTRY */
+    inheritedFrom?: 'OUTSOURCE_HEAT_TREATMENT' | 'IQC_RAW_MATERIAL' | 'MANUAL_ENTRY';
+    /** 带出时的原始历史值快照（人工修改前的带出值，用于留痕比对） */
+    inheritedHeatValue?: number | string;
+    /** 带出值是否被质检员手工修改过 */
+    isManuallyModified?: boolean;
+    modificationReason?: string;
   }>;
   overallRemark?: string;
   operatorId: string;
@@ -69,23 +76,43 @@ export class RecordMeasurementsAndJudgeUseCase {
 
       try {
         // 0. 首次录入实测值即代表"开始检验"：聚合根只允许 INSPECTING / DRAFT 录入，
-        //    而新建工单初始态是 PENDING，此处按状态机允许的 PENDING -> INSPECTING 边推进，
-        //    否则新建工单永远无法进入录入与判定流程。
-        if (order.getStatus() === 'PENDING') {
+        //    而未开检的工单有两种来路 —— 新建单初始态 PENDING，以及 MRB 返工回边后的
+        //    复检轮次 RE_INSPECTING（create-reinspection.ts 把源单翻成该态，见 docs/21 §11）。
+        //    两者都按状态机允许的边推进到 INSPECTING（PENDING / RE_INSPECTING -> INSPECTING），
+        //    否则 PENDING 单无法开检、RE_INSPECTING 单无法续录：台账「检验中」行的【继续】
+        //    会恒定报 ORDER_NOT_EDITABLE: 工单当前处于 [RE_INSPECTING] 状态，禁止录入或修改检验指标。
+        const currentStatus = order.getStatus();
+        if (currentStatus === 'PENDING' || currentStatus === 'RE_INSPECTING') {
           order.startInspection();
         }
 
         // 1. 编排批量录入实测值：逐个调用聚合根原子能力
+        //    继承留痕字段（inheritedFrom / 带出原值 / 手工修改标记）随实测值同一事务落库（docs/47 §3.6）
         for (const item of cmd.items) {
           order.recordItemMeasurement({
             itemCode: item.itemCode,
             ...(item.measuredVal !== undefined ? { measuredVal: item.measuredVal } : {}),
             ...(item.measuredText !== undefined ? { measuredText: item.measuredText } : {}),
+            ...(item.inheritedFrom !== undefined ? { inheritedFrom: item.inheritedFrom } : {}),
+            ...(item.inheritedHeatValue !== undefined
+              ? { inheritedHeatValue: item.inheritedHeatValue }
+              : {}),
+            ...(item.isManuallyModified !== undefined
+              ? { isManuallyModified: item.isManuallyModified }
+              : {}),
+            ...(item.modificationReason !== undefined
+              ? { modificationReason: item.modificationReason }
+              : {}),
           });
         }
 
-        // 2. 触发终检判定原子能力
-        order.submitAndEvaluate();
+        // 2. 触发终检判定原子能力：检验员填写的合格 / 不合格数量与判定**同事务**落库（docs/21 §14）。
+        //    不能只靠领域派生：首次判定时 `pass_qty` 尚未落地（恒 0），派生的 `failQty` 恒等于
+        //    整批抽样数 —— 判定即建单的 MRB 就会把「不合格数量」固化成检测数。未下发时仍按派生值兜底。
+        order.submitAndEvaluate({
+          ...(cmd.passQty !== undefined ? { passQty: cmd.passQty } : {}),
+          ...(cmd.failQty !== undefined ? { failQty: cmd.failQty } : {}),
+        });
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         throw new ApplicationError('JUDGEMENT_FAILED', msg, 400);

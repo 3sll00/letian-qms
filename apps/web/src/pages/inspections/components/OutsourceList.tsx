@@ -15,6 +15,8 @@ import { convertOutsourceToManufacturingCert } from '../../../lib/certificateDat
 import { ManufacturingCertData } from '../../../lib/inspectionTypes';
 import { api } from '../../../lib/api';
 import { loadCompanyProfile } from '../../../lib/companyProfile';
+import { TransferGateBadge } from '../../../components/common/TransferGateBadge';
+import type { TransferStateFields } from '../../../lib/transferGateFormat';
 
 interface OutsourceListProps {
   /** readOnly = true 表示只读回看（TBD-07）：走本单方案快照，而不是按物料匹配当前生效方案 */
@@ -55,6 +57,16 @@ export interface OutsourceListItem {
    */
   completedAt?: string;
   createdAt?: string;
+  /**
+   * 「合格后传递」派生字段（docs/48 §4.6，服务端 `withTransferState` 回填）：
+   * canTransfer / transferCode / blockedBy / predecessorOrderNo / chainKey。
+   * 字段缺失 = 服务端未下发判定（**不等于「允许」**），徽标据此显示 —。
+   */
+  canTransfer?: boolean | null;
+  transferCode?: string | null;
+  predecessorOrderNo?: string | null;
+  chainKey?: string | null;
+  blockedBy?: TransferStateFields['blockedBy'];
 }
 
 
@@ -108,6 +120,12 @@ interface OrderRow {
   inspectedDate?: string;
   /** 完成时间（inspection_orders.completed_at）：签发日期回落的第二档 */
   completedAt?: string | null;
+  /** 「合格后传递」派生字段（服务端回填，docs/48 §4.6）：字段缺失即未下发，不是「允许」 */
+  canTransfer?: boolean | null;
+  transferCode?: string | null;
+  predecessorOrderNo?: string | null;
+  chainKey?: string | null;
+  blockedBy?: TransferStateFields['blockedBy'];
 }
 
 export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initialTab }) => {
@@ -203,6 +221,12 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
           approverName: o.approverName || '',
           approvedAt: o.approvedAt || '',
           tabType: tab,
+          // 传递派生字段原样透传，前端不做任何推导（docs/48 §2.1：规则在领域、执法在应用、其余只呈现）
+          canTransfer: o.canTransfer ?? null,
+          transferCode: o.transferCode ?? null,
+          predecessorOrderNo: o.predecessorOrderNo ?? null,
+          chainKey: o.chainKey ?? null,
+          blockedBy: o.blockedBy ?? null,
         }));
         setRows(mapped);
         setRowTotal(res.total ?? mapped.length);
@@ -278,7 +302,10 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
         */}
         <button
           type="button"
-          onClick={() => onInspect({}, false)}
+          // 带上当前页签：表单按 `initialItem.tabType` 推导 inspectionType，
+          // 不带的话在「热处理」页点新建会建成 OQC_SF（表面处理）—— 建单类型与用户所在页不符，
+          // 传递门禁也会按错误环节判定（docs/48 §2.2 锚点与环节类型相关）。
+          onClick={() => onInspect({ tabType: tab }, false)}
           className="px-4 py-1.5 rounded bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 shadow-sm flex items-center gap-1.5 shrink-0"
         >
           <span aria-hidden="true">+</span> 新建委外检验单
@@ -412,6 +439,7 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
               <th className="py-3 px-4">加工商</th>
               <th className="py-3 px-4">回厂日期</th>
               <th className="py-3 px-4">状态</th>
+              <th className="py-3 px-4">传递</th>
               <th className="py-3 px-4">检验人</th>
               <th className="py-3 px-4">操作</th>
             </tr>
@@ -419,21 +447,26 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
           <tbody className="divide-y divide-slate-100 text-slate-700">
             {listLoading && (
               <tr>
-                <td colSpan={tab === 'surface' ? 11 : 10} className="py-10 text-center text-slate-400">
+                <td colSpan={tab === 'surface' ? 12 : 11} className="py-10 text-center text-slate-400">
                   加载中...
                 </td>
               </tr>
             )}
             {!listLoading && filteredList.length === 0 && (
               <tr>
-                <td colSpan={tab === 'surface' ? 11 : 10} className="py-10 text-center text-slate-400">
+                <td colSpan={tab === 'surface' ? 12 : 11} className="py-10 text-center text-slate-400">
                   暂无检验单数据
                 </td>
               </tr>
             )}
             {!listLoading &&
               filteredList.map((item) => (
-                <tr key={item.id} className="hover:bg-slate-50/60 transition-colors">
+                <tr
+                  key={item.id}
+                  className={`transition-colors ${
+                    item.canTransfer === false ? 'bg-rose-50/40 hover:bg-rose-50/60' : 'hover:bg-slate-50/60'
+                  }`}
+                >
                   <td className="py-3 px-4">
                     <span
                       onClick={() => onInspect({ ...item }, item.status !== '待检验' && item.status !== '检验中')}
@@ -485,6 +518,10 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
                     </span>
                   </td>
                   <td className="py-3 px-4 text-slate-600">{item.inspector}</td>
+                  {/* 传递（docs/48 §4.6）：本环节的上游是否已放行；文案与色板只翻译服务端判定码 */}
+                  <td className="py-3 px-4">
+                    <TransferGateBadge state={item} />
+                  </td>
                   <td className="py-3 px-4">
                     <div className="flex items-center gap-3">
                       {(item.status === '待检验' || item.status === '检验中') && (

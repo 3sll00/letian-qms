@@ -364,6 +364,45 @@ export function runDomainTests(): { total: number; passed: number } {
     assertThrows(() => order.startInspection(), /INVALID_INSPECTION_TRANSITION/, '终态后严禁重新开始检验');
   });
 
+  test('InspectionOrder: 检验员填写的合格 / 不合格数量覆盖派生值，非法值拒绝（docs/21 §14）', () => {
+    // 派生兜底：sampleQty 缺省 = min(batchQty 500, 13) = 13；一超差 -> FAILED -> 派生 failQty = 13
+    const derived = makeInspectingOrder();
+    derived.recordItemMeasurement({ itemCode: 'OD-01', measuredVal: 8.5 });
+    derived.submitAndEvaluate();
+    assert(derived.getFailQty() === 13, '未填写时按抽样数量派生兜底（首次判定恰等于抽样数，即页面上的检测数）');
+
+    // 填写值优先：抽样 13 里现场清点合格 9 / 不合格 4
+    const declared = makeInspectingOrder();
+    declared.recordItemMeasurement({ itemCode: 'OD-01', measuredVal: 8.5 });
+    assert(
+      declared.submitAndEvaluate({ passQty: 9, failQty: 4 }) === 'FAILED',
+      '超差仍须判 FAILED（填写数量不改变判定规则）'
+    );
+    assert(declared.getPassQty() === 9, '填写的合格数量必须覆盖派生值');
+    assert(declared.getFailQty() === 4, '填写的不合格数量必须覆盖派生值（不是抽样数 13）');
+
+    // 只给一栏：另一栏保持派生结果
+    const halfDeclared = makeInspectingOrder();
+    halfDeclared.recordItemMeasurement({ itemCode: 'OD-01', measuredVal: 8.5 });
+    halfDeclared.submitAndEvaluate({ failQty: 2 });
+    assert(halfDeclared.getFailQty() === 2, '只给不合格数量时应按填写值落库');
+    assert(halfDeclared.getPassQty() === 0, '未给合格数量时保持派生结果（首检派生 passQty 为 0）');
+
+    // 非法值 fail-closed：绝不静默改数
+    const invalid = makeInspectingOrder();
+    invalid.recordItemMeasurement({ itemCode: 'OD-01', measuredVal: 8.5 });
+    assertThrows(
+      () => invalid.submitAndEvaluate({ failQty: -1 }),
+      /ORDER_DECLARED_QTY_INVALID/,
+      '负数不合格数量必须拒绝'
+    );
+    assertThrows(
+      () => invalid.submitAndEvaluate({ passQty: Number.NaN }),
+      /ORDER_DECLARED_QTY_INVALID/,
+      '非有限数合格数量必须拒绝'
+    );
+  });
+
   test('InspectionOrder: 返工回边全生命周期 FAILED -> MRB -> RE_INSPECTING -> 重检合格 -> 结单', () => {
     const order = makeInspectingOrder();
     order.recordItemMeasurement({ itemCode: 'OD-01', measuredVal: 8.5 }); // 超差

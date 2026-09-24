@@ -153,7 +153,9 @@ export const reportTemplatesController: FastifyPluginAsync<{
             conclusion: (i.isExempt ? "EXEMPT" : (i.judgment === "FAILED" ? "FAILED" : "PASSED")) as "PASSED" | "FAILED" | "EXEMPT",
             unit: i.unit ?? "MPa",
             isManuallyModified: Boolean(i.isManuallyModified),
-            inheritedFrom: (i.inheritedFrom ?? "OUTSOURCE_HEAT_TREATMENT") as "OUTSOURCE_HEAT_TREATMENT",
+            // 继承来源只印真实留痕（docs/47 §3.6 / D10）：无来源即缺省，
+            // 不得再把缺失值硬编码成 OUTSOURCE_HEAT_TREATMENT —— 那会让证书谎称每行都从委外热处理带出。
+            ...(i.inheritedFrom !== undefined ? { inheritedFrom: i.inheritedFrom } : {}),
           }));
 
         const chemicalItems = items

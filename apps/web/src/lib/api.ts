@@ -256,7 +256,7 @@ async function parseErrorResponse(res: Response): Promise<ApiError> {
 }
 
 interface RequestOptions {
-  method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   path: string;
   query?: Record<string, string | number | undefined>;
   body?: unknown;
@@ -325,6 +325,10 @@ export const api = {
 
   put: <T>(path: string, body?: unknown) =>
     request<T>({ method: 'PUT', path, ...(body !== undefined ? { body } : {}) }),
+
+  /** PATCH：局部更新既有资源（如 PATCH /inspections/{id}/header 的炉批号表头字段） */
+  patch: <T>(path: string, body?: unknown) =>
+    request<T>({ method: 'PATCH', path, ...(body !== undefined ? { body } : {}) }),
 
   del: <T>(path: string) => request<T>({ method: 'DELETE', path }),
   postBlob: (path: string, body?: unknown) =>

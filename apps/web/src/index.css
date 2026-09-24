@@ -17,6 +17,30 @@ body {
   overflow-x: hidden;
 }
 
+/*
+ * 日期控件占位口径（见 apps/web/src/components/common/DateInput.tsx）：
+ * Chromium 原生日期控件在空值时会自绘 `yyyy-mm-dd` 灰字，而 placeholder 属性
+ * 对 input[type=date] 无效；这里把原生占位整段隐去，改由组件自绘中文占位。
+ * 聚焦时恢复颜色——此刻浏览器要把年 / 月 / 日分段渲染成可编辑字段，不能透明。
+ */
+input[type='date'].lt-date-input--empty::-webkit-datetime-edit,
+input[type='date'].lt-date-input--empty::-webkit-datetime-edit-fields-wrapper,
+input[type='date'].lt-date-input--empty::-webkit-datetime-edit-text,
+input[type='date'].lt-date-input--empty::-webkit-datetime-edit-year-field,
+input[type='date'].lt-date-input--empty::-webkit-datetime-edit-month-field,
+input[type='date'].lt-date-input--empty::-webkit-datetime-edit-day-field {
+  color: transparent;
+}
+
+input[type='date'].lt-date-input--empty:focus::-webkit-datetime-edit,
+input[type='date'].lt-date-input--empty:focus::-webkit-datetime-edit-fields-wrapper,
+input[type='date'].lt-date-input--empty:focus::-webkit-datetime-edit-text,
+input[type='date'].lt-date-input--empty:focus::-webkit-datetime-edit-year-field,
+input[type='date'].lt-date-input--empty:focus::-webkit-datetime-edit-month-field,
+input[type='date'].lt-date-input--empty:focus::-webkit-datetime-edit-day-field {
+  color: inherit;
+}
+
 /* Custom scrollbar */
 ::-webkit-scrollbar {
   width: 6px;

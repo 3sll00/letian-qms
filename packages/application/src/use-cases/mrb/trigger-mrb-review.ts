@@ -90,10 +90,11 @@ export async function triggerMrbReviewInTransaction(
     );
   }
 
-  // 幂等检查：是否已存在关联的 MRB 评审单
+  // 幂等检查：是否已存在关联的 MRB 评审单。复用分支同时按口径对齐「不合格数量」
+  // （见 alignMrbDefectQtyWithSourceOrder）：建单与终判分属两次调用，数量不能停留在建单那一刻的中间态。
   const existing = await ctx.mrbReviews.findByOrderNo(orderDTO.orderNo);
   if (existing) {
-    return existing;
+    return await alignMrbDefectQtyWithSourceOrder(ctx, existing, orderDTO);
   }
 
   // 锁定批次，防止进入下一工序
@@ -201,4 +202,38 @@ export async function triggerMrbReviewInTransaction(
   });
 
   return mrbRecord;
+}
+
+/**
+ * 幂等复用既有 MRB 单时，把「不合格数量」对齐到源检验单的 `fail_qty`（docs/21 §13.2 唯一口径）。
+ *
+ * 为什么必须在复用分支做这件事：口径本身是「MRB 不合格数量 = 源单 `fail_qty`（= 检验员填写的不合格数）」，
+ * 但**建单与数量落地分属两次调用** —— 录入弹窗先 `POST /inspections/:id/submit-measurements`
+ * （判定即建单，此刻填写值还没随 `POST /inspections/:id/status` 落库，读到的 `fail_qty` 可能是领域
+ * 派生的兜底值：首次判定时恒等于整批抽样数），再 `POST /status` 把填写值写进检验单。
+ * 建单在前、填写值在后，于是 MRB 单会把**检测数**固化成「不合格数量」，用户实测即为此现象（docs/21 §14）。
+ *
+ * 对齐规则：源单 `fail_qty > 0`（视为检验员已填写）且与单据现值不一致时以源单为准；
+ * `fail_qty = 0` 视为尚未填写 —— 此时保留既有值，绝不把单据回退成 0。
+ *
+ * 两个复用入口都要走这里：`triggerMrbReviewInTransaction` 自身的幂等分支，以及
+ * `autoInitiateMrbReview` 的「先查后建」分支（终判 / 录入用例的实际入口，漏掉它订正就不会发生）。
+ */
+export async function alignMrbDefectQtyWithSourceOrder(
+  ctx: IUnitOfWorkContext,
+  existing: MRBReviewDTO,
+  order: { failQty?: number | undefined }
+): Promise<MRBReviewDTO> {
+  const failQty = Number(order.failQty ?? 0);
+  if (!(failQty > 0) || existing.defectQty === failQty) {
+    return existing;
+  }
+
+  const aligned: MRBReviewDTO = {
+    ...existing,
+    defectQty: failQty,
+    updatedAt: new Date().toISOString(),
+  };
+  await ctx.mrbReviews.save(aligned);
+  return aligned;
 }

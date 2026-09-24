@@ -6,13 +6,14 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b --force",
-    "test": "tsx src/__tests__/state-machine.test.ts && tsx src/__tests__/evaluate-inspection-item.test.ts && tsx src/__tests__/aql-sampling.test.ts && tsx src/__tests__/pbac-evaluator.test.ts && tsx src/__tests__/plan-code-number.test.ts && tsx src/__tests__/outsource-reference.test.ts && tsx src/__tests__/plan-version-number.test.ts && tsx src/domain.test.ts"
+    "test": "tsx src/__tests__/state-machine.test.ts && tsx src/__tests__/evaluate-inspection-item.test.ts && tsx src/__tests__/aql-sampling.test.ts && tsx src/__tests__/pbac-evaluator.test.ts && tsx src/__tests__/plan-code-number.test.ts && tsx src/__tests__/outsource-reference.test.ts && tsx src/__tests__/plan-version-number.test.ts && tsx src/__tests__/heat-batch-trace-service.test.ts && tsx src/__tests__/transfer-gate-service.test.ts && tsx src/domain.test.ts && tsx src/__tests__/inspection-state-machine.property.test.ts"
   },
   "dependencies": {
     "@letian/contracts": "workspace:*"
   },
   "devDependencies": {
-    "typescript": "^5.4.5",
-    "tsx": "^4.7.2"
+    "fast-check": "^4.10.2",
+    "tsx": "^4.7.2",
+    "typescript": "^5.4.5"
   }
 }

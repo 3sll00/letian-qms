@@ -88,6 +88,9 @@ const errorHandlerPluginAsync: FastifyPluginAsync = async (fastify) => {
           code: error.code,
           traceId,
           ...(error instanceof ValidationFailedError ? { invalidParams: error.invalidParams } : {}),
+          // 结构化补充信息（如「合格后传递」门禁的 { transferDecision, blockedBy }，docs/48 §4.6）：
+          // 与 problem+json 主体同级下发，调用方按 code 分支而不必解析中文 detail。
+          ...(error.details !== undefined ? { details: error.details } : {}),
         });
     }
 
@@ -171,6 +174,60 @@ const errorHandlerPluginAsync: FastifyPluginAsync = async (fastify) => {
           code: (normalized.code as typeof ErrorCode.CONFLICT) || ErrorCode.CONFLICT,
           traceId,
         });
+    }
+
+    // 其余 4xx（405 / 413 / 414 / 415 / 429 等框架级客户端错误）按原状态码回吐：
+    // 调用方请求形态有误，不能落到下面 500 兜底被误判成「服务端崩了」
+    // （实测：POST 无 Content-Type → FST_ERR_CTP_INVALID_MEDIA_TYPE 415 曾漏成 500）
+    if (statusCode >= 400 && statusCode < 500) {
+      return reply
+        .status(statusCode)
+        .header('Content-Type', 'application/problem+json')
+        .send({
+          type: `https://letian-qms.com/errors/http-${statusCode}`,
+          title: '请求不被接受',
+          status: statusCode,
+          detail: normalized.message || `HTTP ${statusCode}`,
+          instance: request.url,
+          code: normalized.code || `HTTP_${statusCode}`,
+          traceId,
+        });
+    }
+
+    // PostgreSQL 错误码（SQLSTATE）兜底映射：DB 约束/编码类错误本质是调用方数据问题，
+    // 按 4xx 回吐而不是 500。控制器可先行捕获给出精确消息；这里统一收口漏网者。
+    // 实测：jsonb 拒绝孤立代理/NUL 字节 → 22P05 unsupported_unicode 曾漏成 500。
+    const pgCode = normalized.code;
+    if (typeof pgCode === 'string' && /^\d{2}[A-Z0-9]{3}$/.test(pgCode)) {
+      if (pgCode === '23505') {
+        return reply
+          .status(409)
+          .header('Content-Type', 'application/problem+json')
+          .send({
+            type: 'https://letian-qms.com/errors/conflict',
+            title: '资源冲突或业务阻断',
+            status: 409,
+            detail: '违反唯一性约束：记录已存在或标识被占用',
+            instance: request.url,
+            code: ErrorCode.CONFLICT,
+            traceId,
+          });
+      }
+      if (pgCode.startsWith('22') || pgCode.startsWith('23')) {
+        return reply
+          .status(400)
+          .header('Content-Type', 'application/problem+json')
+          .send({
+            type: 'https://letian-qms.com/errors/validation-failed',
+            title: '参数验证失败',
+            status: 400,
+            detail: '请求包含无法落库的非法数据（编码、类型表示或完整性约束不合法）',
+            instance: request.url,
+            code: ErrorCode.VALIDATION_FAILED,
+            traceId,
+            invalidParams: [],
+          });
+      }
     }
 
     // 4. 默认兜底 500 系统内部异常

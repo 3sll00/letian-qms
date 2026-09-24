@@ -1,6 +1,7 @@
 import {
   AdvanceMrbStepUseCase,
   CheckReleaseGateUseCase,
+  CheckTransferPermitUseCase,
   CheckPermissionUseCase,
   CreateInspectionOrderUseCase,
   CreatePlanUseCase,
@@ -10,6 +11,7 @@ import {
   ExportInspectionReportUseCase,
   ExportTraceReportUseCase,
   FinalizeInspectionStatusUseCase,
+  GetChainStatusUseCase,
   GetOrderTraceChainUseCase,
   PenetrateBatchDagUseCase,
   RecordMeasurementsAndJudgeUseCase,
@@ -19,6 +21,12 @@ import {
   TriggerMrbReviewUseCase,
   UpgradePlanVersionUseCase,
   PendingMRBPoolUseCase,
+  UpdateInspectionHeatFieldsUseCase,
+  CreateTransferOverrideTicketUseCase,
+  ReviewTransferOverrideTicketUseCase,
+  ListTransferOverrideTicketsUseCase,
+  BatchFreezeTerminatedChainsUseCase,
+  GetTransferKpisUseCase,
   type IUnitOfWork,
 } from '@letian/application';
 import {
@@ -84,6 +92,8 @@ export interface ApiContainer {
     createInspectionOrder: CreateInspectionOrderUseCase;
     recordMeasurementsAndJudge: RecordMeasurementsAndJudgeUseCase;
     saveInspectionDraft: SaveInspectionDraftUseCase;
+    /** 炉批号表头写入口（PATCH /inspections/{id}/header）：落炉批号 / 材质牌号 / 标准 / 检验日期（docs/47 §4.5） */
+    updateInspectionHeatFields: UpdateInspectionHeatFieldsUseCase;
     /** 终判唯一写入口：状态 / 结论 / 终判时间落库，判不合格时同事务入不合格待审核池（docs/39 §2 D1） */
     finalizeInspectionStatus: FinalizeInspectionStatusUseCase;
     createReinspection: CreateReinspectionUseCase;
@@ -95,11 +105,20 @@ export interface ApiContainer {
     upgradePlanVersion: UpgradePlanVersionUseCase;
     togglePlanVersion: TogglePlanVersionUseCase;
     checkReleaseGate: CheckReleaseGateUseCase;
+    /** 「合格后传递」传递许可（纯读）：建单前预览 / 台账与看板的派生字段（docs/48 §4.5） */
+    checkTransferPermit: CheckTransferPermitUseCase;
+    createTransferOverrideTicket: CreateTransferOverrideTicketUseCase;
+    reviewTransferOverrideTicket: ReviewTransferOverrideTicketUseCase;
+    listTransferOverrideTickets: ListTransferOverrideTicketsUseCase;
+    batchFreezeTerminatedChains: BatchFreezeTerminatedChainsUseCase;
+    getTransferKpis: GetTransferKpisUseCase;
     penetrateBatchDag: PenetrateBatchDagUseCase;
     /** 批次检索：按批次号/炉批号/订单号/物料/成品名命中批次列表（追溯主键是批次号） */
     searchTraceBatches: SearchTraceBatchesUseCase;
     /** 订单维度检验环节台账（「本订单检验环节」，不是血缘链路） */
     getOrderTraceChain: GetOrderTraceChainUseCase;
+    /** 看板「传递链状态」：链路各环节排序 + 每环节的传递判定（纯读，docs/48 §4.6 P1） */
+    getChainStatus: GetChainStatusUseCase;
     exportInspectionReport: ExportInspectionReportUseCase;
     exportTraceReport: ExportTraceReportUseCase;
     pendingMRBPool: PendingMRBPoolUseCase;
@@ -144,6 +163,7 @@ export function createApiContainer(options: CreateApiContainerOptions = {}): Api
     createInspectionOrder: new CreateInspectionOrderUseCase(uow),
     recordMeasurementsAndJudge: new RecordMeasurementsAndJudgeUseCase(uow),
     saveInspectionDraft: new SaveInspectionDraftUseCase(uow),
+    updateInspectionHeatFields: new UpdateInspectionHeatFieldsUseCase(uow),
     finalizeInspectionStatus: new FinalizeInspectionStatusUseCase(uow),
     createReinspection: new CreateReinspectionUseCase(uow),
     triggerMrbReview: new TriggerMrbReviewUseCase(uow),
@@ -154,12 +174,19 @@ export function createApiContainer(options: CreateApiContainerOptions = {}): Api
     upgradePlanVersion: new UpgradePlanVersionUseCase(uow),
     togglePlanVersion: new TogglePlanVersionUseCase(uow),
     checkReleaseGate: new CheckReleaseGateUseCase(uow),
+    checkTransferPermit: new CheckTransferPermitUseCase(uow),
     penetrateBatchDag,
     searchTraceBatches: new SearchTraceBatchesUseCase(uow),
     getOrderTraceChain: new GetOrderTraceChainUseCase(uow),
+    getChainStatus: new GetChainStatusUseCase(uow),
     exportInspectionReport: new ExportInspectionReportUseCase(uow),
     exportTraceReport: new ExportTraceReportUseCase(uow, penetrateBatchDag),
     pendingMRBPool: new PendingMRBPoolUseCase(uow),
+    createTransferOverrideTicket: new CreateTransferOverrideTicketUseCase(uow),
+    reviewTransferOverrideTicket: new ReviewTransferOverrideTicketUseCase(uow),
+    listTransferOverrideTickets: new ListTransferOverrideTicketsUseCase(uow),
+    batchFreezeTerminatedChains: new BatchFreezeTerminatedChainsUseCase(uow),
+    getTransferKpis: new GetTransferKpisUseCase(uow),
   };
   const reportEngine = new StandardReportEngine();
   return {

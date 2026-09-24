@@ -13,6 +13,14 @@ export class ApplicationError extends Error {
   public readonly traceId: string;
   public readonly instance?: string;
   public readonly invalidParams?: InvalidParamDetail[];
+  /**
+   * 结构化补充信息（details 扩展位，RFC 7807 之外的附加字段）。
+   *
+   * 用途：把**结构性判定结果**随错误一并回吐给调用方，而不必让调用方解析 detail 文案。
+   * 当前唯一使用方是「合格后传递」门禁（docs/48 §4.6）：422 阻断时携带
+   * `{ transferDecision, blockedBy }`，让 MES / 看板 / 前端能按 `code` 分支并展示上游单号。
+   */
+  public readonly details?: Record<string, unknown>;
 
   constructor(
     codeOrParams:
@@ -26,6 +34,7 @@ export class ApplicationError extends Error {
           traceId?: string;
           instance?: string;
           invalidParams?: InvalidParamDetail[];
+          details?: Record<string, unknown>;
         },
     legacyDetail?: string,
     legacyStatus?: number,
@@ -38,6 +47,7 @@ export class ApplicationError extends Error {
     let resolvedTraceId: string | undefined;
     let resolvedInstance: string | undefined;
     let resolvedInvalidParams: InvalidParamDetail[] | undefined;
+    let resolvedDetails: Record<string, unknown> | undefined;
 
     if (typeof codeOrParams === 'object' && codeOrParams !== null) {
       resolvedCode = codeOrParams.code;
@@ -47,6 +57,7 @@ export class ApplicationError extends Error {
       resolvedTraceId = codeOrParams.traceId;
       resolvedInstance = codeOrParams.instance;
       resolvedInvalidParams = codeOrParams.invalidParams;
+      resolvedDetails = codeOrParams.details;
     } else {
       resolvedCode = (codeOrParams as ErrorCodeType) ?? ErrorCode.INTERNAL_SERVER_ERROR;
       resolvedDetail = legacyDetail ?? 'An application error occurred';
@@ -68,6 +79,9 @@ export class ApplicationError extends Error {
     }
     if (resolvedInvalidParams !== undefined) {
       this.invalidParams = resolvedInvalidParams;
+    }
+    if (resolvedDetails !== undefined) {
+      this.details = resolvedDetails;
     }
     Object.setPrototypeOf(this, new.target.prototype);
   }

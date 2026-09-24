@@ -6,7 +6,7 @@
     "build": "tsc -b",
     "typecheck": "tsc -p tsconfig.test.json",
     "dev": "tsx src/server.ts",
-    "test": "tsx test/contract/schemas.contract.test.ts && tsx test/api.test.ts && tsx test/integration/e2e.test.ts && tsx test/integration/outsource-inspection-link.test.ts && tsx test/integration/permission-management-link.test.ts && tsx test/integration/inspection-finalize-pool-link.test.ts && tsx test/integration/plan-match-pbac-link.test.ts && tsx test/integration/trace-node-registration.test.ts"
+    "test": "tsx test/contract/schemas.contract.test.ts && tsx test/api.test.ts && tsx test/integration/e2e.test.ts && tsx test/integration/outsource-inspection-link.test.ts && tsx test/integration/permission-management-link.test.ts && tsx test/integration/inspection-finalize-pool-link.test.ts && tsx test/integration/reinspection-resume-link.test.ts && tsx test/integration/plan-match-pbac-link.test.ts && tsx test/integration/trace-node-registration.test.ts && tsx test/integration/heat-batch-trace-link.test.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",

@@ -6,6 +6,8 @@ export * from './inspections/save-inspection-draft.js';
 export * from './inspections/record-measurements-and-judge.js';
 export * from './inspections/finalize-inspection-status.js';
 export * from './inspections/create-reinspection.js';
+export * from './inspections/update-inspection-heat-fields.js';
+export * from './inspections/check-transfer-permit.js';
 export * from './mrb/trigger-mrb-review.js';
 export * from './mrb/advance-mrb-step.js';
 export * from './mrb/customer-sign-off.js';
@@ -20,3 +22,9 @@ export * from './permissions/check-permission.js';
 
 export * from './mrb/pending-mrb-pool-use-case.js';
 export * from './mrb/auto-initiate-mrb-review.js';
+export * from './traceability/chain-status.js';
+export * from './inspections/batch-freeze-terminated-chains.js';
+export * from './transfers/create-transfer-override-ticket.js';
+export * from './transfers/review-transfer-override-ticket.js';
+export * from './transfers/list-transfer-override-tickets.js';
+export * from './traceability/get-transfer-kpis.js';
