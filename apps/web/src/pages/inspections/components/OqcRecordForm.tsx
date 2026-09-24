@@ -9,6 +9,7 @@ import { QualityCertificateData } from "../../../lib/inspectionTypes";
 import { buildOqcCertificateData, certificateItemsFromRows } from "../../../lib/certificateDataService";
 import { loadCompanyProfile } from "../../../lib/companyProfile";
 import { api, errorMessage } from "../../../lib/api";
+import { oqcHeatNoRequirementMarker, validateOqcHeatNo } from "../../../lib/oqcHeatNoRequirement";
 import { useMatchedPlan } from "../../../hooks/useMatchedPlan";
 import {
   DECISION_LABEL,
@@ -150,7 +151,7 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
   const [decision, setDecision] = useState<"合格" | "不合格" | "特采">("合格");
   const [inspector, setInspector] = useState(fromList(initialItem?.inspector ?? initialItem?.inspectorName));
   // 检验日期默认「今天」：录入动作真实发生日；历史默认值是编造的固定日期
-  const [, setInspectDate] = useState(todayIsoDate());
+  const [inspectDate, setInspectDate] = useState(todayIsoDate());
   // 结论不预置演示长文（原文案会让尚未检验的空白单据看起来已经判过合格）
   const [conclusion, setConclusion] = useState("");
 
@@ -390,6 +391,13 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
       setSubmitError("请先填写检验员（检验单落库的检验人）");
       return;
     }
+    // TBD-03（出货检验炉批号是否必填）：默认必填，但判定一律经 oqcHeatNoRequirement 单点实现 ——
+    // 客户若确认「不必填」，改那一处默认值即可收回，不必动本文件的提交链路。
+    const heatNoError = validateOqcHeatNo(heatNo);
+    if (heatNoError !== null) {
+      setSubmitError(heatNoError);
+      return;
+    }
     if (planRowsForSubmit.length === 0) {
       setSubmitError("本单未匹配到质检方案指标行，无法提交（请先确认该物料的已启用质检方案）");
       return;
@@ -403,6 +411,17 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
     setSubmitError("");
     setSubmitReceipt("");
     try {
+      // 表头业务事实先落库（docs/47 §4.6 / D1）：炉批号 / 材质牌号 / 执行技术标准 / 检验日期。
+      // 此前出货检验表头**没有任何写路径** —— 界面上填了炉号，提交后库里仍是空，
+      // 下游单据与质保书炉号栏自然也就没有来源。空串 = 清空（契约语义）。
+      // 溯源留痕（heat_source_type / heat_source_order_no）由服务端按三级优先级重新解析，前端不自称来源。
+      await api.patch(`/inspections/${encodeURIComponent(orderId)}/header`, {
+        furnaceHeatNo: heatNo.trim(),
+        ...(materialGrade.trim() !== "" ? { materialGrade: materialGrade.trim() } : {}),
+        ...(standard.trim() !== "" ? { techStandard: standard.trim() } : {}),
+        ...(inspectDate.trim() !== "" ? { inspectedDate: inspectDate.trim() } : {}),
+      });
+
       if (measuredRows.length > 0) {
         await api.post(`/inspections/${encodeURIComponent(orderId)}/submit-measurements`, {
           isDraft: hasBlankRows,
@@ -580,7 +599,9 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
           </div>
           <div>
             <label className="block text-slate-500 mb-1 flex items-center justify-between">
-              <span>原材料炉批号 (Heat No) ★</span>
+              <span>
+                原材料炉批号 (Heat No) {oqcHeatNoRequirementMarker()}
+              </span>
               {heatTraceLoading && <span className="text-[10px] text-blue-500 animate-pulse">正在溯源数据...</span>}
             </label>
             <input

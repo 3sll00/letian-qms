@@ -236,9 +236,26 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
     setSubmitError('');
     setSubmitReceipt('');
     try {
+      // 表头业务事实落库（docs/47 §4.6 / §5）：原厂冶炼炉号是炉批号关联链路的 L2 数据源 ——
+      // 此前该字段只进证书与回调，不落库，出货检验的「回退关联来料检验」永远查空（D1）。
+      // 溯源留痕由服务端重新解析：本单若有同炉上游记录（另一张 IQC / 委外热处理），会一并写入。
+      await api.patch(`/inspections/${encodeURIComponent(orderId)}/header`, {
+        furnaceHeatNo: heatNo.trim(),
+        ...(materialGrade.trim() !== '' ? { materialGrade: materialGrade.trim() } : {}),
+        ...(standard.trim() !== '' ? { techStandard: standard.trim() } : {}),
+        ...(inspectDate.trim() !== '' ? { inspectedDate: inspectDate.trim() } : {}),
+      });
+
       if (measuredRows.length > 0) {
         await api.post(`/inspections/${encodeURIComponent(orderId)}/submit-measurements`, {
           isDraft: hasBlankRows,
+          // 填写值只在**正式判定**时下发：草稿只暂存实测值、不做判定，也就没有数量口径（docs/21 §14）
+          ...(hasBlankRows
+            ? {}
+            : {
+                passQty: decision === '合格' && qty !== null ? qty : 0,
+                failQty: decision === '合格' ? 0 : qty !== null ? qty : 0,
+              }),
           items: measuredRows.map((row) => {
             const numeric = parseMeasuredNumber(row.actual);
             return {
