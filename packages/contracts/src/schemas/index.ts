@@ -10,3 +10,4 @@ export * from './inspection-groups';
 export * from './integration';
 export * from './report';
 export * from './query-dsl';
+export * from './transfer';

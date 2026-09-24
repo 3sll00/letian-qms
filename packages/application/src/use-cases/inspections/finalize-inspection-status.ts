@@ -1,10 +1,11 @@
 import { InspectionStatusEnum, type InspectionOrder as InspectionOrderDTO } from '@letian/contracts';
 import { NotFoundError, ValidationFailedError } from '../../errors/application-error.js';
 import type { ISecurityContext } from '../../security/security-context.js';
-import type { IUnitOfWork } from '../../tx/unit-of-work.js';
+import type { IUnitOfWork, IUnitOfWorkContext } from '../../tx/unit-of-work.js';
 import { collectPendingDefect } from '../mrb/collect-pending-defect.js';
 import { autoInitiateMrbReview } from '../mrb/auto-initiate-mrb-review.js';
 import { registerInspectionTraceNode } from '../traceability/register-inspection-trace-node.js';
+import { reinspectionBaseOf, reinspectionRoundOf } from '@letian/domain';
 
 export interface FinalizeInspectionStatusCommand {
   orderId: string;
@@ -33,6 +34,39 @@ export interface FinalizeInspectionStatusCommand {
  */
 export function isNonconformingVerdict(status: string, judgment?: string): boolean {
   return status === 'FAILED' || judgment === 'FAILED';
+}
+
+/**
+ * 返工闭环回写（docs/48 §4.8）：复检单（`{源单号}-R{n}`）终判合格时，把**源单**从 `RE_INSPECTING` 推进到 `COMPLETED`。
+ *
+ * 三条边界，缺一条就会改错单：
+ *   1. 只处理复检单（轮次 > 0）：首检单合格与「返工闭环」无关；
+ *   2. 只处理**源单当前确为 `RE_INSPECTING`** 的单：避免把一张早已归档的历史单重新写一遍；
+ *   3. 只处理合格结论：复检再判不合格时源单保持 `RE_INSPECTING`（按 TBD-05 新开 MRB 继续处置）。
+ *
+ * 返回被闭环的源单号（供审计留痕），未发生闭环时返回 undefined。
+ */
+async function closeReworkLoopIfReinspectionPassed(
+  ctx: IUnitOfWorkContext,
+  finalizedOrder: InspectionOrderDTO,
+  targetStatus: string,
+  judgment: string | undefined
+): Promise<string | undefined> {
+  if (reinspectionRoundOf(finalizedOrder.orderNo) === 0) {
+    return undefined;
+  }
+  const passed = judgment !== 'FAILED' && (targetStatus === 'PASSED' || targetStatus === 'COMPLETED');
+  if (!passed) {
+    return undefined;
+  }
+
+  const baseOrder = await ctx.inspectionOrders.findByOrderNo(reinspectionBaseOf(finalizedOrder.orderNo));
+  if (baseOrder === null || baseOrder.id === undefined || baseOrder.status !== 'RE_INSPECTING') {
+    return undefined;
+  }
+
+  await ctx.inspectionOrders.updateStatus(baseOrder.id, 'COMPLETED');
+  return baseOrder.orderNo;
 }
 
 /** 需要落 completed_at 的终判状态（与终判路由既有口径一致） */
@@ -137,6 +171,17 @@ export class FinalizeInspectionStatusUseCase {
       // 幂等：仓储按 batch_no upsert，重复终判只覆盖同一行。
       const traceNode = await registerInspectionTraceNode(ctx, updated, cmd.operatorName);
 
+      // MRB 返工闭环回写（docs/48 §4.8）：复检单终判合格 ⇒ 源单不再停在 `RE_INSPECTING`。
+      // 口径：返工已闭环，源单归档 `COMPLETED`（其 FAILED 判定原样保留，供追责与 KPI 统计）。
+      // 下游解锁依据始终是**复检单**的结论（§2.4 规则 3：轮次最高者胜），而不是源单结论 ——
+      // 这里只负责把源单从「返工中」推进到闭环，绝不改写源单的判定结果。
+      const reworkClosedOrderNo = await closeReworkLoopIfReinspectionPassed(
+        ctx,
+        updated,
+        targetStatus,
+        cmd.judgment ?? updated.overallDecision
+      );
+
       // 判定不合格 -> 同事务**自动创建 MRB 评审单**（docs/43 §3：「判定即入评审」，无人工发起环节）。
       // 幂等：同一检验单重复终判复用既有 MRB 单；台账条目随之转 INITIATED 并回填 mrb_review_id。
       const auto =
@@ -182,6 +227,7 @@ export class FinalizeInspectionStatusUseCase {
           // 自动发起留痕：让「判不合格却没有 MRB 单」在审计日志里同样一眼可判
           mrbAutoInitiated: auto !== null,
           ...(auto !== null ? { mrbReviewNo: auto.mrbReview.mrbNo } : {}),
+          ...(reworkClosedOrderNo !== undefined ? { reworkClosedSourceOrderNo: reworkClosedOrderNo } : {}),
           ...(cmd.preliminaryDisposition !== undefined
             ? { preliminaryDisposition: cmd.preliminaryDisposition }
             : {}),

@@ -49,7 +49,10 @@ export type RecordInspectionItemRequest = z.infer<typeof schemas.RecordInspectio
 export type BatchRecordInspectionItemsRequest = z.infer<typeof schemas.BatchRecordInspectionItemsRequestSchema>;
 export type InspectionProgressOverview = z.infer<typeof schemas.InspectionProgressOverviewSchema>;
 export type MandatoryGateCheckResponse = z.infer<typeof schemas.MandatoryGateCheckResponseSchema>;
-export type FurnaceHeatTraceResult = z.infer<typeof schemas.FurnaceHeatTraceResultSchema>;
+export type FurnaceHeatTraceResponse = z.infer<typeof schemas.FurnaceHeatTraceResponseSchema>;
+export type HeatTraceSourceType = z.infer<typeof schemas.HeatTraceSourceTypeEnum>;
+export type HeatTraceAppliedSourceType = z.infer<typeof schemas.HeatTraceAppliedSourceTypeEnum>;
+export type UpdateInspectionHeaderRequest = z.infer<typeof schemas.UpdateInspectionHeaderRequestSchema>;
 
 // ============================================================================
 // 3. 不合格品处置 (MRB)、待审核池与可配置审批流 DTOs
@@ -81,6 +84,15 @@ export type MRBMetricsOverview = z.infer<typeof schemas.MRBMetricsOverviewSchema
 // ============================================================================
 // 4. 批次全生命周期追溯 (DAG 图谱) DTOs
 // ============================================================================
+export type ChainAnchorKind = z.infer<typeof schemas.ChainAnchorKindEnum>;
+export type TransferGateCode = z.infer<typeof schemas.TransferGateCodeEnum>;
+export type TransferPermitEvidence = z.infer<typeof schemas.TransferPermitEvidenceSchema>;
+export type TransferDecision = z.infer<typeof schemas.TransferDecisionSchema>;
+export type TransferPermitRequest = z.infer<typeof schemas.TransferPermitRequestSchema>;
+export type TransferPermitItem = z.infer<typeof schemas.TransferPermitItemSchema>;
+export type TransferPermitBatchRequest = z.infer<typeof schemas.TransferPermitBatchRequestSchema>;
+export type TransferPermitBatchResponse = z.infer<typeof schemas.TransferPermitBatchResponseSchema>;
+
 export type TraceRelationType = z.infer<typeof schemas.TraceRelationTypeEnum>;
 export type TraceNodeStatus = z.infer<typeof schemas.TraceNodeStatusEnum>;
 export type TraceNode = z.infer<typeof schemas.TraceNodeSchema>;
@@ -154,3 +166,8 @@ export type OutboxEvent = z.infer<typeof schemas.OutboxEventSchema>;
 // 前端页面别名兼容
 export type MrbReviewRecord = MRBReview;
 export type BatchTraceNode = TraceNode;
+export type ChainStageState = z.infer<typeof schemas.ChainStageStateEnum>;
+export type ChainStatusBlockedBy = z.infer<typeof schemas.ChainStatusBlockedBySchema>;
+export type ChainStatusStage = z.infer<typeof schemas.ChainStatusStageSchema>;
+export type ChainStatusSummary = z.infer<typeof schemas.ChainStatusSummarySchema>;
+export type ChainStatusResponse = z.infer<typeof schemas.ChainStatusResponseSchema>;

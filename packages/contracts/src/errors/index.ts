@@ -42,6 +42,11 @@ export const ErrorCode = {
   GATE_UNDER_MRB: 'gate-under-mrb',
   BATCH_LOCKED: 'batch-locked',
 
+  // 「合格后传递」链路门禁 (docs/48-合格后传递通用链路规则设计与改造方案.md)
+  // 上游环节未放行（或 MRB 未给出放行结论）时禁止下游环节建单；
+  // details 中携带结构化 TransferDecision（code / predecessorOrderNo / mrbNo / reason）。
+  TRANSFER_BLOCKED: 'transfer-blocked',
+
   // 批次追溯与集成
   BATCH_NOT_FOUND: 'batch-not-found',
   TRACE_CYCLE_DETECTED: 'trace-cycle-detected',

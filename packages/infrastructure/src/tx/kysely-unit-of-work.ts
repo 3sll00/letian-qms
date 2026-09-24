@@ -11,6 +11,7 @@ import { KyselyOutboxRepository } from '../repositories/outbox-repository.js';
 import { KyselyAuditLogRepository } from '../repositories/audit-log-repository.js';
 import { KyselyMaterialPermissionRepository } from '../repositories/material-permission-repository.js';
 import { KyselyMasterDataRepository } from '../repositories/master-data-repository.js';
+import { KyselyTransferOverrideRepository } from '../repositories/transfer-override-repository.js';
 
 /**
  * PostgreSQL 事务级咨询锁实现
@@ -58,6 +59,7 @@ export class KyselyUnitOfWork implements IUnitOfWork {
         permissions: new KyselyMaterialPermissionRepository(trx),
         materials: new KyselyMasterDataRepository(trx),
         suppliers: new KyselyMasterDataRepository(trx),
+        transferOverrides: new KyselyTransferOverrideRepository(trx),
       };
       return await work(ctx);
     });

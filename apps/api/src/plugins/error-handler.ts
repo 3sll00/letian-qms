@@ -88,6 +88,9 @@ const errorHandlerPluginAsync: FastifyPluginAsync = async (fastify) => {
           code: error.code,
           traceId,
           ...(error instanceof ValidationFailedError ? { invalidParams: error.invalidParams } : {}),
+          // 结构化补充信息（如「合格后传递」门禁的 { transferDecision, blockedBy }，docs/48 §4.6）：
+          // 与 problem+json 主体同级下发，调用方按 code 分支而不必解析中文 detail。
+          ...(error.details !== undefined ? { details: error.details } : {}),
         });
     }
 

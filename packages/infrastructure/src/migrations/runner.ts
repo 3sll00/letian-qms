@@ -33,6 +33,9 @@ import * as outsourceEntryFieldsMigration from './030_add_outsource_entry_fields
 import * as oqcFamilyInspectionPlanMigration from './031_add_oqc_family_inspection_plan.js';
 import * as outsourceMachHeatPlansMigration from './032_add_outsource_mach_heat_plans.js';
 import * as outsourceSfFamilyPlansMigration from './033_add_outsource_sf_family_plans.js';
+import * as inspectionHeatTraceFieldsMigration from './034_add_inspection_heat_trace_fields.js';
+import * as transferTraceFieldsMigration from './035_add_transfer_trace_fields.js';
+import * as transferOverrideTicketsMigration from './036_add_transfer_override_tickets.js';
 
 class DynamicMigrationProvider implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -70,6 +73,9 @@ class DynamicMigrationProvider implements MigrationProvider {
       '031_add_oqc_family_inspection_plan': oqcFamilyInspectionPlanMigration,
       '032_add_outsource_mach_heat_plans': outsourceMachHeatPlansMigration,
       '033_add_outsource_sf_family_plans': outsourceSfFamilyPlansMigration,
+      '034_add_inspection_heat_trace_fields': inspectionHeatTraceFieldsMigration,
+      '035_add_transfer_trace_fields': transferTraceFieldsMigration,
+      '036_add_transfer_override_tickets': transferOverrideTicketsMigration,
     };
   }
 }

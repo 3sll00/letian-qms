@@ -5,7 +5,8 @@ import {
   InspectionPlanVersion as InspectionPlanVersionDTO,
   InspectionType,
   InspectionStatus,
-  OverallDecision
+  OverallDecision,
+  HeatTraceAppliedSourceType
 } from '@letian/contracts';
 import { InspectionStateMachine } from '../state-machines/inspection-state-machine';
 import { evaluateInspectionItem } from '../services/tolerance-evaluator';
@@ -22,7 +23,19 @@ export class InspectionOrder {
   private materialCode: string;
   private materialName: string;
   private batchNo: string;
-  private heatBatchNo?: string | undefined;
+  /**
+   * 炉批号（Heat No）：钢材冶炼炉号 / 热处理炉批号。
+   *
+   * 口径（docs/47 §3.1）：契约与聚合根统一用 `furnaceHeatNo`，物理列是
+   * `inspection_orders.furnace_heat_batch_no`（迁移 004 建列、034 起真正有写入路径）。
+   * 历史实现该属性名为 `heatBatchNo` 且**全仓无写入方**，与契约 `furnaceHeatNo` 同名不同义，
+   * 是本轮 D1/D3 断链的一半成因，故一并改名收敛。
+   */
+  private furnaceHeatNo?: string | undefined;
+  /** 本单炉批号数据的带出源类型（OUTSOURCE_HEAT_TREATMENT / IQC_RAW_MATERIAL）；未带出为空 */
+  private heatSourceType?: HeatTraceAppliedSourceType | undefined;
+  /** 本单炉批号数据带出的源检验单号；未带出为空 */
+  private heatSourceOrderNo?: string | undefined;
   private batchQty: number;
   private sampleQty: number;
   private passQty: number = 0;
@@ -83,7 +96,9 @@ export class InspectionOrder {
     materialCode: string;
     materialName: string;
     batchNo: string;
-    heatBatchNo?: string | undefined;
+    furnaceHeatNo?: string | undefined;
+    heatSourceType?: HeatTraceAppliedSourceType | undefined;
+    heatSourceOrderNo?: string | undefined;
     batchQty: number;
     sampleQty?: number | undefined;
     passQty?: number | undefined;
@@ -135,7 +150,9 @@ export class InspectionOrder {
     this.materialCode = params.materialCode;
     this.materialName = params.materialName;
     this.batchNo = params.batchNo;
-    this.heatBatchNo = params.heatBatchNo;
+    this.furnaceHeatNo = params.furnaceHeatNo;
+    this.heatSourceType = params.heatSourceType;
+    this.heatSourceOrderNo = params.heatSourceOrderNo;
     this.batchQty = params.batchQty;
     this.sampleQty = params.sampleQty ?? Math.min(params.batchQty, 13);
     this.passQty = params.passQty ?? 0;
@@ -209,12 +226,32 @@ export class InspectionOrder {
     return this.batchNo;
   }
 
-  public getHeatBatchNo(): string | undefined {
-    return this.heatBatchNo;
+  public getFurnaceHeatNo(): string | undefined {
+    return this.furnaceHeatNo;
   }
 
-  public setHeatBatchNo(heatBatchNo: string | undefined): void {
-    this.heatBatchNo = heatBatchNo;
+  public setFurnaceHeatNo(furnaceHeatNo: string | undefined): void {
+    this.furnaceHeatNo = furnaceHeatNo;
+  }
+
+  public getHeatSourceType(): string | undefined {
+    return this.heatSourceType;
+  }
+
+  public getHeatSourceOrderNo(): string | undefined {
+    return this.heatSourceOrderNo;
+  }
+
+  /**
+   * 登记炉批号带出源（docs/47 §3.6 R5 留痕）：由表头更新用例在**服务端重新解析**后写入，
+   * 不接受客户端自称的来源 —— 与「质量负责人签核人取自会话」同一条信任边界。
+   */
+  public bindHeatTraceSource(source: {
+    sourceType: HeatTraceAppliedSourceType | undefined;
+    sourceOrderNo: string | undefined;
+  }): void {
+    this.heatSourceType = source.sourceType;
+    this.heatSourceOrderNo = source.sourceOrderNo;
   }
 
   public getBatchQty(): number {
@@ -516,8 +553,14 @@ export class InspectionOrder {
    * 2. 若存在任何检验项为 PENDING（非免检未录入） -> 整单判为 FAILED 阻断；
    * 3. 处于 EXEMPT 的项目不阻塞判定，跳过合格率分母；
    * 4. 只有所有非免检项均为 PASSED -> 整单判定为 PASSED。
+   *
+   * `declared`：**检验员现场填写**的合格 / 不合格数量（录入弹窗的「合格数量 / 不合格数量」两栏，
+   * 由用例层自 `SubmitMeasurements` 透传）。它优先于下面按抽样数派生的兜底值 —— 派生值只在
+   * 「未填写」时兜底：首次判定时 `pass_qty` 尚未落地（恒 0），`fail_qty` 会被算成整批抽样数，
+   * 看起来就像「不合格数量 = 检测数」，并随自动创建的 MRB 单固化成错误口径（docs/21 §14）。
+   * 给出即覆盖，与终判写入口径一致（`POST /inspections/:id/status` 同样原样落库、不做反算）。
    */
-  public submitAndEvaluate(): OverallDecision {
+  public submitAndEvaluate(declared?: { passQty?: number; failQty?: number }): OverallDecision {
     if (this.status !== 'INSPECTING') {
       throw new Error(`ORDER_CANNOT_SUBMIT: 仅有处于 INSPECTING 状态的工单可提交判定，当前状态为 [${this.status}]`);
     }
@@ -525,6 +568,10 @@ export class InspectionOrder {
     if (this.items.length === 0) {
       throw new Error(`ORDER_HAS_NO_ITEMS: 检验单无任何检验项，严禁提交评定`);
     }
+
+    // 填写值先校验、后变更：非法输入必须在状态流转**之前**拒绝，
+    // 否则聚合根会先判成 FAILED / PASSED 再抛错（调用方拿到 400 却已经改过态）。
+    this.assertDeclaredQuantities(declared);
 
     let hasFailure = false;
     let hasPending = false;
@@ -558,7 +605,30 @@ export class InspectionOrder {
       this.failQty = 0;
     }
 
+    this.applyDeclaredQuantities(declared);
     return this.overallDecision;
+  }
+
+  /**
+   * 检验员填写值的前置校验：数量要么来自现场清点，要么根本不传 —— 非法值直接拒绝而不是静默修正，
+   * 「自动纠错」会把检验员填的数悄悄改掉，比报错更难追。
+   */
+  private assertDeclaredQuantities(declared?: { passQty?: number; failQty?: number }): void {
+    if (declared === undefined) return;
+    const { passQty, failQty } = declared;
+    if (passQty !== undefined && (!Number.isFinite(passQty) || passQty < 0)) {
+      throw new Error(`ORDER_DECLARED_QTY_INVALID: 合格数量必须为非负数，收到 [${String(passQty)}]`);
+    }
+    if (failQty !== undefined && (!Number.isFinite(failQty) || failQty < 0)) {
+      throw new Error(`ORDER_DECLARED_QTY_INVALID: 不合格数量必须为非负数，收到 [${String(failQty)}]`);
+    }
+  }
+
+  /** 检验员填写值覆盖派生值（未给出的那一半保持派生结果） */
+  private applyDeclaredQuantities(declared?: { passQty?: number; failQty?: number }): void {
+    if (declared === undefined) return;
+    if (declared.passQty !== undefined) this.passQty = declared.passQty;
+    if (declared.failQty !== undefined) this.failQty = declared.failQty;
   }
 
   public routeToMRB(): void {
@@ -604,7 +674,11 @@ export class InspectionOrder {
       planSnapshot: snapshot,
       items: JSON.parse(JSON.stringify(this.items)),
       createdAt: this.createdAt,
-      ...(this.heatBatchNo !== undefined ? { heatBatchNo: this.heatBatchNo } : {}),
+      ...(this.furnaceHeatNo !== undefined ? { furnaceHeatNo: this.furnaceHeatNo } : {}),
+      ...(this.heatSourceType !== undefined ? { heatSourceType: this.heatSourceType } : {}),
+      ...(this.heatSourceOrderNo !== undefined
+        ? { heatSourceOrderNo: this.heatSourceOrderNo }
+        : {}),
       ...(this.exemptQty !== undefined ? { exemptQty: this.exemptQty } : {}),
       ...(this.supplierCode !== undefined ? { supplierCode: this.supplierCode } : {}),
       ...(this.supplierName !== undefined ? { supplierName: this.supplierName } : {}),
