@@ -11,6 +11,7 @@
     "lint": "eslint . --ext .ts,.tsx",
     "audit:code": "node scripts/testing/audit_check.js",
     "verify:oqc": "node scripts/testing/oqc-verify.cjs",
+    "verify:oqc-heat-ui": "node scripts/testing/oqc-heat-no-ui-verify.cjs",
     "verify:heat-trace": "node scripts/testing/heat-batch-trace-verify.cjs",
     "verify:transfer-gate": "node scripts/testing/transfer-gate-verify.cjs",
     "verify:chain-status": "node scripts/testing/chain-status-verify.cjs",
