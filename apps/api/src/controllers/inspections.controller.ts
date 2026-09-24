@@ -1,6 +1,6 @@
 import { HeatBatchTraceService } from "@letian/domain";
 import { randomUUID } from 'node:crypto';
-import { FastifyPluginAsync } from 'fastify';
+import { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import {
   CreateInspectionOrderRequestSchema,
@@ -15,6 +15,7 @@ import {
   TransferPermitBatchResponseSchema,
   CreateTransferOverrideTicketRequestSchema,
   ReviewTransferOverrideTicketRequestSchema,
+  BatchFreezeTerminatedChainsRequestSchema,
   BatchFreezeTerminatedChainsResponseSchema,
   type InspectionOrder,
   type TransferPermitBatchRequest,
@@ -26,6 +27,7 @@ import {
 } from '@letian/application';
 import type { ApiContainer } from '../container';
 import { operatorOf } from '../lib/operator';
+import { requestTraceId } from '../lib/trace';
 import {
   getRequestPermissions,
   buildRequestSecurityContext,
@@ -242,6 +244,31 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
 ) => {
   const { container } = options;
   const orders = container.repositories.orders;
+
+  // 字面路径仅注册 POST 时，GET/HEAD 会被下方 `/:id` 影子路由接走，把
+  // 「transfer-permits」这类字面量当成检验单 id 走 UUID 校验 → 400，
+  // 将「方法不被支持」误报成「参数错误」。显式 stub 回 405（字面路由
+  // 优先于参数路由；RFC 9110 §15.5.6，与 error-handler 的 405 形状一致）。
+  const replyMethodNotAllowed = (request: FastifyRequest, reply: FastifyReply, allow: string) =>
+    reply
+      .status(405)
+      .header('Allow', allow)
+      .header('Content-Type', 'application/problem+json')
+      .send({
+        type: 'https://letian-qms.com/errors/method-not-allowed',
+        title: '请求方法不被支持',
+        status: 405,
+        detail: `${request.method} 方法不被该路由支持；允许的方法: ${allow}`,
+        instance: request.url,
+        code: 'HTTP_405',
+        traceId: requestTraceId(request),
+      });
+  const postOnly405 = (url: string) =>
+    fastify.route({
+      method: ['GET', 'HEAD'],
+      url,
+      handler: (request, reply) => replyMethodNotAllowed(request, reply, 'POST'),
+    });
 
   // 查询炉批号溯源联动历史数据 (出货检验录入炉批号时调用)
   //
@@ -563,6 +590,8 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
     }
   );
 
+  postOnly405('/transfer-permits');
+
   // 2.6 特批豁免工单：提报申请（docs/48 §4.4、TBD-09）
   fastify.post(
     '/transfer-overrides/tickets',
@@ -624,19 +653,25 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
   // 2.9 下游终止链路安全冻结批处理（docs/48 §5.3、TBD-06）
   fastify.post(
     '/batch-freeze-terminated-chains',
+    {
+      schema: {
+        body: BatchFreezeTerminatedChainsRequestSchema,
+      },
+    },
     async (request, reply) => {
-      const body = (request.body ?? {}) as any;
+      const body = request.body as z.infer<typeof BatchFreezeTerminatedChainsRequestSchema>;
       const securityCtx = await buildRequestSecurityContext(request, container);
       const result = await container.useCases.batchFreezeTerminatedChains.execute(
         {
-          batchNo: body?.batchNo,
-          dryRun: body?.dryRun,
+          ...(body.batchNo !== undefined ? { batchNo: body.batchNo } : {}),
+          dryRun: body.dryRun === true,
         },
         securityCtx
       );
       return reply.status(200).send(BatchFreezeTerminatedChainsResponseSchema.parse(result));
     }
   );
+  postOnly405('/batch-freeze-terminated-chains');
 
   // 3. 获取检验单详情 (PBAC 单据可访问性核验)
   fastify.get(
@@ -980,9 +1015,14 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
    */
   fastify.post(
     '/batch-freeze-terminated',
+    {
+      schema: {
+        body: BatchFreezeTerminatedChainsRequestSchema,
+      },
+    },
     async (request, reply) => {
       const operator = operatorOf(request);
-      const body = (request.body as any) ?? {};
+      const body = request.body as z.infer<typeof BatchFreezeTerminatedChainsRequestSchema>;
       const securityCtx = await buildRequestSecurityContext(request, container);
       const result = await container.useCases.batchFreezeTerminatedChains.execute(
         {
@@ -994,4 +1034,5 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
       return reply.status(200).send(BatchFreezeTerminatedChainsResponseSchema.parse(result));
     }
   );
+  postOnly405('/batch-freeze-terminated');
 };

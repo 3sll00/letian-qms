@@ -23,6 +23,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DashboardOverviewResponse'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
 
   /release-gates/{batchNo}:
     get:
@@ -34,6 +36,7 @@ paths:
           required: true
           schema:
             type: string
+            minLength: 1
       responses:
         '200':
           description: 批次已完成成品检且合格，允许放行过站
@@ -41,10 +44,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ReleaseGateSuccessResponse'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
         '409':
           description: 强制关卡阻断，禁止放行
           content:
-            application/json:
+            application/problem+json:
               schema:
                 $ref: '#/components/schemas/ReleaseGateBlockedResponse'
 
@@ -67,6 +74,7 @@ paths:
           description: 物料编码（精确匹配）
           schema:
             type: string
+            minLength: 1
         - name: inspectionType
           in: query
           required: true
@@ -80,6 +88,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MatchedInspectionPlan'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
         '404':
           description: 两级匹配均未找到该物料 + 检验类型下的已启用质检方案（inspection-plan-not-found）
 
@@ -123,13 +135,15 @@ paths:
           in: query
           schema:
             type: integer
+            minimum: 1
             default: 1
         - name: pageSize
           in: query
           schema:
             type: integer
-            default: 20
+            minimum: 1
             maximum: 100
+            default: 20
       responses:
         '200':
           description: 质检方案分页列表
@@ -137,6 +151,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PaginatedInspectionPlans'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
     post:
       summary: 新建质检方案（含首个草稿版本）
       description: >-
@@ -157,6 +175,27 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/InspectionPlan'
+          links:
+            planByVersionId:
+              operationId: getInspectionPlan
+              parameters:
+                id: '$response.body#/versions/0/id'
+            upgradeVersion:
+              operationId: upgradePlanVersion
+              parameters:
+                versionId: '$response.body#/versions/0/id'
+            toggleVersionStatus:
+              operationId: togglePlanVersionStatus
+              parameters:
+                versionId: '$response.body#/versions/0/id'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
+        '409':
+          $ref: '#/components/responses/ProblemDetails409'
+        '415':
+          $ref: '#/components/responses/ProblemDetails415'
 
   /plans/stats:
     get:
@@ -172,6 +211,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PlanStats'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
 
   /plans/{id}:
     get:
@@ -192,6 +233,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/InspectionPlan'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
         '404':
           description: 方案不存在（not-found）
 
@@ -235,10 +280,14 @@ paths:
           description: >-
             非契约 action（validation-failed）；
             或空指标项版本不可启用 / 非 ACTIVE 版本不可停用（plan-toggle-failed）
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
         '403':
           description: 角色不足（forbidden）：仅质量主管 / 系统管理员可启停方案版本
         '404':
           description: 目标版本行不存在（plan-not-found）
+        '415':
+          $ref: '#/components/responses/ProblemDetails415'
 
   /plans/versions/{versionId}/upgrade:
     post:
@@ -282,8 +331,12 @@ paths:
           description: >-
             空版本号 / 空指标项被契约拒绝（validation-failed）；
             或该方案已有草稿版本（PLAN_DRAFT_ALREADY_EXISTS）、模板版本行不属于该方案
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
         '404':
           description: 目标版本行不存在（plan-not-found）
+        '415':
+          $ref: '#/components/responses/ProblemDetails415'
 
   /inspections:
     get:
@@ -292,9 +345,21 @@ paths:
       parameters:
         - name: type
           in: query
+          description: 前端台账页签分组（IQC / IPQC / FQC / OQC），与 `inspectionType` / `inspectionTypes` 互斥使用；实现侧接受任意字符串
+          schema:
+            type: string
+        - name: inspectionType
+          in: query
+          description: 契约检验类型枚举（13 值，含委外七分类）单值精确匹配
           schema:
             type: string
             enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH, OQC_HEAT, OQC_BLACK, OQC_ZINC, OQC_NICKEL, OQC_PHOSPH, OQC_DACRO, OQC_MACH]
+        - name: inspectionTypes
+          in: query
+          description: 检验类型多选，逗号分隔契约枚举值；逐项按 InspectionType 校验，非法值返回 400
+          schema:
+            type: string
+            pattern: '^\s*(IQC|IPQC_CT|IPQC_RL|IPQC_FN|OQC_SF|OQC_SH|OQC_HEAT|OQC_BLACK|OQC_ZINC|OQC_NICKEL|OQC_PHOSPH|OQC_DACRO|OQC_MACH)\s*(,\s*(IQC|IPQC_CT|IPQC_RL|IPQC_FN|OQC_SF|OQC_SH|OQC_HEAT|OQC_BLACK|OQC_ZINC|OQC_NICKEL|OQC_PHOSPH|OQC_DACRO|OQC_MACH)\s*)*$'
         - name: status
           in: query
           schema:
@@ -302,9 +367,10 @@ paths:
             enum: [PENDING, INSPECTING, DRAFT, PASSED, FAILED, IN_MRB_REVIEW, RE_INSPECTING, COMPLETED]
         - name: statuses
           in: query
-          description: 状态多选，逗号分隔（如 `PENDING,INSPECTING`）；与 `status` 互斥，优先 `statuses`
+          description: 状态多选，逗号分隔（如 `PENDING,INSPECTING`）；与 `status` 互斥，优先 `statuses`；逐项按 InspectionStatus 校验，非法值返回 400
           schema:
             type: string
+            pattern: '^\s*(PENDING|INSPECTING|DRAFT|PASSED|FAILED|IN_MRB_REVIEW|RE_INSPECTING|COMPLETED)\s*(,\s*(PENDING|INSPECTING|DRAFT|PASSED|FAILED|IN_MRB_REVIEW|RE_INSPECTING|COMPLETED)\s*)*$'
         - name: inspectionState
           in: query
           description: >-
@@ -333,6 +399,34 @@ paths:
           in: query
           schema:
             type: string
+        - name: supplierCodes
+          in: query
+          description: 供应商多选，逗号分隔供应商编码；非法值返回 400
+          schema:
+            type: string
+        - name: inspectors
+          in: query
+          description: 检验人多选，逗号分隔员工 UUID；逐项按 UUID 校验，非法值返回 400
+          schema:
+            type: string
+            pattern: '^\s*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*(,\s*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*)*$'
+        - name: furnaceHeatNo
+          in: query
+          description: 炉批号模糊匹配（出货检验台账「炉批号」筛选框，docs/47 §4.2⑤）
+          schema:
+            type: string
+        - name: dateFrom
+          in: query
+          description: 检验日期范围下界 YYYY-MM-DD（按 createdAt 过滤，含当日）；非日期格式返回 400
+          schema:
+            type: string
+            format: date
+        - name: dateTo
+          in: query
+          description: 检验日期范围上界 YYYY-MM-DD（含当日）；非日期格式返回 400
+          schema:
+            type: string
+            format: date
         - name: keyword
           in: query
           description: 跨字段模糊检索（批次号 / 物料 / 检验单号 / 出库单号 / 客户订单号 / 客户）
@@ -409,11 +503,14 @@ paths:
           in: query
           schema:
             type: integer
+            minimum: 1
             default: 1
         - name: pageSize
           in: query
           schema:
             type: integer
+            minimum: 1
+            maximum: 100
             default: 20
       responses:
         '200':
@@ -422,6 +519,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PaginatedInspectionOrders'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
     post:
       summary: 创建或录入检验单（绑定并深拷贝当前激活的方案版本快照）
       operationId: createInspectionOrder
@@ -438,6 +539,46 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/InspectionOrder'
+          links:
+            inspectionById:
+              operationId: getInspectionOrder
+              parameters:
+                id: '$response.body#/id'
+            updateHeader:
+              operationId: updateInspectionHeader
+              parameters:
+                id: '$response.body#/id'
+            submitMeasurements:
+              operationId: submitMeasurements
+              parameters:
+                id: '$response.body#/id'
+            approveOrder:
+              operationId: approveInspectionOrder
+              parameters:
+                id: '$response.body#/id'
+            finalizeStatus:
+              operationId: finalizeInspectionStatus
+              parameters:
+                id: '$response.body#/id'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
+        '404':
+          description: 显式指定的 planVersionId 不存在（禁止静默降级，见 docs/17 §7）
+        '409':
+          $ref: '#/components/responses/ProblemDetails409'
+        '415':
+          $ref: '#/components/responses/ProblemDetails415'
+        '422':
+          description: >-
+            传递门禁阻断（TRANSFER_BLOCKED）：上游权威检验单未终判合格 / MRB 未结案 / 链路已终止，
+            未附特批豁免凭据 `transferOverride`。`details.transferDecision` 为完整判定结果，
+            `details.blockedBy` 为现场精简三元组（docs/48 §4.6）。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetails'
 
   /inspections/heat-batch-trace:
     get:
@@ -462,6 +603,7 @@ paths:
           description: 炉批号（归一后匹配）
           schema:
             type: string
+            minLength: 1
         - name: materialCode
           in: query
           description: 物料编码（选填；参与物料维度匹配，缺省按全局命中并回 `GLOBAL`）
@@ -482,6 +624,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/FurnaceHeatTraceResponse'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
 
   /inspections/transfer-permits:
     post:
@@ -503,6 +649,7 @@ paths:
               properties:
                 items:
                   type: array
+                  minItems: 1
                   maxItems: 100
                   items:
                     type: object
@@ -510,11 +657,14 @@ paths:
                     properties:
                       inspectionType:
                         type: string
+                        enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH, OQC_HEAT, OQC_BLACK, OQC_ZINC, OQC_NICKEL, OQC_PHOSPH, OQC_DACRO, OQC_MACH]
                         description: 本单环节（下游）
                       batchNo:
                         type: string
+                        minLength: 1
                       materialCode:
                         type: string
+                        minLength: 1
                       furnaceHeatNo:
                         type: string
                         description: 炉批号（同炉批号锚点 A2）
@@ -541,6 +691,12 @@ paths:
                     items:
                       type: object
                       additionalProperties: true
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
+        '415':
+          $ref: '#/components/responses/ProblemDetails415'
 
   /inspections/transfer-overrides/tickets:
     post:
@@ -558,10 +714,11 @@ paths:
               type: object
               required: [batchNo, materialCode, inspectionType, reason, applicantId]
               properties:
-                batchNo: { type: string }
-                materialCode: { type: string }
+                batchNo: { type: string, minLength: 1 }
+                materialCode: { type: string, minLength: 1 }
                 inspectionType:
                   type: string
+                  enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH, OQC_HEAT, OQC_BLACK, OQC_ZINC, OQC_NICKEL, OQC_PHOSPH, OQC_DACRO, OQC_MACH]
                   description: 目标下游环节（建单检验类型）
                 workOrderNo: { type: string }
                 furnaceHeatNo: { type: string }
@@ -584,8 +741,17 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+          links:
+            reviewTicket:
+              operationId: reviewTransferOverrideTicket
+              parameters:
+                ticketNo: '$response.body#/ticketNo'
         '400':
           description: 豁免原因不足 5 字等校验失败
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
+        '415':
+          $ref: '#/components/responses/ProblemDetails415'
     get:
       summary: 豁免申请单列表（可按批次 / 状态收窄）
       operationId: listTransferOverrideTickets
@@ -621,6 +787,8 @@ paths:
                   total: { type: integer }
                   page: { type: integer }
                   pageSize: { type: integer }
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
 
   /inspections/transfer-overrides/tickets/{ticketNo}/review:
     post:
@@ -661,10 +829,16 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
         '403':
           description: 非质量主管角色
         '404':
           description: 申请单不存在
+        '415':
+          $ref: '#/components/responses/ProblemDetails415'
         '422':
           description: 申请单非 PENDING（重复审批）
 
@@ -711,6 +885,12 @@ paths:
                       type: object
                       additionalProperties: true
                   executedAt: { type: string }
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
+        '415':
+          $ref: '#/components/responses/ProblemDetails415'
 
   /inspections/{id}:
     get:
@@ -735,6 +915,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/InspectionOrder'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
+        '404':
+          $ref: '#/components/responses/ProblemDetails404'
 
   /inspections/{id}/submit-measurements:
     post:
@@ -772,6 +958,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/InspectionOrder'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
+        '404':
+          $ref: '#/components/responses/ProblemDetails404'
+        '415':
+          $ref: '#/components/responses/ProblemDetails415'
 
   /inspections/{id}/approve:
     post:
@@ -798,10 +992,16 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/InspectionOrder'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
         '403':
           description: 当前角色无签核权限（不是 QA_MANAGER / ADMIN / SYSTEM）
         '404':
           description: 检验单不存在
+        '415':
+          $ref: '#/components/responses/ProblemDetails415'
 
   /inspections/{id}/status:
     post:
@@ -842,8 +1042,12 @@ paths:
                 $ref: '#/components/schemas/InspectionOrder'
         '400':
           description: 请求体校验失败（status / judgment 非法取值）
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
         '404':
           description: 检验单不存在
+        '415':
+          $ref: '#/components/responses/ProblemDetails415'
 
   /inspections/{id}/header:
     patch:
@@ -876,8 +1080,12 @@ paths:
                 $ref: '#/components/schemas/InspectionOrder'
         '400':
           description: 请求体校验失败（字段超长 / 非法日期格式）
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
         '404':
           description: 检验单不存在
+        '415':
+          $ref: '#/components/responses/ProblemDetails415'
 
   /master-data/company-profile:
     get:
@@ -891,6 +1099,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CompanyProfile'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
     put:
       summary: 维护企业档案（服务端 upsert，只更新显式给出的字段，空串 = 清空）
       description: updated_by / updated_at 由服务端按当前登录用户与 now() 写入；email 留空须不下发该字段（空串不合法）。
@@ -910,6 +1120,10 @@ paths:
                 $ref: '#/components/schemas/CompanyProfile'
         '400':
           description: 参数校验失败（如 email 非合法邮箱）
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
+        '415':
+          $ref: '#/components/responses/ProblemDetails415'
 
   /mrb/pending-pool:
     get:
@@ -923,6 +1137,17 @@ paths:
           schema:
             type: string
             enum: [IQC, IPQC, FQC, OQC]
+        - name: sourceStage
+          in: query
+          description: stage 的兼容别名（同值枚举）
+          schema:
+            type: string
+            enum: [IQC, IPQC, FQC, OQC]
+        - name: inspectionType
+          in: query
+          description: 检验类型精确匹配（任意字符串，实现侧不约束枚举）
+          schema:
+            type: string
         - name: status
           in: query
           description: >-
@@ -971,6 +1196,10 @@ paths:
                     type: integer
                   pageSize:
                     type: integer
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
 
   /mrb/pending-pool/initiate:
     post:
@@ -989,8 +1218,25 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MRBRecord'
+          links:
+            signRecord:
+              operationId: signMRBRecordNode
+              parameters:
+                id: '$response.body#/id'
+            disposeRecord:
+              operationId: disposeMRBRecord
+              parameters:
+                id: '$response.body#/id'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
+        '404':
+          description: 待审核池条目或源检验单不存在（not-found）
         '409':
           description: 该不合格记录已发起过评审
+        '415':
+          $ref: '#/components/responses/ProblemDetails415'
 
   /mrb/records:
     get:
@@ -1005,21 +1251,24 @@ paths:
             default: ALL
         - name: status
           in: query
-          description: 评审状态过滤，支持逗号分隔多值（「已评审」页签 = DISPOSED,REJECTED）；非法值返回 400
+          description: 评审状态过滤，支持逗号分隔多值（「已评审」页签 = DISPOSED,REJECTED）；逐项按 MRBStatusEnum 校验，非法值返回 400
           schema:
             type: string
+            pattern: '^\s*(PENDING_REVIEW|UNDER_REVIEW|DISPOSED|REJECTED)\s*(,\s*(PENDING_REVIEW|UNDER_REVIEW|DISPOSED|REJECTED)\s*)*$'
             example: DISPOSED,REJECTED
         - name: mrbNo
           in: query
           description: MRB 单号模糊检索
           schema:
             type: string
+            minLength: 1
             example: MRB-20260706-001
         - name: sourceOrderNo
           in: query
           description: 来源检验单号模糊检索
           schema:
             type: string
+            minLength: 1
         - name: disposition
           in: query
           schema:
@@ -1059,6 +1308,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PaginatedMRBRecords'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
 
   /mrb/records/{id}/sign:
     post:
@@ -1099,8 +1352,16 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MRBRecord'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
+        '404':
+          $ref: '#/components/responses/ProblemDetails404'
         '409':
           description: 单据已完成处置，不能再发起会签
+        '415':
+          $ref: '#/components/responses/ProblemDetails415'
 
   /mrb/records/{id}/disposition:
     post:
@@ -1126,6 +1387,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DisposeMRBResponse'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
+        '404':
+          $ref: '#/components/responses/ProblemDetails404'
+        '415':
+          $ref: '#/components/responses/ProblemDetails415'
 
   /review-flows:
     get:
@@ -1146,6 +1415,8 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/ReviewFlow'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
     post:
       summary: 新建或整体保存评审流程定义（按 flow_code + version upsert 整份 nodes）
       operationId: saveReviewFlow
@@ -1170,6 +1441,14 @@ paths:
                     type: string
                   flow:
                     $ref: '#/components/schemas/ReviewFlow'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
+        '409':
+          description: 流程定义主键 / 唯一约束冲突（自带 id 撞主键或 flow_code+version 唯一约束，SQLSTATE 23505）
+        '415':
+          $ref: '#/components/responses/ProblemDetails415'
 
   /review-flows/{id}/toggle-active:
     post:
@@ -1198,8 +1477,14 @@ paths:
                     format: uuid
                   isActive:
                     type: boolean
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
         '404':
           description: 流程定义不存在（注意：路径为 /toggle-active，不存在 /toggle 别名）
+        '415':
+          $ref: '#/components/responses/ProblemDetails415'
 
   /traceability/batches:
     get:
@@ -1211,24 +1496,28 @@ paths:
           required: false
           schema:
             type: string
+            minLength: 1
           description: 批次号或炉批号，模糊匹配
         - name: orderNo
           in: query
           required: false
           schema:
             type: string
+            minLength: 1
           description: 订单号，同时匹配检验单号 / 工单号 / 销售出库单号 / 客户采购订单号
         - name: materialCode
           in: query
           required: false
           schema:
             type: string
+            minLength: 1
           description: 物料编码，模糊匹配
         - name: productName
           in: query
           required: false
           schema:
             type: string
+            minLength: 1
           description: 成品 / 物料名称，模糊匹配
         - name: page
           in: query
@@ -1252,6 +1541,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TraceBatchSearchResponse'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
 
   /traceability/chain-status:
     get:
@@ -1273,21 +1566,25 @@ paths:
           description: 批次号（链路入口 / 追溯主键）
           schema:
             type: string
+            minLength: 1
         - name: materialCode
           in: query
           description: 物料编码（多物料混批时收窄到某一物料；省略则返回整批次全部物料）
           schema:
             type: string
+            minLength: 1
         - name: furnaceHeatNo
           in: query
           description: 炉批号（同炉批号锚点 A2，供跨批次链路使用）
           schema:
             type: string
+            minLength: 1
         - name: workOrderNo
           in: query
           description: MES 生产工单号（同工单锚点 A3）
           schema:
             type: string
+            minLength: 1
       responses:
         '200':
           description: |
@@ -1343,6 +1640,10 @@ paths:
                         additionalProperties: true
                   generatedAt:
                     type: string
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
         '403':
           description: PBAC 未授权（链路视图是详情视图，fail-closed）
 
@@ -1397,6 +1698,8 @@ paths:
                     type: object
                     additionalProperties: true
                   generatedAt: { type: string }
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
 
   /traceability/orders/{orderNo}:
     get:
@@ -1408,6 +1711,7 @@ paths:
           required: true
           schema:
             type: string
+            minLength: 1
           description: 检验单号 / MES 工单号 / 销售出库单号 / 客户采购订单号
       responses:
         '200':
@@ -1416,6 +1720,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TraceOrderChainResponse'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
         '403':
           description: PBAC 未授权。订单维度是详情视图，fail-closed
         '404':
@@ -1431,6 +1739,7 @@ paths:
           required: true
           schema:
             type: string
+            minLength: 1
         - name: direction
           in: query
           required: false
@@ -1454,12 +1763,42 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TraceabilityGraphResponse'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
         '403':
           description: PBAC 命中物料行级权限拦截（fail-closed）；界面必须提示「权限拦截」而不是「无数据」
+        '404':
+          $ref: '#/components/responses/ProblemDetails404'
 
   /integration/sync:
     post:
-      summary: 触发 ERP 6类基础档案或 MES 车间工序在制品批次同步
+      summary: ERP 主数据即时同步（管家婆 → 本地镜像；前端主数据页「一键同步」调用）
+      description: >-
+        直连管家婆 ERP（SQL Server）拉取存货 / 供应商 / 仓库等主数据并 upsert 到本地镜像表，
+        成功失败都以 200 返回（失败信息在 `details.success=false` / `message`），
+        实现见 `apps/api/src/controllers/integration.controller.ts` 的 `POST /sync`。
+        **无请求体**：全量同步，不接筛选参数。
+      operationId: syncErpMasterData
+      responses:
+        '200':
+          description: 同步执行结果（details 内含各类档案同步条数；`details.success=false` 表示 ERP 连接失败）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErpSyncResponse'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
+
+  /integration/sync/trigger:
+    post:
+      summary: 触发同步流水任务（ERP 本地镜像清点 / MES 测试库生产质检实绩同步，写入 integration_sync_logs）
+      description: >-
+        `systemType=ERP` 时对本地 ERP 主数据镜像表做一次真实清点并把行数写入同步流水；
+        `systemType=MES` 时直连 MES 测试库（mes_letian_test）同步车间生产与质检实绩。
+        本环境没有可达的真实外部 MES/ERP 服务，不伪造远端拉取条数；接入真实外部系统后替换清点逻辑。
+        实现见 `integration.controller.ts` 的 `POST /sync/trigger`。
       operationId: triggerIntegrationSync
       requestBody:
         required: true
@@ -1469,11 +1808,17 @@ paths:
               $ref: '#/components/schemas/SyncRequest'
       responses:
         '200':
-          description: 同步执行结果
+          description: 同步流水已登记（syncLogId 可回查 integration_sync_logs）
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/SyncResponse'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
+        '415':
+          $ref: '#/components/responses/ProblemDetails415'
 
   /audit/stats:
     get:
@@ -1486,6 +1831,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AuditStatsResponse'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
 
   /audit/logs:
     get:
@@ -1496,21 +1843,36 @@ paths:
           in: query
           schema:
             type: integer
+            minimum: 1
             default: 1
         - name: pageSize
           in: query
           schema:
             type: integer
+            minimum: 1
+            maximum: 100
             default: 20
         - name: action
           in: query
+          description: 操作类型过滤（契约 AuditAction 枚举，非枚举值返回 400）
           schema:
             type: string
+            enum: [CREATE, UPDATE, STATUS_CHANGE, DISPOSE, GATE_BLOCKED, AUTH_FAILED, VALIDATION_REJECTED, SYNC_TRIGGER]
         - name: status
           in: query
           schema:
             type: string
             enum: [SUCCESS, REJECTED, FAILED]
+        - name: resourceType
+          in: query
+          description: 资源类型过滤（任意字符串）
+          schema:
+            type: string
+        - name: resourceId
+          in: query
+          description: 资源 ID 过滤（任意字符串）
+          schema:
+            type: string
       responses:
         '200':
           description: 操作日志明细列表
@@ -1530,6 +1892,10 @@ paths:
                     type: integer
                   pageSize:
                     type: integer
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
 
 components:
   securitySchemes:
@@ -1544,7 +1910,104 @@ components:
         免鉴权入口只有两处，且都不在本 spec 的路径清单内：根 `/health` 探针（不在 `/api/v1` 下）
         与开发态 `/auth/**`（生产环境该控制器整体不注册路由，改走企业 SSO / OAuth2 / LDAP）。
         口径见 `apps/api/src/app.ts` 第 5~6 步与 `apps/api/src/plugins/auth.ts`。
+  responses:
+    ProblemDetails400:
+      description: >-
+        请求校验失败（RFC 7807）：路径 / 查询 / 请求体未过 Zod 契约校验，
+        或 PostgreSQL 拒绝的非法 JSONB 载荷（SQLSTATE 22P05 已映射为 400，见
+        `apps/api/src/plugins/error-handler.ts`）。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    ProblemDetails401:
+      description: >-
+        未提供认证凭据 / Bearer 格式非法 / JWT 校验失败或过期（RFC 7807）。
+        全部受保护路由在 onRequest 阶段统一拦截，与业务无关。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    ProblemDetails403:
+      description: 角色或 PBAC 物料行级权限不足（RFC 7807，fail-closed）。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    ProblemDetails404:
+      description: 目标资源不存在（RFC 7807）：URL 指定的实体行未找到。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    ProblemDetails409:
+      description: >-
+        资源状态 / 唯一性冲突（RFC 7807）：主键或唯一约束冲突（SQLSTATE 23505）、
+        已发起过评审、成品检强制关卡拦截等。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    ProblemDetails415:
+      description: >-
+        请求体 Content-Type 缺失或不受支持（RFC 7807）：带体写接口只收
+        `application/json`，缺省 Content-Type 一律拒绝。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    ProblemDetails422:
+      description: >-
+        业务门禁阻断（RFC 7807）：传递门禁判定不可放行（TRANSFER_BLOCKED），
+        `details` 含完整 `transferDecision` 与 `blockedBy` 三元组（docs/48 §4.6）。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
   schemas:
+    ProblemDetails:
+      type: object
+      required: [type, title, status, detail, code]
+      description: >-
+        统一错误响应体（RFC 7807 `application/problem+json`）。由全局错误处理器
+        `apps/api/src/plugins/error-handler.ts` 单点组装：业务错误（validation-failed /
+        not-found / conflict / forbidden / gate-blocked 等）、Fastify 框架错误（415 等）
+        与未预期 5xx 全部走这一形状，`code` 为机器可读错误码，`traceId` 与审计 / 日志同源。
+      properties:
+        type:
+          type: string
+          format: uri
+          description: 错误类型 URI（https://letian-qms.com/errors/{code}）
+        title:
+          type: string
+          description: 人类可读错误摘要
+        status:
+          type: integer
+          description: HTTP 状态码（与响应行一致）
+        detail:
+          type: string
+          description: 详细原因（含校验失败字段清单）
+        instance:
+          type: string
+          description: 出错请求路径
+        code:
+          type: string
+          description: 机器可读错误码（validation-failed / unauthorized / not-found / conflict / transfer-blocked 等）
+        traceId:
+          type: string
+          description: 链路追踪 ID（req-*）
+        invalidParams:
+          type: array
+          description: Zod 校验失败字段明细（仅 400 出现）
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              reason: { type: string }
+        details:
+          type: object
+          description: 业务附加上下文（如门禁阻断的 transferDecision / blockedBy）
+          additionalProperties: true
     FurnaceHeatTraceResponse:
       type: object
       required: [heatBatchNo, sourceType, matchScope, inheritedItems]
@@ -1635,13 +2098,17 @@ components:
 
     DashboardOverviewResponse:
       type: object
-      required: [totalInspections, passRate, pendingCount, inMRBCount, stageDistribution, trendSeries, topDefects, recentActivities]
+      required: [totalInspections, passRate, pendingCount, inspectingCount, failedCount, inMRBCount, stageDistribution, trendSeries, topDefects, recentActivities]
       properties:
         totalInspections:
           type: integer
         passRate:
           type: number
         pendingCount:
+          type: integer
+        inspectingCount:
+          type: integer
+        failedCount:
           type: integer
         inMRBCount:
           type: integer
@@ -1656,44 +2123,50 @@ components:
               type: integer
         trendSeries:
           type: array
+          description: 近 7 天趋势（工单创建日分组，按三检验环节分段计数）
           items:
             type: object
-            required: [date, totalCount, passRate]
+            required: [date, iqcCount, ipqcCount, oqcCount, passRate]
             properties:
               date:
                 type: string
-              totalCount:
+              iqcCount:
+                type: integer
+              ipqcCount:
+                type: integer
+              oqcCount:
                 type: integer
               passRate:
                 type: number
         topDefects:
           type: array
+          description: 不良排行（按缺陷名称聚合）
           items:
             type: object
-            required: [materialName, defectCount]
+            required: [defectName, category, count]
             properties:
-              materialName:
+              defectName:
                 type: string
-              defectCount:
+              category:
+                type: string
+              count:
                 type: integer
         recentActivities:
           type: array
           items:
             type: object
+            required: [id, type, title, status, timestamp]
             properties:
               id:
                 type: string
-              batchNo:
+              type:
                 type: string
-              materialName:
+              title:
                 type: string
-              result:
+              status:
                 type: string
-              operator:
+              timestamp:
                 type: string
-              createdAt:
-                type: string
-                format: date-time
 
     ReleaseGateSuccessResponse:
       type: object
@@ -1712,19 +2185,32 @@ components:
           format: date-time
 
     ReleaseGateBlockedResponse:
-      type: object
-      required: [batchNo, gateStatus, reasonCode, message]
-      properties:
-        batchNo:
-          type: string
-        gateStatus:
-          type: string
-          enum: [BLOCKED]
-        reasonCode:
-          type: string
-          enum: [GATE_NOT_INSPECTED, GATE_INSPECTING, GATE_FAILED, GATE_UNDER_MRB]
-        message:
-          type: string
+      description: >-
+        强制关卡拦截（HTTP 409，`application/problem+json`）：在 ProblemDetails 之上
+        附加批次 / 关卡 / 理由码 / 相关单据号，客户端按 `code` / `gateCode` 分支即可，
+        不必解析 `title`（实现见 `release-gates.controller.ts`）。
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetails'
+        - type: object
+          required: [batchNo, requiredGate, gateCode, inspectionOrderNo, mrbNo, terminateChain]
+          properties:
+            batchNo:
+              type: string
+            requiredGate:
+              type: string
+              enum: [OQC]
+            gateCode:
+              type: string
+              description: 传递判定理由码（TransferGateCode，如 UPSTREAM_FAILED / UPSTREAM_UNDER_MRB）
+            inspectionOrderNo:
+              type: [string, 'null']
+              description: 相关检验单号（无关联单时为 null）
+            mrbNo:
+              type: [string, 'null']
+              description: 相关 MRB 评审单号（无 MRB 时为 null）
+            terminateChain:
+              type: boolean
+              description: 链路是否已终止（上游 RETURN_TO_VENDOR / SCRAP 终局）
 
     InspectionOrder:
       type: object
@@ -1955,6 +2441,7 @@ components:
       properties:
         orderNo:
           type: string
+          minLength: 1
           description: >-
             检验单号；省略时由服务端按 {类型前缀}-{YYYYMMDD}-{4位流水号} 规则生成
             （出货检验 OQC_SH 示例见下），显式传入时以其为准（兼容 ERP/MES 外部单号）
@@ -1964,14 +2451,19 @@ components:
           enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH, OQC_HEAT, OQC_BLACK, OQC_ZINC, OQC_NICKEL, OQC_PHOSPH, OQC_DACRO, OQC_MACH]
         materialCode:
           type: string
+          minLength: 1
           description: 物料编码（ERP Ptype.UserCode）；服务端按它回查存货档案，为台账补齐物料名称 / 规格型号 / 计量单位
+          example: MAT-304SS-05
         materialName:
           type: string
+          minLength: 1
           description: >-
             物料名称/品名（ERP Ptype.FullName -> materials.material_name）；
             省略时服务端按 materialCode 从存货档案补齐（补齐失败返回 400 validation-failed）
         batchNo:
           type: string
+          minLength: 1
+          example: B20231013-01
         supplierCode:
           type: string
         supplierName:
@@ -1982,10 +2474,12 @@ components:
           type: string
         sampleQty:
           type: number
+          exclusiveMinimum: 0
         isMandatoryGate:
           type: boolean
         totalQty:
           type: number
+          minimum: 0
           description: 报检批量总数（落库 inspection_orders.total_qty，过程检验台账「数量」列）
         furnaceHeatNo:
           type: string
@@ -2092,6 +2586,39 @@ components:
             指定的质检方案版本行 UUID；显式传入时必须真实存在（否则 404，禁止静默降级为其它方案）；
             省略时服务端按「物料编码 + 检验类型」自动匹配已启用方案，匹配不到返回 400 inspection-plan-not-found。
             口径见 docs/17-检验录入界面说明与质检方案匹配口径.md §7
+        transferOverride:
+          $ref: '#/components/schemas/TransferOverrideInput'
+
+    TransferOverrideInput:
+      type: object
+      required: [reason, approverId]
+      description: >-
+        质量负责人传递门禁特批豁免直接输入（docs/48 §8 / TBD-09）：随 `POST /inspections`
+        携带，允许绕过上游未合格的 422 阻断；审批人须具备 QA_MANAGER / ADMIN 权限，全部要素记入审计。
+      properties:
+        reason:
+          type: string
+          minLength: 5
+          description: 豁免原因（必填，至少 5 字，记入审计）
+          example: 客户紧急试制，质量总监李工特批放行
+        approverId:
+          type: string
+          format: uuid
+          description: 审批人 UUID（须具备 QA_MANAGER 或 ADMIN 权限）
+        approverName:
+          type: string
+          description: 审批人姓名快照
+        approvalDocNo:
+          type: string
+          description: 书面特批单据编号
+          example: QA-OVR-20260924-001
+        ticketId:
+          type: string
+          format: uuid
+          description: 关联的已审批豁免工单 ID（若走完审批流）
+        ticketNo:
+          type: string
+          description: 关联的已审批豁免工单编号（如 TOT-20260924-0001）
 
     MatchedInspectionPlan:
       type: object
@@ -2143,8 +2670,10 @@ components:
           description: 指标项序号
         itemCode:
           type: string
+          minLength: 1
         name:
           type: string
+          minLength: 1
         dataType:
           type: string
           enum: [NUMERIC, TEXT, QUALITATIVE]
@@ -2159,6 +2688,7 @@ components:
           description: 定性 / 文本型的可接受值清单（TBD-06）。非空时判定只认清单成员，不再依赖 standardText 的 “, ， / |” 分隔符约定；建单时随方案快照固化进工单指标项
           items:
             type: string
+            minLength: 1
         nominalValue:
           type: number
         upperTolerance:
@@ -2235,14 +2765,14 @@ components:
           type: string
           enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH, OQC_HEAT, OQC_BLACK, OQC_ZINC, OQC_NICKEL, OQC_PHOSPH, OQC_DACRO, OQC_MACH]
         materialCode:
-          type: string
-          description: 专属物料编码；空串表示「该分类的通用方案」（014 口径）
+          type: [string, 'null']
+          description: 专属物料编码；null / 空串表示「该分类的通用方案」（014 口径）
         materialName:
           type: string
           description: 适用产品名称（按 material_code 联表 materials 读时派生，分类通用方案为空）
         categoryCode:
-          type: string
-          description: 方案归属存货分类编码（分类级兜底匹配与分类筛选的检索键）
+          type: [string, 'null']
+          description: 方案归属存货分类编码（分类级兜底匹配与分类筛选的检索键；无分类归属时为 null）
         categoryId:
           type: string
           format: uuid
@@ -2267,7 +2797,7 @@ components:
           format: date-time
     CreateInspectionPlanRequest:
       type: object
-      required: [planName, inspectionType]
+      required: [planName, inspectionType, versions]
       description: >-
         新建质检方案请求体（POST /api/v1/plans 专用口径）。与读模型 InspectionPlan 有两处差别：
         ① versions[].id / planId / createdBy 由服务端派生（版本行 UUID 落库时才生成、创建人取 JWT 操作人），
@@ -2281,29 +2811,52 @@ components:
       properties:
         planCode:
           type: string
+          minLength: 1
           description: 方案编码；留空（不传字段）时由服务端按 QP-{YYYYMMDD}-{NNN} 取号，显式传入按原值使用，传空串会被 400 拒绝
         planName:
           type: string
+          minLength: 1
         inspectionType:
           type: string
           enum: [IQC, IPQC_CT, IPQC_RL, IPQC_FN, OQC_SF, OQC_SH, OQC_HEAT, OQC_BLACK, OQC_ZINC, OQC_NICKEL, OQC_PHOSPH, OQC_DACRO, OQC_MACH]
         materialCode:
+          type: [string, 'null']
+          description: 专属物料编码；留空 / null = 分类通用方案（需配合 categoryCode）
+        materialName:
           type: string
-          description: 专属物料编码；留空 = 分类通用方案（需配合 categoryCode）
+          description: 适用产品名称（可选；缺省时读侧按 materialCode 派生）
         categoryCode:
-          type: string
+          type: [string, 'null']
           description: 方案归属存货分类编码；缺省时回落到绑定物料的真实存货分类
+        categoryId:
+          type: string
+          format: uuid
+          description: 绑定的存货分类 ID（分类继承模式）
+        categoryName:
+          type: string
+          description: 存货分类名称（可选；读侧按 categoryCode 联表派生）
+        materialCategory:
+          type: string
+        isCategoryDefault:
+          type: boolean
+          description: 是否为该分类的默认（通用）方案
+        status:
+          $ref: '#/components/schemas/PlanStatus'
         versions:
           type: array
+          minItems: 1
+          description: 至少一个版本（versions 省略或为空时 PLAN_EMPTY_ITEMS 拒绝为 400）
           items:
             $ref: '#/components/schemas/CreateInspectionPlanVersion'
     CreateInspectionPlanVersion:
       type: object
-      required: [versionNo]
+      required: [versionNo, items]
       description: 新建方案时的版本正文（版本行 id / planId / createdBy 由服务端生成，故不在此列出）
       properties:
         versionNo:
           type: string
+          minLength: 1
+          description: 版本号必填且非空（实现侧「版本号不能为空」）
         status:
           type: string
           description: 提交值会被服务端忽略：首个版本一律以 DRAFT 落库
@@ -2322,6 +2875,8 @@ components:
           description: 版本生效截止日 YYYY-MM-DD（落 sampling_config JSONB）；留空 = 长期有效
         items:
           type: array
+          minItems: 1
+          description: 至少一个指标项（为空时 PLAN_EMPTY_ITEMS 拒绝为 400）
           items:
             $ref: '#/components/schemas/InspectionPlanItem'
     PlanStatus:
@@ -2413,15 +2968,23 @@ components:
             $ref: '#/components/schemas/InspectionPlan'
     SubmitMeasurementsRequest:
       type: object
-      required: [inspectorId, isDraft, items]
+      required: [items]
+      description: >-
+        实测值批量录入 / 判定请求（实现 = `BatchRecordInspectionItemsRequestSchema` 去 `orderId`，
+        orderId 由 URL 路径给出）。`items` 至少 1 项；`inspectorId` / `inspectionNotes`
+        为兼容字段，服务端按 Zod 默认剥离（不生效、不报错）。
       properties:
         inspectorId:
           type: string
           format: uuid
+          description: 兼容字段（服务端剥离不生效）；检验人身份以登录态为准
         isDraft:
           type: boolean
+          default: false
+          description: true = 草稿暂存（不触发入池 / 自动建 MRB）；false = 正式提交判定
         inspectionNotes:
           type: string
+          description: 兼容字段（服务端剥离不生效）；检验备注经 `items[].remark` 或终判接口下发
         passQty:
           type: number
           minimum: 0
@@ -2432,15 +2995,44 @@ components:
           description: 检验员填写的不合格数量（落 inspection_orders.fail_qty，并作为自动创建 MRB 单的「不合格数量」，口径见 docs/21 §14）
         items:
           type: array
+          minItems: 1
           items:
             type: object
             required: [itemCode]
             properties:
               itemCode:
                 type: string
+                minLength: 1
               measuredVal:
                 type: number
               measuredText:
+                type: string
+              isExempt:
+                type: boolean
+                description: 是否标记为不解检（免检）
+              exemptReason:
+                type: string
+              defectReason:
+                type: string
+              remark:
+                type: string
+              inheritedFrom:
+                type: string
+                enum: [OUTSOURCE_HEAT_TREATMENT, IQC_RAW_MATERIAL, MANUAL_ENTRY]
+                description: 炉批号带出溯源来源（docs/47）
+              originalInheritedValue:
+                type: [number, string]
+                description: 带出原值（溯源留痕）
+              inheritedHeatValue:
+                type: [number, string]
+              inheritedValue:
+                type: [number, string]
+              isManuallyModified:
+                type: boolean
+                description: 带出值是否经质检员手工修改
+              modifiedReason:
+                type: string
+              modificationReason:
                 type: string
 
     ApproveInspectionOrderRequest:
@@ -2779,21 +3371,26 @@ components:
       required: [disposition]
       description: >-
         处置决议提交体：除 disposition 外，必须在 dispositionReason / dispositionNotes / reason
-        中至少提供一项（服务端强校验，缺失返回 400）。
+        中至少提供一项（服务端 .refine 强校验，缺失返回 400）。
+        `disposition=CONCESSION`（让步接收 / 特采）必须附 `concessionAttachmentUrl`
+        客户书面签署凭证，除非该评审单此前已留存过凭证 —— 缺失返回 400
+        CONCESSION_NOT_SIGNED_OFF（服务端兜底依赖库内既有值，请求侧无法判定，故不硬性标记 required）。
       properties:
         disposition:
           type: string
-          enum: [RETURN_TO_VENDOR, REWORK, CONCESSION, SCRAP]
+          enum: [RETURN_TO_VENDOR, REWORK, CONCESSION, SCRAP, RETURN]
           description: 处置决策方式（兼容别名 RETURN = RETURN_TO_VENDOR）
         dispositionReason:
           type: string
-          description: 处置决议理由与防范措施（页面字段名；与 reason / dispositionNotes 至少一项）
+          minLength: 2
+          description: 处置决议理由与防范措施（页面字段名；与 reason / dispositionNotes 至少一项，至少 2 字）
         reason:
           type: string
           description: dispositionReason 的兼容别名
         dispositionNotes:
           type: string
-          description: dispositionReason 的兼容别名
+          minLength: 2
+          description: dispositionReason 的兼容别名（至少 2 字）
         approvers:
           type: array
           description: 可选：本次共同签署人凭证；省略时沿用会签历史，最终裁决人记入 disposedBy
@@ -2819,9 +3416,14 @@ components:
               signedAt:
                 type: string
                 format: date-time
+                pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:[0-5]\d'
         concessionAttachmentUrl:
           type: string
           description: 特采让步接收时强制上传的客户书面签署凭证地址
+      anyOf:
+        - required: [dispositionReason]
+        - required: [dispositionNotes]
+        - required: [reason]
 
     DisposeMRBResponse:
       description: >-
@@ -3073,38 +3675,73 @@ components:
 
     SyncRequest:
       type: object
-      required: [target]
+      description: >-
+        `/integration/sync/trigger` 请求体（`TriggerSyncRequestSchema`）。
+        全部字段可省略：`systemType` 缺省时由 `target` 派生，两者都缺省默认 MES；
+        兼容历史写法 `{target}` 与契约写法 `{systemType, syncScope}`。
       properties:
+        systemType:
+          type: string
+          enum: [MES, ERP]
+          description: 同步目标系统域：ERP = 本地 ERP 主数据镜像清点；MES = MES 测试库生产质检实绩同步；缺省时按 target 派生，否则默认 MES
+        syncScope:
+          type: string
+          enum: [ALL, INCREMENTAL]
+          default: INCREMENTAL
         target:
           type: string
-          enum:
-            - ERP_SUPPLIERS
-            - ERP_CUSTOMERS
-            - ERP_INVENTORY
-            - ERP_CATEGORIES
-            - ERP_WAREHOUSES
-            - ERP_WORKSHOPS
-            - ERP_EMPLOYEES
-            - MES_PRODUCTION_BATCHES
+          minLength: 1
+          description: 历史兼容字段（ERP_MASTER_DATA / MES_PRODUCTION_BATCHES）；与 systemType 同传时以 systemType 为准
 
     SyncResponse:
       type: object
-      required: [syncLogId, target, status, recordsCount, syncedAt]
+      required: [syncLogId, batchNo, target, systemType, syncDirection, status, recordsCount, message, syncedAt]
       properties:
         syncLogId:
           type: string
           format: uuid
-          description: 本次触发数据同步的任务/日志唯一ID
+          description: 本次触发数据同步的任务/日志唯一ID（integration_sync_logs.id）
+        batchNo:
+          type: string
+          description: 同步流水批次号（SYNC-{systemType}-{时间戳后8位}）
         target:
           type: string
+          description: 同步目标域：默认按 systemType 派生（ERP_MASTER_DATA / MES_PRODUCTION_BATCHES）；显式传入 target 时按原值回显
+        systemType:
+          type: string
+          enum: [MES, ERP]
+        syncDirection:
+          type: string
+          enum: [PULL, PUSH]
         status:
           type: string
           enum: [SUCCESS, PARTIAL_FAIL, FAILED]
         recordsCount:
           type: integer
+        details:
+          type: [object, array, 'null']
+          description: MES 同步明细（字符串数组或对象，视同步分支；ERP 清点时为 null）
+        message:
+          type: string
         syncedAt:
           type: string
           format: date-time
+
+    ErpSyncResponse:
+      type: object
+      required: [success, message]
+      description: >-
+        `/integration/sync`（管家婆 ERP 主数据即时同步）响应体：
+        同步成败在 `details.success` / `message` 内反映，HTTP 恒 200。
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+          description: 各类档案同步条数（success / syncedMaterials / syncedSuppliers / syncedWarehouses 等）
 
     PaginatedInspectionOrders:
       type: object

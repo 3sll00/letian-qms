@@ -30,6 +30,8 @@ tools/contract/.venv/
 tools/contract/reports/
 tools/contract/.hypothesis/
 tools/contract/.schemathesis/
+# schemathesis 在仓库根目录直接运行时产生的状态目录
+.schemathesis/
 
 # 编辑器与系统文件
 .DS_Store

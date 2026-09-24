@@ -96,6 +96,18 @@ const errorHandlerPluginAsync: FastifyPluginAsync = async (fastify) => {
 
     // 3. 常见 HTTP 错误或 Fastify 框架抛出的状态码
     const statusCode = normalized.statusCode ?? 500;
+
+    // QUERY 等 bodywith 方法无 Content-Type 时，Fastify 在路由前以
+    // FST_ERR_ROUTE_MISSING_CONTENT_TYPE 400 拦截（RFC 10008）。
+    // 若路径模板已注册但该方法未注册，本质仍是「方法不被支持」，
+    // 按 405 回吐，与文件尾部 notFound → 405 的口径一致。
+    if (normalized.code === 'FST_ERR_ROUTE_MISSING_CONTENT_TYPE') {
+      const allowed = allowedMethodsForPath(request.url.split('?')[0] ?? '/');
+      if (allowed.size > 0) {
+        return sendMethodNotAllowed(request, reply, allowed);
+      }
+    }
+
     if (statusCode === 400) {
       // Fastify 自身抛出的 4xx（如 FST_ERR_CTP_EMPTY_JSON_BODY：声明了
       // content-type: application/json 却提交空体）本质是调用方请求有误，
@@ -244,6 +256,69 @@ const errorHandlerPluginAsync: FastifyPluginAsync = async (fastify) => {
         code: ErrorCode.INTERNAL_SERVER_ERROR,
         traceId,
       });
+  });
+
+  // RFC 9110 §15.5.6：路径已注册但请求方法不支持时应返回 405 + Allow 头，
+  // 而不是 404。经 onRoute 钩子自收集已注册路由表（path 为含前缀的完整
+  // 模板），供 notFound 与错误处理共用：
+  // - Fastify 对未注册方法（含 TRACE 等）落到 notFound → 原生 404
+  // - QUERY 属 bodywith 方法，无 Content-Type 时在路由前被
+  //   FST_ERR_ROUTE_MISSING_CONTENT_TYPE 400 拦截（RFC 10008）
+  // 两种情况统一翻译为 405；路径完全未知时保持原生 404。
+  const registeredRoutes: { pattern: string; methods: string[] }[] = [];
+  fastify.addHook('onRoute', (routeOptions) => {
+    const pattern = (routeOptions as { path?: string }).path ?? routeOptions.url;
+    const methods = (
+      Array.isArray(routeOptions.method) ? routeOptions.method : [routeOptions.method]
+    ).map((m) => m.toUpperCase());
+    registeredRoutes.push({ pattern, methods });
+  });
+  const allowedMethodsForPath = (pathname: string): Set<string> => {
+    const segments = pathname.split('/').filter(Boolean);
+    const allowed = new Set<string>();
+    for (const { pattern, methods } of registeredRoutes) {
+      const pSegs = pattern.split('/').filter(Boolean);
+      if (pSegs.length !== segments.length) continue;
+      const matched = pSegs.every(
+        (seg: string, i: number) => seg === '*' || seg.startsWith(':') || seg === segments[i]
+      );
+      if (matched) for (const m of methods) allowed.add(m);
+    }
+    return allowed;
+  };
+  const sendMethodNotAllowed = (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    allowed: Set<string>
+  ) => {
+    // Fastify 默认 exposeHeadRoutes：GET 路由自动响应 HEAD，Allow 中一并声明
+    if (allowed.has('GET')) allowed.add('HEAD');
+    const allow = [...allowed].join(', ');
+    return reply
+      .status(405)
+      .header('Allow', allow)
+      .header('Content-Type', 'application/problem+json')
+      .send({
+        type: 'https://letian-qms.com/errors/method-not-allowed',
+        title: '请求方法不被支持',
+        status: 405,
+        detail: `${request.method} 方法不被该路由支持；允许的方法: ${allow}`,
+        instance: request.url,
+        code: 'HTTP_405',
+        traceId: requestTraceId(request),
+      });
+  };
+  fastify.setNotFoundHandler((request, reply) => {
+    const pathname = request.url.split('?')[0] ?? '/';
+    const allowed = allowedMethodsForPath(pathname);
+    if (allowed.size === 0) {
+      return reply.status(404).send({
+        statusCode: 404,
+        error: 'Not Found',
+        message: `Route ${request.method}:${pathname} not found`,
+      });
+    }
+    return sendMethodNotAllowed(request, reply, allowed);
   });
 };
 

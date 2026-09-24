@@ -55,7 +55,14 @@
     "desktop:smoke": "pnpm --filter @letian/web run build:mock && pnpm --filter @letian/desktop run build && pnpm --filter @letian/desktop run copy:web && pnpm --filter @letian/desktop run smoke",
     "desktop:build": "pnpm --filter @letian/web run build && pnpm --filter @letian/desktop run build && pnpm --filter @letian/desktop run copy:web && pnpm --filter @letian/desktop run package",
     "desktop:demo": "pnpm --filter @letian/web run build:mock && pnpm --filter @letian/desktop run build && pnpm --filter @letian/desktop run copy:web && pnpm --filter @letian/desktop run package:demo",
-    "verify:board-transfer-gate": "node scripts/testing/board-transfer-gate-ui-verify.cjs"
+    "verify:board-transfer-gate": "node scripts/testing/board-transfer-gate-ui-verify.cjs",
+    "contract:db:create": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/db/contract-test-db.ps1 create",
+    "contract:db:status": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/db/contract-test-db.ps1 status",
+    "contract:db:drop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/db/contract-test-db.ps1 drop",
+    "contract:db:prepare": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/contract/prepare-test-db.ps1",
+    "contract:api": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/contract/start-api.ps1",
+    "contract:run": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/contract/run.ps1",
+    "contract:run:get": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/contract/run.ps1 -Get"
   },
   "devDependencies": {
     "typescript": "^5.4.5",

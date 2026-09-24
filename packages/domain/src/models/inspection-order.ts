@@ -469,7 +469,10 @@ export class InspectionOrder {
       standardText: pItem.standardText,
       acceptableValues: pItem.acceptableValues,
       unit: pItem.unit,
-      sampleSize: this.sampleQty,
+      // InspectionItemSchema.sampleSize 声明为 int；sampleQty 契约是任意正数
+      // （可按重量抽检），落到单项「抽样数」须取整，否则契约自产自销非法值
+      // （实测：sampleQty=5e-324 原样写入 → 响应 sampleSize 违反 integer 契约）
+      sampleSize: Math.max(1, Math.ceil(this.sampleQty)),
       result: 'PENDING',
       isExempt: false,
       isManuallyModified: false,

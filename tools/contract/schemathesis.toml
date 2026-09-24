@@ -1,0 +1,104 @@
+# Schemathesis 配置（docs/49 P2 契约漂移场景）
+# 运行对象：独立测试库 letian_qms_contract_test 上的 API（默认 :3101），
+# 绝不指向真实库 —— 写路径 fuzz 会产生脏数据，测试库可随时 drop 重建。
+#
+# 鉴权口径（docs/49 §9 TBD-03）：契约优先 —— spec 已登记
+# components.securitySchemes.bearerAuth + 根级 security，
+# 这里用 [auth.dynamic.openapi.bearerAuth]（块名必须等于 spec 里的 scheme 名），
+# Schemathesis 自动 POST 登录端点、按 JSON Pointer 取 token、随每个请求下发。
+
+[auth.dynamic.openapi.bearerAuth]
+# path 相对 spec servers[0].url（=/api/v1）解析 —— 实测会拼到完整 base URL 上，
+# 故写 /auth/login 而非 /api/v1/auth/login（否则 404 /api/v1/api/v1/auth/login）
+path = "/auth/login"
+method = "post"
+# 空表 payload={} 会被当成"无 body"发送，服务端 Zod 校验报 "Expected object, received null"；
+# 显式给种子职员 UUID（张强 / QA_MANAGER，带全量 PBAC 通配规则）
+payload = { userId = "11000000-0000-4000-8000-000000000001" }
+extract_selector = "/token"
+
+# 生成器噪声收口（实测依据）：
+# - \x00：PostgreSQL text 列无法存储 NUL（SQLSTATE 22xxx → error-handler 兜底 400
+#   「无法落库」），spec 无法逐参数表达"禁止 NUL"，属生成器噪声而非 API 缺陷；
+# - extra-parameters：服务端对未知字段按 Zod 剥离/容忍（实测 upgrade 携带 4 个
+#   未定义属性仍走到领域规则），随机附加字段不产生有效缺陷面。
+[generation]
+allow-x00 = false
+allow-extra-parameters = false
+
+# 业务状态依赖的领域守门按项目约定一律收敛为 400（contracts inspection.ts
+# 「领域守门（一律 400）」、docs/04 §206）：schema 完全合规的请求在状态冲突 /
+# 外键存在性校验下被合法拒绝 —— PLAN_DRAFT_ALREADY_EXISTS（重复 upgrade）、
+# MRB_ALREADY_CLOSED、物料编码不在 materials 档案等。spec links/example 已让
+# 正例可达，但 fuzz 重复命中同一资源时此类 400 无法消除，故对受影响操作把 400
+# 纳入 positive_data_acceptance 的 expected-statuses（仍校验 400 响应的
+# problem+json 形状，由 status_code_conformance 覆盖）。
+[[operations]]
+include-operation-id = "createInspectionOrder"
+  [operations.checks.positive_data_acceptance]
+  expected-statuses = ["2xx", "400", "401", "403", "404", "409", "429", "5xx"]
+
+[[operations]]
+include-operation-id = "createInspectionPlan"
+  [operations.checks.positive_data_acceptance]
+  expected-statuses = ["2xx", "400", "401", "403", "404", "409", "429", "5xx"]
+
+[[operations]]
+include-operation-id = "upgradePlanVersion"
+  [operations.checks.positive_data_acceptance]
+  expected-statuses = ["2xx", "400", "401", "403", "404", "409", "429", "5xx"]
+
+[[operations]]
+include-operation-id = "togglePlanVersionStatus"
+  [operations.checks.positive_data_acceptance]
+  expected-statuses = ["2xx", "400", "401", "403", "404", "409", "429", "5xx"]
+
+[[operations]]
+include-operation-id = "disposeMRBRecord"
+  [operations.checks.positive_data_acceptance]
+  expected-statuses = ["2xx", "400", "401", "403", "404", "409", "429", "5xx"]
+
+[[operations]]
+include-operation-id = "signMRBRecordNode"
+  [operations.checks.positive_data_acceptance]
+  expected-statuses = ["2xx", "400", "401", "403", "404", "409", "429", "5xx"]
+
+[[operations]]
+include-operation-id = "initiateMRBReview"
+  [operations.checks.positive_data_acceptance]
+  expected-statuses = ["2xx", "400", "401", "403", "404", "409", "429", "5xx"]
+
+[[operations]]
+include-operation-id = "submitMeasurements"
+  [operations.checks.positive_data_acceptance]
+  expected-statuses = ["2xx", "400", "401", "403", "404", "409", "429", "5xx"]
+
+[[operations]]
+include-operation-id = "approveInspectionOrder"
+  [operations.checks.positive_data_acceptance]
+  expected-statuses = ["2xx", "400", "401", "403", "404", "409", "429", "5xx"]
+
+[[operations]]
+include-operation-id = "finalizeInspectionStatus"
+  [operations.checks.positive_data_acceptance]
+  expected-statuses = ["2xx", "400", "401", "403", "404", "409", "429", "5xx"]
+
+[[operations]]
+include-operation-id = "updateInspectionHeader"
+  [operations.checks.positive_data_acceptance]
+  expected-statuses = ["2xx", "400", "401", "403", "404", "409", "429", "5xx"]
+
+[[operations]]
+include-operation-id = "createTransferOverrideTicket"
+  [operations.checks.positive_data_acceptance]
+  expected-statuses = ["2xx", "400", "401", "403", "404", "409", "429", "5xx"]
+
+[[operations]]
+include-operation-id = "reviewTransferOverrideTicket"
+  [operations.checks.positive_data_acceptance]
+  expected-statuses = ["2xx", "400", "401", "403", "404", "409", "429", "5xx"]
+
+[[operations]]
+include-operation-id = "batchFreezeTerminatedChains"
+  [operations.checks.positive_data_acceptance]
+  expected-statuses = ["2xx", "400", "401", "403", "404", "409", "429", "5xx"]

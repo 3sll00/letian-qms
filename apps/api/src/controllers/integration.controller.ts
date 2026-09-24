@@ -270,11 +270,11 @@ export const integrationController: FastifyPluginAsync<{ container: ApiContainer
         createdAt: new Date().toISOString(),
       };
 
+      // task_name 列宽 VARCHAR(64)：明细 JSON 会超宽触发 22001，
+      // 明细已持久化在下方 audit diffPatch 与响应体，任务名保持短名
       await integration.appendSyncLog(
         syncLog,
-        systemType === 'ERP'
-          ? '本地 ERP 主数据镜像清点'
-          : `MES车间生产与质检实绩数据同步 (明细: ${JSON.stringify(syncDetails || {})})`
+        systemType === 'ERP' ? '本地 ERP 主数据镜像清点' : 'MES车间生产与质检实绩数据同步'
       );
 
       await appendDbAuditLog(container.uow, request, {

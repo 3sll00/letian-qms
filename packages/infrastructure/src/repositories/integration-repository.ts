@@ -112,7 +112,8 @@ export class KyselyIntegrationRepository {
       .insertInto('integrationSyncLogs')
       .values({
         systemCode: log.systemType,
-        taskName,
+        // task_name 列宽 VARCHAR(64)，防御性截断防 22001
+        taskName: taskName.slice(0, 64),
         status: log.status,
         recordsProcessed: log.recordsCount,
         errorMessage: log.errorDetails ?? null,
