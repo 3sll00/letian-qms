@@ -6,6 +6,10 @@ info:
 servers:
   - url: /api/v1
     description: 默认 API 网关基础路径
+# 全站默认要求 Bearer 鉴权：本 spec 登记的 29 条路径**全部**落在受保护作用域内
+# （根 /health 探针与开发态 /auth/** 均不登记在册，故无需逐路径声明 security: []）。
+security:
+  - bearerAuth: []
 
 paths:
   /dashboard/overview:
@@ -435,6 +439,109 @@ paths:
               schema:
                 $ref: '#/components/schemas/InspectionOrder'
 
+  /inspections/heat-batch-trace:
+    get:
+      summary: 炉批号溯源联动查询（出货检验录入页：按炉批号带出委外热处理 / 来料检验实测值）
+      description: |
+        三级链路**逐级回退且级别之间不合并**：L1 委外热处理（`OQC_HEAT`）→ L2 来料检验（`IQC`）→ L3 空态
+        （`sourceType = NONE`，HTTP 200、不带任何值、不报错）。同级多命中取「**最近一次终判**」的一张；
+        **未终判或判不合格的源单不参与带出**。
+        炉批号的大小写 / 前后空格 / 全角空格 / 连字符 / 下划线差异一律**归一后**匹配
+        （归一列 `furnace_heat_batch_no_norm`，迁移 034），`heatBatchNo` 回显**原值**。
+        带出范围按 `metricCategory` 白名单（化学成分 / 力学性能 / 硬度 / 抗拉强度），且只带**源单里有实测值**的项；
+        映射按 `itemCode` 精确匹配优先、`name` 归一包含兜底，匹配不到的目标指标行保持空值（不猜、不填 0）。
+        `matchScope = GLOBAL` = 跨物料命中，界面据此提示「跨物料命中，请确认炉次归属」（口径见 docs/47）。
+        同炉批号存在「不合格 / MRB 评审未结案 / 未终判」记录时，响应附 `upstreamWarning`（TBD-01）：
+        **只提示、不带值、不阻断** —— 带出链路照常（有合格源单时）或在空态下只给提示，
+        文案由服务端单点组装（含命中单号与处置指引），界面不二次拼文案。
+      operationId: getFurnaceHeatTrace
+      parameters:
+        - name: heatBatchNo
+          in: query
+          required: true
+          description: 炉批号（归一后匹配）
+          schema:
+            type: string
+        - name: materialCode
+          in: query
+          description: 物料编码（选填；参与物料维度匹配，缺省按全局命中并回 `GLOBAL`）
+          schema:
+            type: string
+        - name: excludeOrderId
+          in: query
+          description: >-
+            正在编辑的本单 id（选填）：从「上游异常提示」（TBD-01）候选里**排除自己**。
+            本单自身通常处于「检验中」，不排除会被判成「上游尚未终判」而给出假提示，
+            让「上游两处均无」的炉号凭空冒出提示条（违背 R3 静默空态）。录入页必须带上本参数。
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 溯源联动结果（`sourceType = NONE` 表示两处均无记录，属正常空态）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FurnaceHeatTraceResponse'
+
+  /inspections/transfer-permits:
+    post:
+      summary: 传递许可批量预览（建单前预览 / 台账徽标 / 看板 / MES 关卡共用，纯读无副作用）
+      description: |
+        「合格后传递」的**读侧唯一入口**（docs/48 §4.5）：返回每项「现在能不能传递」+ 理由码 + 权威上游单。
+        判定与建单门禁 `POST /inspections` 的 422 拒绝**同一份实现**（领域纯函数 `canTransferToNextStage`），
+        因此不存在「预览说能、建单被拒」的第二套口径；本接口**不写审计、不写 Outbox、不加排他锁**。
+        `allowed=true` 且 `code=UPSTREAM_MISSING` 是「放行但上游环节缺失」的显式标记（TBD-01），
+        界面必须显示缺失徽标，不得当作"一切正常"。整批共用一个事务（一页 100 行 ≠ 100 个事务）。
+      operationId: previewTransferPermits
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  maxItems: 100
+                  items:
+                    type: object
+                    required: [inspectionType, batchNo]
+                    properties:
+                      inspectionType:
+                        type: string
+                        description: 本单环节（下游）
+                      batchNo:
+                        type: string
+                      materialCode:
+                        type: string
+                      furnaceHeatNo:
+                        type: string
+                        description: 炉批号（同炉批号锚点 A2）
+                      workOrderNo:
+                        type: string
+                        description: MES 生产工单号（同工单锚点 A3）
+                      orderNo:
+                        type: string
+                        description: 调用方持有的单号（仅回显，便于前端对号入座）
+      responses:
+        '200':
+          description: |
+            每项返回 `decision`（完整 TransferDecision：`allowed` / `code` / `chainKey` / `chainKeyKind` /
+            `precedentStage` / `predecessorOrderNo` / `predecessorStatus` / `mrbNo` / `mrbDisposition` /
+            `permitEvidence` / `terminateChain` / `reason`）。形状真相见 `packages/contracts/src/schemas/transfer.ts`。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+
   /inspections/{id}:
     get:
       summary: 获取检验单详情（含快照元数据、公差基准与明细指标实测）
@@ -463,10 +570,17 @@ paths:
     post:
       summary: 录入检验指标实测值、检验备注并自动公差判定（支持保存草稿与正式提交）
       description: |
+        可录入状态由聚合根守门：仅 `INSPECTING` / `DRAFT` 可写；未开检的两类单据（`PENDING` 新建单、
+        `RE_INSPECTING` MRB 返工回边后的复检轮次单）由用例层按状态机边隐式开检为 `INSPECTING` 后再落数，
+        终态（`PASSED` / `FAILED` / `IN_MRB_REVIEW` / `COMPLETED`）仍返回 400 `ORDER_NOT_EDITABLE`
+        （见 docs/17 §7.9）。
         正式提交（`isDraft: false`）且公差判定为不合格时，追加口径与终判一致：**同一事务**内把该单 upsert 进
         不合格待审核池并**自动创建 MRB 评审单**（`PENDING_REVIEW`、按来源类型自动绑定评审流程），台账条目转
         `INITIATED` 并回填 `mrb_review_id`，检验单转 `IN_MRB_REVIEW`（见 docs/43-不合格判定自动发起MRB评审设计.md）。
         草稿保存（`isDraft: true`）不触发任何入池 / 建单动作。
+        数量口径（docs/21 §14）：`passQty` / `failQty` 是检验员在录入弹窗里填写的合格 / 不合格数量，随判定
+        **同事务**落 `inspection_orders.pass_qty / fail_qty`；不下发时服务端按抽样数派生兜底（首次判定时该值
+        恒等于整批抽样数，即页面上的「检测数」）。自动创建的 MRB 单「不合格数量」恒取源单 `fail_qty`。
       operationId: submitMeasurements
       parameters:
         - name: id
@@ -558,6 +672,40 @@ paths:
                 $ref: '#/components/schemas/InspectionOrder'
         '400':
           description: 请求体校验失败（status / judgment 非法取值）
+        '404':
+          description: 检验单不存在
+
+  /inspections/{id}/header:
+    patch:
+      summary: 落库出货检验表头业务事实（炉批号 / 材质牌号 / 执行技术标准 / 检验日期）
+      description: |
+        出货检验录入页提交前把表头四字段落库（空串 = 清空），修 D1 / D3（此前出货检验表头没有任何写路径，
+        界面填了炉号、库里仍为空，下游单据与质保书炉号栏无来源）。
+        炉批号变动时，服务端**自行重新解析**带出源并落溯源留痕 `heatSourceType` / `heatSourceOrderNo`
+        —— **不接受前端自称来源**；操作人与 PBAC 一律取当前登录用户（口径见 docs/47 §3.6）。
+      operationId: updateInspectionHeader
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateInspectionHeaderRequest'
+      responses:
+        '200':
+          description: 更新后的检验单（含 `furnaceHeatNo` 与溯源留痕字段）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionOrder'
+        '400':
+          description: 请求体校验失败（字段超长 / 非法日期格式）
         '404':
           description: 检验单不存在
 
@@ -935,6 +1083,99 @@ paths:
               schema:
                 $ref: '#/components/schemas/TraceBatchSearchResponse'
 
+  /traceability/chain-status:
+    get:
+      summary: 看板「传递链状态」—— 链路各环节排序 + 每环节的传递判定（合格后传递，docs/48 §4.6 P1）
+      description: |
+        一次返回该链路**各环节排序 + 每环节的传递判定**，供【质量追溯链路看板】顶栏与「传递闸门」可视化使用。
+        三条口径（全部服务端定，前端不得二次推导；真相在 `packages/application/src/use-cases/traceability/chain-status.ts`）：
+        ① 环节行**由检验单派生**（`inspection_orders`，按工艺序位升序），不看 `batch_trace_nodes`（后者终判才落节点）；
+        ② 环节状态取该环节**权威单**的单张判定（复检轮次最高 → 最近一次终判，docs/48 §2.4）；
+        ③ 闸门判定与建单门禁 / 台账徽标**同一份**（`canTransferToNextStage`），因此看板与现场看到的结论不可能不一致。
+        `summary.state` 取最严重环节（`TERMINATED` > `BLOCKED` > `PENDING` > `RELEASED`）；整条链路零单据时为 `MISSING`。
+        `summary.blockedBy` 取**该环节自身**的判定码（`stateCode`），与 `decision.code`（「本环节当初为什么能开始」）语义分离。
+        **实时重算，不做缓存**；PBAC 未授权一律 403（详情视图，fail-closed）。
+      operationId: getChainStatus
+      parameters:
+        - name: batchNo
+          in: query
+          required: true
+          description: 批次号（链路入口 / 追溯主键）
+          schema:
+            type: string
+        - name: materialCode
+          in: query
+          description: 物料编码（多物料混批时收窄到某一物料；省略则返回整批次全部物料）
+          schema:
+            type: string
+        - name: furnaceHeatNo
+          in: query
+          description: 炉批号（同炉批号锚点 A2，供跨批次链路使用）
+          schema:
+            type: string
+        - name: workOrderNo
+          in: query
+          description: MES 生产工单号（同工单锚点 A3）
+          schema:
+            type: string
+      responses:
+        '200':
+          description: |
+            链路状态。`stages[]` 只列已建单环节，每项含 `stage` / `seq` / `state` / `stateCode` / `stateReason` /
+            `orderNo` / `orderStatus` / `overallDecision` / `mrbNo` / `mrbDisposition` / `updatedAt` / `decision`（完整 TransferDecision）。
+            形状唯一真相：`packages/contracts/src/schemas/transfer.ts` 的 `ChainStatusResponseSchema`（Zod；服务端响应过 `parse`）。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [batchNo, anchor, stages, summary, generatedAt]
+                properties:
+                  batchNo:
+                    type: string
+                  materialCode:
+                    type: string
+                    description: 物料限定（调用方传入时回显）
+                  anchor:
+                    type: object
+                    required: [kind, value]
+                    properties:
+                      kind:
+                        type: string
+                        enum: [BATCH, HEAT, WORK_ORDER]
+                      value:
+                        type: string
+                  stages:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                  summary:
+                    type: object
+                    required: [state, releasedCount, blockedCount, pendingCount, terminatedCount, terminated]
+                    properties:
+                      state:
+                        type: string
+                        enum: [RELEASED, BLOCKED, PENDING, MISSING, TERMINATED]
+                      releasedCount:
+                        type: integer
+                      blockedCount:
+                        type: integer
+                      pendingCount:
+                        type: integer
+                      terminatedCount:
+                        type: integer
+                      terminated:
+                        type: boolean
+                      blockedStage:
+                        type: string
+                      blockedBy:
+                        type: object
+                        additionalProperties: true
+                  generatedAt:
+                    type: string
+        '403':
+          description: PBAC 未授权（链路视图是详情视图，fail-closed）
+
   /traceability/orders/{orderNo}:
     get:
       summary: 本订单检验环节 —— 订单维度的检验台账视图（同一订单下各环节并列，不是血缘链路）
@@ -1069,7 +1310,107 @@ paths:
                     type: integer
 
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        开发态登录 `POST /auth/login` 签发的 JWT（HS256，jsonwebtoken，默认 1 天有效期）。
+        受保护作用域内的**全部业务路由**（`/api/v1/**`）在 onRequest 阶段强制校验
+        `Authorization: Bearer <token>`，缺失 / 格式非 Bearer / 校验失败或过期一律 401（RFC 7807）。
+        免鉴权入口只有两处，且都不在本 spec 的路径清单内：根 `/health` 探针（不在 `/api/v1` 下）
+        与开发态 `/auth/**`（生产环境该控制器整体不注册路由，改走企业 SSO / OAuth2 / LDAP）。
+        口径见 `apps/api/src/app.ts` 第 5~6 步与 `apps/api/src/plugins/auth.ts`。
   schemas:
+    FurnaceHeatTraceResponse:
+      type: object
+      required: [heatBatchNo, sourceType, matchScope, inheritedItems]
+      properties:
+        heatBatchNo:
+          type: string
+          description: 被查询的炉批号（回显原值，非归一值）
+        sourceType:
+          type: string
+          enum: [OUTSOURCE_HEAT_TREATMENT, IQC_RAW_MATERIAL, NONE]
+          description: 关联来源：委外热处理 / 来料检验 / 无记录
+        matchScope:
+          type: string
+          enum: [MATERIAL, GLOBAL]
+          description: 命中范围：MATERIAL = 同物料命中；GLOBAL = 跨物料命中（或未带物料编码）
+        sourceOrderNo:
+          type: string
+          description: 来源检验单号（`NONE` 时缺省）
+        sourceOrderId:
+          type: string
+          description: 来源检验单主键（`NONE` 时缺省）
+        sourceMaterialCode:
+          type: string
+          description: 源单物料编码（跨物料命中时供界面确认归属）
+        inspectedAt:
+          type: string
+          description: 源单检验日期 / 终判时间（优先业务检验日期）
+        inheritedItems:
+          type: array
+          description: 带出项（白名单类别 + 源单有实测值；`NONE` 或无可带出项时为空数组）
+          items:
+            type: object
+            required: [itemCode, name, metricCategory]
+            properties:
+              itemCode:
+                type: string
+              name:
+                type: string
+              metricCategory:
+                type: string
+                description: 源项类别（CHEMICAL_COMPOSITION / MECHANICAL_PERFORMANCE / HARDNESS / TENSILE_STRENGTH）
+              measuredVal:
+                type: number
+              measuredText:
+                type: string
+              unit:
+                type: string
+        upstreamWarning:
+          type: object
+          required: [code, orderNos, message]
+          description: >-
+            上游异常提示（TBD-01）：同一炉批号存在「不合格 / MRB 评审未结案 / 未终判」记录时给出，
+            只提示、不带值、不阻断（带出与阻断分离，跨环节阻断属 docs/48 职责）；无异常时**整个字段缺省**。
+          properties:
+            code:
+              type: string
+              enum: [UPSTREAM_FAILED, UPSTREAM_UNDER_MRB, UPSTREAM_INSPECTING]
+              description: >-
+                命中理由码，同类内只报优先级最高的一类：上游判不合格 / MRB 评审未结案 / 上游尚未终判
+            orderNos:
+              type: array
+              description: 命中的单据号（升序，最多 10 条，超出截断）
+              items:
+                type: string
+            message:
+              type: string
+              description: 中文可读提示（服务端单点组装，界面直接展示、不二次拼文案）
+
+    UpdateInspectionHeaderRequest:
+      type: object
+      properties:
+        furnaceHeatNo:
+          type: string
+          maxLength: 64
+          description: 炉批号（Heat No）；落 inspection_orders.furnace_heat_batch_no，**空串表示清空**（同时把溯源留痕归零）
+        materialGrade:
+          type: string
+          maxLength: 64
+          description: 材质牌号（如 ML40Cr）
+        techStandard:
+          type: string
+          maxLength: 128
+          description: 执行产品技术标准（如 GB/T 3098.1-2010）
+        inspectedDate:
+          type: string
+          maxLength: 32
+          description: 检验日期 YYYY-MM-DD
+
     DashboardOverviewResponse:
       type: object
       required: [totalInspections, passRate, pendingCount, inMRBCount, stageDistribution, trendSeries, topDefects, recentActivities]
@@ -1291,6 +1632,25 @@ components:
         inspectedDate:
           type: string
           description: 检验日期 YYYY-MM-DD（落库 inspection_orders.inspected_date）；为空时读侧才回落 completedAt/createdAt
+        # 034 炉批号溯源留痕（迁移 034，docs/47 §3.1 / §3.6）
+        furnaceHeatNo:
+          type: string
+          description: >-
+            炉批号（Heat No）：钢材冶炼炉号 / 热处理炉批号（物理列 `furnace_heat_batch_no`，迁移 004 建列、
+            034 起有写入路径与归一索引）。出货检验录入该字段即按 docs/47 的三级优先级关联上游检验记录；
+            归一后比较、原值落库
+        heatSourceType:
+          type: string
+          readOnly: true
+          enum: [OUTSOURCE_HEAT_TREATMENT, IQC_RAW_MATERIAL]
+          description: >-
+            溯源留痕（物理列 `heat_source_type`）：本单炉批号最终命中的上游来源类型。由服务端在写入炉批号时
+            **自行重新解析**后落库，请求体不接受客户端自称来源；炉批号被清空时该留痕一并归零。
+            源为 `NONE`（两处均无上游记录）时**不落该值**，字段缺省 —— 故此处枚举只有两级，不含 `NONE`
+        heatSourceOrderNo:
+          type: string
+          readOnly: true
+          description: 溯源留痕（物理列 `heat_source_order_no`）：命中来源对应的上游检验单号，与 `heatSourceType` 同生同灭
         planVersionId:
           type: string
           format: uuid
@@ -1316,24 +1676,30 @@ components:
 
     InspectionOrderItem:
       type: object
-      required: [id, itemCode, itemName, metricCategory, dataType, decision]
+      required: [itemCode, name, metricCategory, dataType, result]
       properties:
+        seq:
+          type: integer
+          description: 单内指标序号（库内 210/210 item 行恒有）
         id:
           type: string
           format: uuid
         itemCode:
           type: string
-        itemName:
+        name:
           type: string
         metricCategory:
           type: string
-          enum: [DIMENSION, APPEARANCE, HARDNESS, COATING_THICKNESS, TENSILE_STRENGTH, CHEMICAL_COMPOSITION, TEXT_INTERVAL]
-          description: 业务分类维度（尺寸、外观、硬度、镀层膜厚、抗拉强度、化学成分、文本区间）
+          enum: [DIMENSION, APPEARANCE, HARDNESS, COATING_THICKNESS, TENSILE_STRENGTH, MECHANICAL_PERFORMANCE, CHEMICAL_COMPOSITION, TEXT_INTERVAL]
+          description: 业务分类维度（尺寸、外观、硬度、镀层膜厚、抗拉强度、综合机械性能、化学成分、文本区间）
         dataType:
           type: string
           enum: [NUMERIC, TEXT, QUALITATIVE]
           description: 判定算法数据维度（数值比较、文本包含/区间解析、定性判定）
-        targetVal:
+        standardText:
+          type: string
+          description: 标准语 / 判定基准文本（库内 210/210 item 行恒有）
+        nominalValue:
           type: number
         upperTolerance:
           type: number
@@ -1341,13 +1707,23 @@ components:
           type: number
         unit:
           type: string
+        sampleSize:
+          type: integer
+          description: 抽样数（库内 210/210 item 行恒有）
         measuredVal:
           type: number
         measuredText:
           type: string
-        decision:
+        result:
           type: string
-          enum: [PENDING, PASSED, FAILED]
+          enum: [PENDING, PASSED, FAILED, EXEMPT]
+          description: 落库单项判定（PENDING 待判定 / PASSED 合格 / FAILED 不合格 / EXEMPT 免检；免检不计入合格率分母）
+        isExempt:
+          type: boolean
+          description: 是否标记为不解检（免检）；库内 210/210 item 行恒有
+        isManuallyModified:
+          type: boolean
+          description: 带出数据是否经过质检员手工修改；库内 210/210 item 行恒有
         defectReason:
           type: string
 
@@ -1824,6 +2200,14 @@ components:
           type: boolean
         inspectionNotes:
           type: string
+        passQty:
+          type: number
+          minimum: 0
+          description: 检验员填写的合格数量（落 inspection_orders.pass_qty，优先于服务端按抽样数派生的兜底值）
+        failQty:
+          type: number
+          minimum: 0
+          description: 检验员填写的不合格数量（落 inspection_orders.fail_qty，并作为自动创建 MRB 单的「不合格数量」，口径见 docs/21 §14）
         items:
           type: array
           items:

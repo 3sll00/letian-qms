@@ -1,0 +1,19 @@
+{
+  "version": "1.0.0",
+  "description": "OpenAPI 契约已知存量漂移登记表（命中不判红，逐条公示；收敛后销账）",
+  "entries": [
+    {
+      "id": "KD-01",
+      "path": "/dashboard/overview",
+      "schema": "DashboardOverviewResponse",
+      "fields": [
+        "/trendSeries[]/totalCount",
+        "/topDefects[]/materialName",
+        "/topDefects[]/defectCount"
+      ],
+      "reason": "spec 历史声明 totalCount / materialName / defectCount，而代码实现与前端契约是 iqcCount+ipqcCount+oqcCount 与 defectName+category+count；待收敛 spec",
+      "registeredAt": "2026-09-24",
+      "fixPlan": "docs/49 P2 看板契约收敛"
+    }
+  ]
+}
