@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { ArrowLeft, Printer, ShieldCheck, Atom, Gauge, CheckSquare, Layers, Sparkles, AlertTriangle, FileSpreadsheet } from "lucide-react";
 import { CertificatePrintModal } from "../../../components/certificate/CertificatePrintModal";
 import { PrintTemplateModal } from "../../../components/common/PrintTemplateModal";
@@ -66,6 +66,17 @@ interface OqcRecordFormProps {
   readOnly?: boolean;
 }
 
+/**
+ * 上游异常提示（TBD-01 / docs/47 §3.9）：同一炉批号存在 不合格 / MRB 未结案 / 未终判 记录时，
+ * 服务端在响应里附一段可读提示；**只提示、不带值、不阻断**。界面照实展示 message，不自行拼文案
+ * （文案单点在服务端 `warningWithMessage()`，避免两处各写一套措辞）。
+ */
+export type HeatTraceUpstreamWarning = {
+  code: "UPSTREAM_FAILED" | "UPSTREAM_UNDER_MRB" | "UPSTREAM_INSPECTING";
+  orderNos: string[];
+  message: string;
+};
+
 export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
   initialItem,
   onBack,
@@ -104,9 +115,16 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
     sourceType: string;
     sourceOrderNo?: string;
     batchNo: string;
+    /** 命中范围：MATERIAL = 同物料命中；GLOBAL = 跨物料命中（界面须提示确认炉次归属，docs/47 §3.4） */
+    matchScope?: "MATERIAL" | "GLOBAL";
+    /** 上游异常提示（缺省 = 无异常，不渲染提示条） */
+    upstreamWarning?: HeatTraceUpstreamWarning;
   } | null>(null);
   const [inheritedValues, setInheritedValues] = useState<Record<string, string>>({});
   const [modifiedItems, setModifiedItems] = useState<Set<string>>(new Set());
+
+  /** 当前已带出指标的键集合（`chem_*` / `mech_*`）：清空炉批号时按它**精确**回滚（docs/47 AC-09） */
+  const inheritedKeysRef = useRef<readonly string[]>([]);
 
   // 当前出货单的物料编码：来自出货检验列表行，缺失时页面明确提示无法自动匹配
   const materialCode: string = initialItem?.materialCode ?? initialItem?.productCode ?? "";
@@ -204,21 +222,54 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
   /** 本单全部指标行（与页面顺序一致）：证书组装与提交写路径共用同一份来源 */
   const planRowsForSubmit = [...chemElements, ...mechProperties, ...dimItems];
 
-  // 自动防抖调用 /api/v1/inspections/heat-batch-trace 追溯原材料与热处理历史数据
+  /**
+   * 回滚已带出值（docs/47 AC-09 / D11）。
+   *
+   * 带出值只是**初值**：炉批号被清空、或新炉号在上游查无记录时，必须把上一炉带出的值一并归零 ——
+   * 否则界面会留着别的炉次的力学 / 化学成分值，录入人稍不注意就把它当本炉数据提交。
+   * 只清「上一次确实带出的行」（`inheritedKeysRef`），录入人自己填写的值一律不动。
+   */
+  const rollbackInherited = useCallback(() => {
+    const keys = new Set(inheritedKeysRef.current);
+    if (keys.size > 0) {
+      setChemElements((prev) =>
+        prev.map((el) => (keys.has(`chem_${el.title}`) ? { ...el, actual: "" } : el))
+      );
+      setMechProperties((prev) =>
+        prev.map((mp) => (keys.has(`mech_${mp.title}`) ? { ...mp, actual: "" } : mp))
+      );
+    }
+    inheritedKeysRef.current = [];
+    setInheritedValues({});
+    setModifiedItems(new Set());
+    setHeatTraceSource(null);
+  }, []);
+
+  /**
+   * 自动防抖调用 /api/v1/inspections/heat-batch-trace 追溯原材料与热处理历史数据。
+   *
+   * 服务端口径（docs/47 §3.2 / §3.4）：按「委外热处理(OQC_HEAT) -> 来料检验(IQC) -> 无」三级
+   * **逐级回退、级别之间不合并**；`materialCode` 参与匹配（先同物料，无命中才跨物料并回
+   * `matchScope = GLOBAL`）。前端只做两件事：把白名单实测值填成初值，以及如实展示来源与范围。
+   */
   useEffect(() => {
-    if (!heatNo || !heatNo.trim()) {
-      setHeatTraceSource(null);
+    const raw = heatNo.trim();
+    if (raw === "") {
+      // 清空炉批号：已带出值回滚为空、计数清零、Banner 消失（AC-09）
+      rollbackInherited();
       return;
     }
 
     const timer = setTimeout(async () => {
       try {
         setHeatTraceLoading(true);
-        const res = await api.get<{
+        const trace = await api.get<{
           heatBatchNo: string;
-          sourceType: "OUTSOURCE_HEAT_ORDER" | "IQC_ORDER" | "NONE";
+          sourceType: "OUTSOURCE_HEAT_TREATMENT" | "IQC_RAW_MATERIAL" | "NONE";
+          matchScope?: "MATERIAL" | "GLOBAL";
           sourceOrderNo?: string;
-          inheritedItems: Array<{
+          sourceMaterialCode?: string;
+          inheritedItems?: Array<{
             itemCode: string;
             name: string;
             metricCategory: string;
@@ -226,65 +277,100 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
             measuredText?: string;
             unit?: string;
           }>;
-        }>(`/inspections/heat-batch-trace?heatBatchNo=${encodeURIComponent(heatNo.trim())}`);
+          /** 上游异常提示（TBD-01）：同炉不合格 / MRB 未结案 / 未终判时由服务端给出 */
+          upstreamWarning?: HeatTraceUpstreamWarning;
+        }>(
+          `/inspections/heat-batch-trace?heatBatchNo=${encodeURIComponent(raw)}${
+            materialCode !== "" ? `&materialCode=${encodeURIComponent(materialCode)}` : ""
+          }${
+            // 排除本单自己：本单本身处于「检验中」，不排除就会被当成「上游未终判」给出假提示（TBD-01）
+            typeof initialItem?.id === "string" && initialItem.id !== ""
+              ? `&excludeOrderId=${encodeURIComponent(initialItem.id)}`
+              : ""
+          }`
+        );
 
-        if (res && res.inheritedItems && res.inheritedItems.length > 0) {
-          setHeatTraceSource({
-            sourceType: res.sourceType,
-            sourceOrderNo: res.sourceOrderNo,
-            batchNo: res.heatBatchNo,
-          });
+        // 空态（查无记录 / 有记录但无白名单实测项）一律先回滚上一炉的残留值，Banner 只说明来源
+        const inheritedItems = trace?.inheritedItems ?? [];
+        const emptyState = !trace || trace.sourceType === "NONE" || inheritedItems.length === 0;
+        if (emptyState) {
+          rollbackInherited();
+          // 空态也可能是「只提示、不带值」：同炉不合格 / MRB 未结案 / 未终判时服务端给提示但不带出任何值，
+          // 此时仍要挂上 heatTraceSource（只渲染琥珀色提示条；蓝色 Banner 由 sourceType !== NONE 把关）。
+          if (trace && (trace.sourceType !== "NONE" || trace.upstreamWarning !== undefined)) {
+            setHeatTraceSource({
+              sourceType: trace.sourceType,
+              ...(trace.sourceOrderNo !== undefined ? { sourceOrderNo: trace.sourceOrderNo } : {}),
+              batchNo: trace.heatBatchNo,
+              ...(trace.matchScope !== undefined ? { matchScope: trace.matchScope } : {}),
+              ...(trace.upstreamWarning !== undefined ? { upstreamWarning: trace.upstreamWarning } : {}),
+            });
+          }
+          return;
+        }
 
-          const newInherited: Record<string, string> = {};
+        setHeatTraceSource({
+          sourceType: trace.sourceType,
+          ...(trace.sourceOrderNo !== undefined ? { sourceOrderNo: trace.sourceOrderNo } : {}),
+          batchNo: trace.heatBatchNo,
+          ...(trace.matchScope !== undefined ? { matchScope: trace.matchScope } : {}),
+          ...(trace.upstreamWarning !== undefined ? { upstreamWarning: trace.upstreamWarning } : {}),
+        });
 
-          // 带出化学成分
-          setChemElements((prev) =>
-            prev.map((el) => {
-              const matched = res.inheritedItems.find(
-                (item) =>
-                  item.name.toUpperCase() === el.title.toUpperCase() ||
-                  item.itemCode.toUpperCase().includes(el.title.toUpperCase())
-              );
-              if (matched) {
-                const val =
-                  matched.measuredVal !== undefined
-                    ? String(matched.measuredVal)
-                    : matched.measuredText ?? el.actual;
-                newInherited[`chem_${el.title}`] = val;
-                return { ...el, actual: val };
-              }
-              return el;
-            })
-          );
+        const newInherited: Record<string, string> = {};
+        /** 力学分区的白名单：力学性能 / 硬度 / 抗拉强度统一归并进"力学物理性能"（docs/47 §3.5） */
+        const MECH_CATEGORIES = ["MECHANICAL_PERFORMANCE", "HARDNESS", "TENSILE_STRENGTH"];
 
-          // 带出力学性能
-          setMechProperties((prev) =>
-            prev.map((mp) => {
-              const matched = res.inheritedItems.find(
-                (item) =>
-                  item.name.includes(mp.title) ||
+        // 带出化学成分（只接 CHEMICAL_COMPOSITION，避免硬度值被当成元素含量）
+        setChemElements((prev) =>
+          prev.map((el) => {
+            const matched = inheritedItems.find(
+              (item) =>
+                item.metricCategory === "CHEMICAL_COMPOSITION" &&
+                (item.name.toUpperCase() === el.title.toUpperCase() ||
+                  item.itemCode.toUpperCase().includes(el.title.toUpperCase()))
+            );
+            if (matched) {
+              const val =
+                matched.measuredVal !== undefined
+                  ? String(matched.measuredVal)
+                  : matched.measuredText ?? el.actual;
+              newInherited[`chem_${el.title}`] = val;
+              return { ...el, actual: val };
+            }
+            return el;
+          })
+        );
+
+        // 带出力学性能（只接力学 / 硬度 / 抗拉三类）
+        setMechProperties((prev) =>
+          prev.map((mp) => {
+            const matched = inheritedItems.find(
+              (item) =>
+                MECH_CATEGORIES.includes(item.metricCategory) &&
+                (item.name.includes(mp.title) ||
                   mp.title.includes(item.name) ||
                   (mp.title.includes("抗拉") && item.name.includes("抗拉")) ||
                   (mp.title.includes("屈服") && item.name.includes("屈服")) ||
                   (mp.title.includes("伸长率") && item.name.includes("伸长率")) ||
                   (mp.title.includes("硬度") && item.name.includes("硬度")) ||
-                  (mp.title.includes("冲击") && item.name.includes("冲击"))
-              );
-              if (matched) {
-                const val =
-                  matched.measuredVal !== undefined
-                    ? String(matched.measuredVal)
-                    : matched.measuredText ?? mp.actual;
-                newInherited[`mech_${mp.title}`] = val;
-                return { ...mp, actual: val };
-              }
-              return mp;
-            })
-          );
+                  (mp.title.includes("冲击") && item.name.includes("冲击")))
+            );
+            if (matched) {
+              const val =
+                matched.measuredVal !== undefined
+                  ? String(matched.measuredVal)
+                  : matched.measuredText ?? mp.actual;
+              newInherited[`mech_${mp.title}`] = val;
+              return { ...mp, actual: val };
+            }
+            return mp;
+          })
+        );
 
-          setInheritedValues(newInherited);
-          setModifiedItems(new Set());
-        }
+        inheritedKeysRef.current = Object.keys(newInherited);
+        setInheritedValues(newInherited);
+        setModifiedItems(new Set());
       } catch (e) {
         console.warn("未能匹配到该炉号的前序溯源单据", e);
       } finally {
@@ -293,7 +379,7 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
     }, 450);
 
     return () => clearTimeout(timer);
-  }, [heatNo]);
+  }, [heatNo, materialCode, rollbackInherited]);
 
   const handleChemChange = (idx: number, element: string, val: string) => {
     const updated = [...chemElements];
@@ -580,20 +666,59 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
         底部判定与打印按钮不在其中，回看时依旧可出质保书。
       */}
       <fieldset disabled={readOnly} className="border-0 p-0 m-0 min-w-0 space-y-4">
-      {/* 炉批号溯源联动提示 Banner */}
-      {heatTraceSource && (
+      {/*
+        同炉异常提示（TBD-01 / docs/47 §3.9）：**只提示、不带值、不阻断** —— 上游同一炉批号存在
+        不合格 / MRB 未结案 / 未终判 记录时给出，与蓝色 Banner 相互独立：
+        空态（sourceType = NONE，例如同炉只有一张不合格单）也必须出现这一条。
+        文案由服务端组装（warningWithMessage），界面只选标题，不二次拼接。
+      */}
+      {heatTraceSource?.upstreamWarning && (
+        <div className="bg-amber-50 border border-amber-300 rounded-lg p-3 flex items-start gap-2.5 text-xs text-amber-900 shadow-sm">
+          <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
+          <div>
+            <span className="font-bold mr-1">
+              {heatTraceSource.upstreamWarning.code === "UPSTREAM_FAILED"
+                ? "同炉不合格提示"
+                : heatTraceSource.upstreamWarning.code === "UPSTREAM_UNDER_MRB"
+                  ? "同炉 MRB 未结案提示"
+                  : "同炉检验未终判提示"}
+            </span>
+            <span>{heatTraceSource.upstreamWarning.message}</span>
+          </div>
+        </div>
+      )}
+
+      {/* 炉批号溯源联动提示 Banner（只在真的带出数据时出现；空态提示见上一条） */}
+      {heatTraceSource && heatTraceSource.sourceType !== "NONE" && (
         <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-3 flex items-center justify-between text-xs text-blue-900 shadow-sm">
           <div className="flex items-center gap-2.5">
             <span className="font-bold bg-blue-600 text-white px-2 py-0.5 rounded text-[11px] flex items-center gap-1">
               <Sparkles className="w-3 h-3" />
-              {heatTraceSource.sourceType === "OUTSOURCE_HEAT_ORDER"
+              {/* 来源枚举与契约 HeatTraceSourceTypeEnum 同源：OUTSOURCE_HEAT_TREATMENT / IQC_RAW_MATERIAL
+                  （此前这里比的是 OUTSOURCE_HEAT_ORDER，永远匹配不上 -> Banner 恒显示「来料检验」，docs/47 D8） */}
+              {heatTraceSource.sourceType === "OUTSOURCE_HEAT_TREATMENT"
                 ? "委外热处理"
                 : "来料检验 (IQC)"}{" "}
               炉批号溯源联动
             </span>
             <span>
-              已依据炉号 <strong>{heatTraceSource.batchNo}</strong> 自动带入前道工序真实检验数据
-              {heatTraceSource.sourceOrderNo && ` (源单据: ${heatTraceSource.sourceOrderNo})`}
+              {Object.keys(inheritedValues).length === 0 ? (
+                // docs/47 §9.6.4（体验项）：上游有记录但本单方案没有可带出的白名单指标行时，
+                // 不说「自动带入」—— 实际没有任何值落地，那样写会让录入人误以为已经带出。
+                <>
+                  已按炉号 <strong>{heatTraceSource.batchNo}</strong> 关联到前道工序检验记录
+                  {heatTraceSource.sourceOrderNo && ` (源单据: ${heatTraceSource.sourceOrderNo})`}
+                  ，但本单方案指标行中没有可带出的项（白名单：化学成分 / 力学性能），请按实测手工录入
+                </>
+              ) : (
+                <>
+                  已依据炉号 <strong>{heatTraceSource.batchNo}</strong> 自动带入前道工序真实检验数据
+                  {heatTraceSource.sourceOrderNo && ` (源单据: ${heatTraceSource.sourceOrderNo})`}
+                </>
+              )}
+              {heatTraceSource.matchScope === "GLOBAL" && materialCode !== "" && (
+                <span className="ml-1 text-amber-700 font-medium">（跨物料命中，请确认炉次归属）</span>
+              )}
             </span>
           </div>
           {modifiedItems.size > 0 ? (
@@ -601,6 +726,8 @@ export const OqcRecordForm: React.FC<OqcRecordFormProps> = ({
               <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
               已手动修改 {modifiedItems.size} 项指标 (将自动保留快照并留痕审计)
             </span>
+          ) : Object.keys(inheritedValues).length === 0 ? (
+            <span className="text-[11px] text-slate-500 font-medium">带出 0 项</span>
           ) : (
             <span className="text-[11px] text-blue-600 font-medium">
               ✓ 数据与上游档案完全一致
