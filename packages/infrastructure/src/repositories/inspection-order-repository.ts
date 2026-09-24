@@ -1,5 +1,7 @@
 ﻿import { sql, type Expression, type ExpressionBuilder, type Kysely, type SqlBool } from 'kysely';
 import type { InspectionOrderRepository as IInspectionOrderRepository } from '@letian/domain';
+import { normalizeHeatBatchNo } from '@letian/domain';
+import type { ChainAnchor, ChainAnchorKind, UpstreamCandidate } from '@letian/domain';
 import { InspectionTypeEnum } from '@letian/contracts';
 import type { InspectionOrder, InspectionStatus, InspectionType, MaterialPermission } from '@letian/contracts';
 import { buildMaterialPermissionWhere } from './pbac-sql-translator.js';
@@ -291,6 +293,139 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
   }
 
   /**
+   * 按炉批号（钢材冶炼炉号 / 热处理炉批号）取一组检验单（docs/47 §4.4）。
+   *
+   * 与 `findByBatchNo`（按质检批次号 `batch_no` 精确匹配）**语义不同、互不替代**：
+   * 本方法匹配 `furnace_heat_batch_no`，且走迁移 034 的**归一化生成列**
+   * （大小写 / 空格 / 连字符 / 下划线 / 全角空格差异一律视为同一炉批号）。
+   *
+   * 排序在 SQL 内固定为「最近一次终判优先」（updated_at DESC NULLS LAST -> created_at DESC
+   * -> order_no DESC），调用方不得依赖数据库默认顺序，也不得自行二次排序覆盖本口径。
+   */
+  public async findByFurnaceHeatNo(
+    furnaceHeatNo: string,
+    options?: { materialCode?: string }
+  ): Promise<readonly InspectionOrder[]> {
+    const normalized = normalizeHeatBatchNo(furnaceHeatNo);
+    if (normalized === '') {
+      return [];
+    }
+
+    const materialCode = options?.materialCode?.trim() ?? '';
+
+    const rows = await this.db
+      .selectFrom('inspectionOrders')
+      .selectAll()
+      .where('furnaceHeatBatchNoNorm', '=', normalized)
+      .$if(materialCode !== '', (qb) => qb.where('materialCode', '=', materialCode))
+      .orderBy(sql`updated_at DESC NULLS LAST`)
+      .orderBy(sql`created_at DESC`)
+      .orderBy(sql`order_no DESC`)
+      .execute();
+
+    const [refNames, refSupplierNames] = await this.getRefNameMaps();
+    return rows.map((row) => this.mapRow(row, refNames, refSupplierNames));
+  }
+
+  /**
+   * 「合格后传递」链路候选集（docs/48 §4.4 / §2.2）。
+   *
+   * 与 `findByBatchNo` / `findByFurnaceHeatNo` 的区别：本方法是**多锚点一次取回**，且**排序内置**。
+   *
+   *   - 锚点匹配：`batch_no = ANY(BATCH 锚点)` OR `furnace_heat_batch_no_norm = ANY(HEAT 锚点)` OR
+   *     `work_order_no = ANY(WORK_ORDER 锚点)` —— 三个锚点用 OR 一次取回，避免调用方分三轮查询再自行合并
+   *     （三轮查询各自的排序无法合并出一个全局「最近一次终判」，正是 docs/47 D6 取错单的根因）；
+   *   - 炉批号一律用迁移 034 的**归一化生成列**比对，调用方不得在上层重新做归一或转义；
+   *   - 排序固定为 `updated_at DESC NULLS LAST -> created_at DESC -> order_no DESC`，调用方不得二次排序；
+   *   - `matchedAnchors` 按**行值与锚点实际相等**标注（而不是 SQL 命中了哪个 OR 分支），
+   *     否则「批次号恰好等于某炉批号」这类巧合格会把候选错算进更强的锚点层。
+   */
+  public async findChainCandidates(
+    anchors: readonly ChainAnchor[],
+    options: { inspectionTypes?: readonly InspectionType[]; materialCode?: string } = {}
+  ): Promise<readonly UpstreamCandidate[]> {
+    const buckets = splitAnchorValues(anchors);
+    if (!hasAnyAnchorValue(buckets)) {
+      return [];
+    }
+
+    const materialCode = (options.materialCode ?? '').trim();
+    const inspectionTypes = options.inspectionTypes ?? [];
+
+    const rows = await this.buildChainCandidateQuery(buckets, inspectionTypes)
+      .$if(materialCode !== '', (qb) => qb.where('materialCode', '=', materialCode))
+      .orderBy(sql`updated_at DESC NULLS LAST`)
+      .orderBy(sql`created_at DESC`)
+      .orderBy(sql`order_no DESC`)
+      .execute();
+
+    const [names, supplierNames] = await this.getRefNameMaps();
+    return rows.map((row) => ({
+      order: this.mapRow(row, names, supplierNames),
+      matchedAnchors: matchChainAnchors(row, buckets),
+    }));
+  }
+
+  /**
+   * 同锚点、同上游环节，但**物料编码不同**的候选单数量（TBD-03：跨物料只提示、不阻断）。
+   *
+   * 与 `findChainCandidates` 共用同一套锚点谓词（`buildChainCandidateQuery`），
+   * 避免出现「提示说有跨物料上游单、实际又取不回来」这类自相矛盾。
+   */
+  public async countCrossMaterialCandidates(
+    anchors: readonly ChainAnchor[],
+    options: { inspectionTypes?: readonly InspectionType[]; materialCode: string }
+  ): Promise<number> {
+    const materialCode = options.materialCode.trim();
+    const buckets = splitAnchorValues(anchors);
+    if (materialCode === '' || !hasAnyAnchorValue(buckets)) {
+      return 0;
+    }
+
+    const row = await this.buildChainCandidateQuery(buckets, options.inspectionTypes ?? [])
+      .where('materialCode', '<>', materialCode)
+      // `buildChainCandidateQuery` 是**行查询**（内含 selectAll），直接再 `.select(count)` 会追加到
+      // 同一条 SELECT 上，变成「聚合函数 + 未分组列」→ PostgreSQL 42803
+      // （column "inspection_orders.id" must appear in the GROUP BY clause）：
+      // 台账整页算传递状态时必然触发，表现为 `/inspections` 列表 500。计数查询必须先清空行选择列表。
+      .clearSelect()
+      .select((eb) => eb.fn.countAll<string>().as('count'))
+      .executeTakeFirst();
+
+    return row === undefined ? 0 : Number(row.count);
+  }
+
+  /**
+   * 锚点谓词（两个公开方法共用）：`batch_no` ∪ `furnace_heat_batch_no_norm` ∪ `work_order_no`。
+   *
+   * 三个列表可能同时非空（本单既有批次号又有炉批号 / 工单号）。OR 语义与「锚点优先级」并不冲突：
+   * 优先级只决定**用哪一层锚点解释链路**，由领域层在候选集中挑选（`selectUpstream`），
+   * 而不是靠 SQL 分轮查询 —— 分轮查询会让每个锚点各拿一份排序，从而无法全局收敛。
+   */
+  private buildChainCandidateQuery(
+    buckets: ReturnType<typeof splitAnchorValues>,
+    inspectionTypes: readonly InspectionType[]
+  ) {
+    return this.db
+      .selectFrom('inspectionOrders')
+      .selectAll()
+      .where((eb) => {
+        const clauses: Expression<SqlBool>[] = [];
+        if (buckets.batch.length > 0) {
+          clauses.push(eb('batchNo', 'in', [...buckets.batch]));
+        }
+        if (buckets.heat.length > 0) {
+          clauses.push(eb('furnaceHeatBatchNoNorm', 'in', [...buckets.heat]));
+        }
+        if (buckets.workOrder.length > 0) {
+          clauses.push(eb('workOrderNo', 'in', [...buckets.workOrder]));
+        }
+        return eb.or(clauses);
+      })
+      .$if(inspectionTypes.length > 0, (qb) => qb.where('orderType', 'in', [...inspectionTypes]));
+  }
+ 
+  /**
    * 按订单标识取一组检验单：同一个订单号可能落在
    * 「检验单号 / 工单号 / 销售出库单号 / 客户采购订单号」四个字段中的任意一个上，
    * 这里四个字段同时等值匹配（任一命中即返回），供订单维度检验环节台账使用。
@@ -377,6 +512,13 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
         ...(order.materialGrade !== undefined ? { materialGrade: order.materialGrade } : {}),
         ...(order.techStandard !== undefined ? { techStandard: order.techStandard } : {}),
         ...(order.inspectedDate !== undefined ? { inspectedDate: order.inspectedDate } : {}),
+        // 034 炉批号与溯源留痕（docs/47 D1）：同样「显式传入才写」——未传时不覆盖既有值；
+        // 清空请走 updateHeatHeaderFields 的 '' 语义（本方法不接受空串兜底，避免误清真实炉号）。
+        ...(order.furnaceHeatNo !== undefined ? { furnaceHeatBatchNo: order.furnaceHeatNo } : {}),
+        ...(order.heatSourceType !== undefined ? { heatSourceType: order.heatSourceType } : {}),
+        ...(order.heatSourceOrderNo !== undefined
+          ? { heatSourceOrderNo: order.heatSourceOrderNo }
+          : {}),
         // 007 过程检验工序字段：此前 save() 只写入 work_order_no，其余 9 列（断料长度 / 操作员 /
         // 设备 / 螺纹规格 / 终检组 / 工序阶段 / 完成时间）一列都没写，而读路径 mapRow 一直在读，
         // 属「读得出、写不进」的断链（见 docs/24 §6 D4、docs/29 §3 断链 ②）。
@@ -420,6 +562,12 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
             ? { inboundDate: toInboundDate(order.inboundDate) }
             : {}),
           ...(specificationValue !== undefined ? { specification: specificationValue } : {}),
+          // 034 炉批号与溯源留痕：冲突更新路径与插入路径同一口径（显式传入才写）
+          ...(order.furnaceHeatNo !== undefined ? { furnaceHeatBatchNo: order.furnaceHeatNo } : {}),
+          ...(order.heatSourceType !== undefined ? { heatSourceType: order.heatSourceType } : {}),
+          ...(order.heatSourceOrderNo !== undefined
+            ? { heatSourceOrderNo: order.heatSourceOrderNo }
+            : {}),
           ...(order.unit !== undefined ? { unit: order.unit } : {}),
           ...(order.salesOrderNo !== undefined ? { salesOrderNo: order.salesOrderNo } : {}),
           ...(order.dispatchDate !== undefined ? { dispatchDate: order.dispatchDate } : {}),
@@ -742,6 +890,62 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
   }
 
   /**
+   * 炉批号相关表头字段更新（docs/47 §4.1 / §4.5）。
+   *
+   * 字段语义（与端口声明一致）：`undefined` = 不动该列；`''` = 清空为 NULL；非空 = 写入该值。
+   *
+   * 归一列 `furnace_heat_batch_no_norm` 是**生成列**（迁移 034），由数据库自行维护，
+   * 本方法只写原值 —— 保证写入与查询两侧归一化口径永远同源，不会分叉成两套规则。
+   *
+   * 清空炉批号时**连带清空溯源留痕**：炉号变了（或清空了）却留着上一炉的源单号，
+   * 会让「本单数据从哪来」的追溯结论指向错误的上游单据。
+   */
+  public async updateHeatHeaderFields(
+    id: string,
+    fields: {
+      furnaceHeatNo?: string;
+      materialGrade?: string;
+      techStandard?: string;
+      inspectedDate?: string;
+      heatSourceType?: string;
+      heatSourceOrderNo?: string;
+    }
+  ): Promise<void> {
+    const blankToNull = (value: string): string | null => {
+      const trimmed = value.trim();
+      return trimmed === '' ? null : trimmed;
+    };
+
+    const values: InspectionOrderUpdate = { updatedAt: new Date() };
+
+    if (fields.furnaceHeatNo !== undefined) {
+      const heatNo = fields.furnaceHeatNo.trim();
+      values.furnaceHeatBatchNo = heatNo === '' ? null : heatNo;
+      if (heatNo === '') {
+        values.heatSourceType = null;
+        values.heatSourceOrderNo = null;
+      }
+    }
+    if (fields.materialGrade !== undefined) {
+      values.materialGrade = blankToNull(fields.materialGrade);
+    }
+    if (fields.techStandard !== undefined) {
+      values.techStandard = blankToNull(fields.techStandard);
+    }
+    if (fields.inspectedDate !== undefined) {
+      values.inspectedDate = blankToNull(fields.inspectedDate);
+    }
+    if (fields.heatSourceType !== undefined) {
+      values.heatSourceType = blankToNull(fields.heatSourceType);
+    }
+    if (fields.heatSourceOrderNo !== undefined) {
+      values.heatSourceOrderNo = blankToNull(fields.heatSourceOrderNo);
+    }
+
+    await this.db.updateTable('inspectionOrders').set(values).where('id', '=', id).execute();
+  }
+
+  /**
    * 质量负责人签核（docs/35 §5）：写入**真实签核动作**的产物 —— 签核人 id / 姓名 / 时间。
    *
    * - 签核人由调用方从会话取（`operatorOf(request)`），不接受请求体自称的签核人；
@@ -766,6 +970,65 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
       .where('id', '=', id)
       .execute();
   }
+  /**
+   * 建单传递留痕（docs/48 §4.1 / 迁移 035）：把**建单那一次**的传递判定写入四列。
+   *
+   * 只写这四列 + updated_at；**不改任何业务状态**，也不参与任何判据（判据一律实时重算）。
+   * 取值一律来自领域 `TransferDecision`，仓储不推导、不补默认值：没传的字段写 NULL 而不是空串
+   * （空串会让「从未留痕」与「留痕为空」无法区分）。
+   */
+  public async recordTransferTrace(
+    id: string,
+    trace: {
+      chainKey: string;
+      chainKeyKind: string;
+      upstreamOrderNo?: string;
+      upstreamGateCode: string;
+    }
+  ): Promise<void> {
+    const now = new Date();
+
+    await this.db
+      .updateTable('inspectionOrders')
+      .set({
+        chainKey: trace.chainKey,
+        chainKeyKind: trace.chainKeyKind,
+        upstreamOrderNo: trace.upstreamOrderNo ?? null,
+        upstreamGateCode: trace.upstreamGateCode,
+        updatedAt: now,
+      })
+      .where('id', '=', id)
+      .execute();
+  }
+
+  public async updateNotes(id: string, notes: string): Promise<void> {
+    const now = new Date();
+    await this.db
+      .updateTable('inspectionOrders')
+      .set({
+        inspectionNotes: notes,
+        updatedAt: now,
+      })
+      .where('id', '=', id)
+      .execute();
+  }
+
+  public async appendNotes(id: string, notes: string): Promise<void> {
+    const now = new Date();
+    const row = await this.db
+      .selectFrom('inspectionOrders')
+      .select('inspectionNotes')
+      .where('id', '=', id)
+      .executeTakeFirst();
+    const existing = row?.inspectionNotes ?? '';
+    const combined = existing ? `${existing}\n${notes}` : notes;
+    await this.db
+      .updateTable('inspectionOrders')
+      .set({ inspectionNotes: combined, updatedAt: now })
+      .where('id', '=', id)
+      .execute();
+  }
+
   public async updateStatus(id: string, status: string, remark?: string): Promise<void> {
     const targetStatus = toInspectionStatus(status);
 
@@ -888,6 +1151,28 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
       ...((row as any).customerName ? { customerName: (row as any).customerName } : {}),
       ...((row as any).salesOrderPoNo ? { salesOrderPoNo: (row as any).salesOrderPoNo } : {}),
       ...((row as any).erpStatus ? { erpStatus: (row as any).erpStatus } : {}),
+      // 034 炉批号与溯源留痕（docs/47 D3）：此前 furnace_heat_batch_no 读侧也没映射，
+      // 契约 furnaceHeatNo 恒空 -> 出货台账「炉号」列与质保书炉号栏一直空白。
+      // 三个字段一律「列空即不输出该键」，界面按留白渲染，不用 batchNo 兜底（同 docs/34 §5.3 口径）。
+      ...((row as any).furnaceHeatBatchNo ? { furnaceHeatNo: (row as any).furnaceHeatBatchNo } : {}),
+      ...((row as any).heatSourceType ? { heatSourceType: (row as any).heatSourceType } : {}),
+      ...((row as any).heatSourceOrderNo ? { heatSourceOrderNo: (row as any).heatSourceOrderNo } : {}),
+      // 035 建单传递留痕（docs/48 §4.1）：与列表实时派生的 chainKey / predecessorOrderNo 是**两个语义**
+      // —— 一个是「建单当初凭什么放行」的历史存档，一个是「现在还能不能传」的实时判定。
+      // 因此单独挂在 transferTrace 下，绝不与实时字段同名。任一列有值才输出该键；列空即不输出，
+      // 界面按 — 呈现，绝不用实时判定去填满留痕（那会让「没留痕」看起来像「留过痕」）。
+      ...((row as any).chainKey || (row as any).upstreamGateCode
+        ? {
+            transferTrace: {
+              ...((row as any).chainKey ? { chainKey: (row as any).chainKey } : {}),
+              ...((row as any).chainKeyKind ? { chainKeyKind: (row as any).chainKeyKind } : {}),
+              ...((row as any).upstreamOrderNo ? { upstreamOrderNo: (row as any).upstreamOrderNo } : {}),
+              ...((row as any).upstreamGateCode
+                ? { upstreamGateCode: (row as any).upstreamGateCode }
+                : {}),
+            },
+          }
+        : {}),
       // 009 委外检验 (OQC 七分类) 台账字段。委外加工单号 / 回厂日期**只取物理列**：
       // 列为空即不输出该键，界面按 `-` 渲染。历史上这里用 batch_no 顶替委外加工单号、
       // 用 created_at 顶替回厂日期，属「推导值冒充真实字段」——已被 docs/09 §2.4 与
@@ -922,4 +1207,54 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
           }
         : {}),    };
   }
+}
+
+/** 锚点分桶：batch / heat / workOrder 三组「去重后的非空值」 */
+function splitAnchorValues(anchors: readonly ChainAnchor[]): {
+  batch: string[];
+  heat: string[];
+  workOrder: string[];
+} {
+  const pick = (kind: ChainAnchorKind): string[] => [
+    ...new Set(
+      anchors
+        .filter((anchor) => anchor.kind === kind)
+        .map((anchor) => anchor.value.trim())
+        .filter((value) => value !== '')
+    ),
+  ];
+  return { batch: pick('BATCH'), heat: pick('HEAT'), workOrder: pick('WORK_ORDER') };
+}
+
+function hasAnyAnchorValue(buckets: {
+  batch: string[];
+  heat: string[];
+  workOrder: string[];
+}): boolean {
+  return buckets.batch.length > 0 || buckets.heat.length > 0 || buckets.workOrder.length > 0;
+}
+
+/**
+ * 标注候选单**实际命中**的锚点（行值与锚点集合逐项比对，而不是「SQL 命中了哪个 OR 分支」）。
+ *
+ * 炉批号比对走数据库生成列 `furnace_heat_batch_no_norm`（迁移 034）；生成列为空时
+ * （仅存量未回填行才会出现）回退到 `normalizeHeatBatchNo(原值)`，与写入侧同一个归一函数。
+ */
+function matchChainAnchors(
+  row: InspectionOrderRow,
+  buckets: { batch: string[]; heat: string[]; workOrder: string[] }
+): ChainAnchorKind[] {
+  const matched: ChainAnchorKind[] = [];
+  if (row.batchNo !== null && buckets.batch.includes(row.batchNo)) {
+    matched.push('BATCH');
+  }
+  const heatNo = row.furnaceHeatBatchNoNorm ?? normalizeHeatBatchNo(row.furnaceHeatBatchNo ?? '');
+  if (heatNo !== '' && buckets.heat.includes(heatNo)) {
+    matched.push('HEAT');
+  }
+  const workOrderNo = (row.workOrderNo ?? '').trim();
+  if (workOrderNo !== '' && buckets.workOrder.includes(workOrderNo)) {
+    matched.push('WORK_ORDER');
+  }
+  return matched;
 }

@@ -2,6 +2,7 @@ import type {
   InspectionOrder as InspectionOrderDTO,
   CreateInspectionOrderRequest,
   InspectionPlanVersion,
+  TransferDecision,
 } from '@letian/contracts';
 import { ErrorCode } from '@letian/contracts';
 import {
@@ -13,6 +14,7 @@ import {
 import { ApplicationError } from '../../errors/application-error.js';
 import type { ISecurityContext } from '../../security/security-context.js';
 import type { IUnitOfWork } from '../../tx/unit-of-work.js';
+import { evaluateTransferDecision } from './check-transfer-permit.js';
 
 /**
  * 007 过程检验 (IPQC) 工序追溯字段（下料检验 / 滚丝检验 / 成品检）。
@@ -65,6 +67,11 @@ export interface CreateInspectionOrderCommand extends Partial<CreateInspectionOr
   materialGrade?: string;
   techStandard?: string;
   inspectedDate?: string;
+  /**
+   * 炉批号（Heat No，docs/47 §3.1）：落 `inspection_orders.furnace_heat_batch_no`。
+   * 建单即落库 —— 出货检验录入时按它关联上游检验记录（委外热处理 -> 来料检验）。
+   */
+  furnaceHeatNo?: string;
   mandatoryGate?: boolean;
   planId?: string;
   planVersionNo?: string;
@@ -125,6 +132,92 @@ export class CreateInspectionOrderUseCase {
           targetMaterialCode: cmd.materialCode,
           ...(cmd.supplierCode !== undefined ? { targetSupplierCode: cmd.supplierCode } : {}),
         });
+      }
+
+      // 2.05 「合格后传递」门禁（docs/48-合格后传递通用链路规则设计与改造方案.md §4.5）：
+      //      本环节的**唯一执法点**。四个检验环节（IQC / IPQC / 委外 / 出货）共用本入口，
+      //      因此规则写在这里就自动覆盖全部环节，不需要（也不允许）在各控制器里再写一份 if。
+      //
+      //      位置：排在排他锁与 PBAC 之后、方案匹配与取号之前 ——
+      //        ① 先拿锁：与「同批次并发建单」串行化，避免两单各自看到旧上游；
+      //        ② 先判 PBAC：越权请求返回 403 而不是泄露链路状态；
+      //        ③ 早于取号：被阻断的单**不消耗**单号流水（否则台账会出现空洞号）。
+      //      判定本身是纯函数（唯一真相在 @letian/domain），此处只负责取数与处置。
+      const transferWorkOrderNo = nonBlank(cmd.ipqcProcess?.workOrderNo ?? cmd.workOrderNo);
+      const transferDecision = await evaluateTransferDecision(ctx, {
+        inspectionType: cmd.inspectionType,
+        batchNo: cmd.batchNo,
+        materialCode: cmd.materialCode,
+        ...(nonBlank(cmd.furnaceHeatNo) !== undefined
+          ? { furnaceHeatNo: nonBlank(cmd.furnaceHeatNo) }
+          : {}),
+        ...(transferWorkOrderNo !== undefined ? { workOrderNo: transferWorkOrderNo } : {}),
+        ...(cmd.orderNo !== undefined ? { orderNo: cmd.orderNo } : {}),
+      });
+      let isOverridden = false;
+      let resolvedTicketId: string | null = null;
+      if (!transferDecision.allowed) {
+        if (cmd.transferOverride) {
+          if (!cmd.transferOverride.reason || cmd.transferOverride.reason.trim().length < 5) {
+            throw new ApplicationError(
+              ErrorCode.VALIDATION_FAILED,
+              '豁免原因至少需要5个字符',
+              400
+            );
+          }
+          if (!cmd.transferOverride.approverId) {
+            throw new ApplicationError(
+              ErrorCode.VALIDATION_FAILED,
+              '豁免审批人 ID 不能为空',
+              400
+            );
+          }
+          if (!cmd.transferOverride.ticketId && !cmd.transferOverride.ticketNo) {
+            throw new ApplicationError(
+              ErrorCode.VALIDATION_FAILED,
+              '按「一单一核销」口径，豁免建单必须关联一张已审批的豁免工单（ticketId 或 ticketNo）',
+              422
+            );
+          }
+          if (cmd.transferOverride.ticketId || cmd.transferOverride.ticketNo) {
+            const ticket = cmd.transferOverride.ticketId
+              ? await ctx.transferOverrides.findById(cmd.transferOverride.ticketId)
+              : await ctx.transferOverrides.findByTicketNo(cmd.transferOverride.ticketNo!);
+            if (!ticket) {
+              throw new ApplicationError(
+                ErrorCode.RESOURCE_NOT_FOUND,
+                `未找到指定的豁免申请工单 [${cmd.transferOverride.ticketId ?? cmd.transferOverride.ticketNo}]`,
+                404
+              );
+            }
+            if (ticket.status !== 'APPROVED') {
+              throw new ApplicationError(
+                ErrorCode.VALIDATION_FAILED,
+                `豁免申请单 [${ticket.ticketNo}] 状态为 [${ticket.status}]，非 APPROVED 状态不可核销建单`,
+                422
+              );
+            }
+            if (
+              ticket.batchNo !== cmd.batchNo ||
+              ticket.materialCode !== cmd.materialCode ||
+              ticket.inspectionType !== cmd.inspectionType
+            ) {
+              throw new ApplicationError(
+                ErrorCode.VALIDATION_FAILED,
+                `豁免申请单 [${ticket.ticketNo}] 目标批次/物料/类型与当前建单请求不匹配`,
+                422
+              );
+            }
+            resolvedTicketId = ticket.id;
+          }
+          isOverridden = true;
+        } else {
+        // 留痕必须写在**独立事务**里：本事务随后就要回滚，写在里面的审计与 Outbox 会一并消失，
+        // 于是「客户问这批为什么动不了」将查不到任何记录（docs/48 §8 硬约束 5）。
+        // 审计表与 Outbox 表都是纯追加写，不会与在建单事务争锁，跨事务写入是安全的。
+        await this.recordTransferBlockedAttempt(cmd, transferDecision, securityCtx);
+        throw transferBlockedError(transferDecision, cmd.inspectionType, cmd.batchNo);
+        }
       }
 
       // 2.1 「供应商」名称快照：请求体未显式给出名称时，按供应商编码回查供应商主数据，
@@ -265,6 +358,9 @@ export class CreateInspectionOrderUseCase {
         materialGrade: nonBlank(cmd.materialGrade),
         techStandard: nonBlank(cmd.techStandard),
         inspectedDate: nonBlank(cmd.inspectedDate),
+        // 034 炉批号（docs/47 D1/D2）：空串 / 纯空白一律视作「未提供」（nonBlank），
+        // 与上面三列同一口径 —— 不允许用空串把库里已有炉号覆盖成空。
+        furnaceHeatNo: nonBlank(cmd.furnaceHeatNo),
         // 台账「检验人」列（inspection_orders.inspector_id / inspector_name）：契约可传，缺省保持 undefined，
         // 由读侧按员工主数据补齐；此处不做任何推导（见 docs/30 §3）
         inspectorId: cmd.inspectorId,
@@ -305,6 +401,79 @@ export class CreateInspectionOrderUseCase {
 
       // 6. 持久化聚合根
       await ctx.inspectionOrders.save(order.toDTO());
+
+      // 6.1 建单传递留痕（docs/48 §4.1 / 迁移 035）：把**第 1 步那次门禁判定**原样落库。
+      //
+      //     为什么必须有：上游状态会变（MRB 结案 / 复检终判 / 下游被冻结），只靠实时重算
+      //     查不出「这批货当初凭什么放行」，客户问起来只能翻审计日志的中文 payload。
+      //     与 docs/47 的 heat_source_* 同型 —— 列建了就必须有人写，否则重演「列建好了却没人写」（docs/47 §2 D1）。
+      //
+      //     三条纪律：
+      //       ① **只作留痕，不作判据**：留痕一旦被读成判据，就会出现「上游已撤销放行、下游仍按旧留痕放行」；
+      //       ② 取值直接取 `transferDecision`（第 1 步的产物），**绝不重新判定** —— 重算等于第二份口径；
+      //       ③ 与建单**同一事务**：留痕失败即建单失败，不会留下「单在、留痕丢」的静默状态。
+      await ctx.inspectionOrders.recordTransferTrace(order.getId(), {
+        chainKey: transferDecision.chainKey,
+        chainKeyKind: transferDecision.chainKeyKind,
+        ...(transferDecision.predecessorOrderNo !== undefined
+          ? { upstreamOrderNo: transferDecision.predecessorOrderNo }
+          : {}),
+        upstreamGateCode: isOverridden ? 'UPSTREAM_OVERRIDDEN' : transferDecision.code,
+      });
+
+      if (isOverridden && cmd.transferOverride) {
+        const consumeId = resolvedTicketId ?? cmd.transferOverride.ticketId;
+        if (consumeId) {
+          await ctx.transferOverrides.consumeTicket(consumeId, {
+            orderId: order.getId(),
+            orderNo: order.getOrderNo(),
+          });
+        }
+        await ctx.auditLogs.insert({
+          id: crypto.randomUUID(),
+          traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+          userId: cmd.transferOverride.approverId,
+          userName: cmd.transferOverride.approverName ?? '质量主管特批',
+          action: 'STATUS_CHANGE',
+          resourceType: 'INSPECTION_ORDER',
+          resourceId: order.getId(),
+          status: 'SUCCESS',
+          diffPatch: {
+            orderNo: order.getOrderNo(),
+            batchNo: order.getBatchNo(),
+            materialCode: order.getMaterialCode(),
+            inspectionType: order.getInspectionType(),
+            originalGateCode: transferDecision.code,
+            upstreamOrderNo: transferDecision.predecessorOrderNo ?? null,
+            reason: cmd.transferOverride.reason,
+            approvalDocNo: cmd.transferOverride.approvalDocNo ?? null,
+            ticketId: consumeId ?? null,
+          },
+          createdAt: new Date().toISOString(),
+        });
+
+        await ctx.outbox.append({
+          id: crypto.randomUUID(),
+          aggregateType: 'InspectionOrder',
+          aggregateId: order.getId(),
+          eventType: 'TRANSFER_GATE_OVERRIDDEN',
+          payload: {
+            orderId: order.getId(),
+            orderNo: order.getOrderNo(),
+            batchNo: order.getBatchNo(),
+            materialCode: order.getMaterialCode(),
+            inspectionType: order.getInspectionType(),
+            originalGateCode: transferDecision.code,
+            reason: cmd.transferOverride.reason,
+            approverId: cmd.transferOverride.approverId,
+            approvalDocNo: cmd.transferOverride.approvalDocNo ?? null,
+          },
+          traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+          occurredAt: new Date(),
+          status: 'PENDING',
+          retryCount: 0,
+        });
+      }
 
       // 7. 写入 Outbox 事件
       await ctx.outbox.append({
@@ -349,4 +518,103 @@ export class CreateInspectionOrderUseCase {
       return order.toDTO();
     });
   }
+
+  /**
+   * 传递门禁阻断留痕（审计 `GATE_BLOCKED` + Outbox `TRANSFER_BLOCKED` / `CHAIN_TERMINATED`）。
+   *
+   * **为什么另开一个事务**：本用例的建单事务在阻断时必然回滚，若把留痕写在同一事务里，
+   * 「这次建单为什么被拦」会随建单一起消失 —— 客户来问时查不到任何证据
+   * （docs/48 §8 硬约束 5：每次阻断必须留痕）。审计表与 Outbox 表都是纯追加写，
+   * 不会与在建单事务争锁，因此跨事务提交是安全的。
+   */
+  private async recordTransferBlockedAttempt(
+    cmd: CreateInspectionOrderCommand,
+    decision: TransferDecision,
+    securityCtx?: ISecurityContext
+  ): Promise<void> {
+    const traceId = securityCtx?.traceId ?? crypto.randomUUID();
+    await this.uow.execute(async (ctx) => {
+      await ctx.auditLogs.insert({
+        id: crypto.randomUUID(),
+        traceId,
+        userId: cmd.operatorId,
+        userName: cmd.operatorName,
+        action: 'GATE_BLOCKED',
+        resourceType: 'INSPECTION_ORDER',
+        resourceId: cmd.batchNo,
+        status: 'REJECTED',
+        diffPatch: {
+          gate: 'TRANSFER',
+          code: decision.code,
+          downstreamStage: decision.stage,
+          precedentStage: decision.precedentStage ?? null,
+          predecessorOrderNo: decision.predecessorOrderNo ?? null,
+          predecessorStatus: decision.predecessorStatus ?? null,
+          mrbNo: decision.mrbNo ?? null,
+          mrbDisposition: decision.mrbDisposition ?? null,
+          chainKey: decision.chainKey,
+          chainKeyKind: decision.chainKeyKind,
+          terminateChain: decision.terminateChain,
+          batchNo: cmd.batchNo,
+          materialCode: cmd.materialCode,
+          reason: decision.reason,
+        },
+        createdAt: new Date().toISOString(),
+      });
+
+      await ctx.outbox.append({
+        id: crypto.randomUUID(),
+        aggregateType: 'InspectionOrder',
+        aggregateId: cmd.batchNo,
+        // 退货 / 报废走 CHAIN_TERMINATED（下游系统据此冻结整条链），其余为普通传递阻断
+        eventType: decision.terminateChain ? 'CHAIN_TERMINATED' : 'TRANSFER_BLOCKED',
+        payload: {
+          batchNo: cmd.batchNo,
+          materialCode: cmd.materialCode,
+          blockedStage: decision.stage,
+          gateCode: decision.code,
+          predecessorStage: decision.precedentStage ?? null,
+          predecessorOrderNo: decision.predecessorOrderNo ?? null,
+          mrbNo: decision.mrbNo ?? null,
+          terminateChain: decision.terminateChain,
+          reason: decision.reason,
+          operatorId: cmd.operatorId,
+        },
+        traceId,
+        occurredAt: new Date(),
+        status: 'PENDING',
+        retryCount: 0,
+      });
+    });
+  }
+}
+
+/**
+ * 传递阻断的统一异常形状（422 + problem+json + 结构化 `details`）。
+ *
+ * `details.transferDecision` 是**完整判定结果**（含理由码 / 上游单号 / MRB 单号 / 放行凭证），
+ * 让 MES 与看板按 `code` 分支而不必解析中文文案；`details.blockedBy` 是给现场看的精简三元组。
+ */
+function transferBlockedError(
+  decision: TransferDecision,
+  inspectionType: CreateInspectionOrderCommand['inspectionType'],
+  batchNo: string
+): ApplicationError {
+  return new ApplicationError({
+    code: ErrorCode.TRANSFER_BLOCKED,
+    title: '传递门禁阻断',
+    status: 422,
+    detail: decision.reason,
+    details: {
+      transferDecision: decision,
+      blockedBy: {
+        code: decision.code,
+        stage: decision.precedentStage ?? decision.stage,
+        orderNo: decision.predecessorOrderNo ?? null,
+        status: decision.predecessorStatus ?? null,
+      },
+      batchNo,
+      downstreamStage: inspectionType,
+    },
+  });
 }
