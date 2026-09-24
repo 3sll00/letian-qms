@@ -222,6 +222,7 @@ export function TraceabilityPage() {
     setError(null);
     setNotice(null);
     setOrderChain(null);
+    setChainStatus(null);
 
     try {
       // 1. 订单维度：本订单检验环节（订单号不是追溯主键，这里只出该订单的检验台账）
@@ -282,6 +283,7 @@ export function TraceabilityPage() {
     setOrderChain(null);
     setGraph(null);
     setActiveBatchNo(null);
+    setChainStatus(null);
     setError(null);
     setNotice(null);
   }
@@ -717,6 +719,75 @@ export function TraceabilityPage() {
           )}
         </div>
       )}
+      {/* 传递链闸门（合格后传递）：与血缘图是两条独立查询 —— 血缘节点缺失（老批次/仅台账批次）
+          时 graph=null 但闸门照样要渲染，故独立于下面的批次概览卡，不得再嵌回 graph 分支里
+          （否则「批次合格但没传递」就成了静默隐藏）。docs/48 §4.7 */}
+      {chainStatus !== null && chainStatus.stages.length > 0 && (
+        <div className="bg-white border border-slate-100 rounded-lg p-4 shadow-sm space-y-3">
+          <div className="rounded border border-slate-100 bg-slate-50/60 p-3 space-y-2">
+            <div className="flex items-center gap-2 text-xs flex-wrap">
+              <span className="font-semibold text-slate-700">传递链闸门（合格后传递）</span>
+              <span
+                className={`px-2 py-0.5 rounded ${CHAIN_STATE_TONE[chainStatus.summary.state].badge}`}
+              >
+                {CHAIN_STATE_LABEL[chainStatus.summary.state]}
+              </span>
+              <span className="text-slate-400">
+                锚点 {chainStatus.anchor.kind}={display(chainStatus.anchor.value)}
+              </span>
+              <span className="text-slate-500">
+                已放行 {chainStatus.summary.releasedCount} / 阻断 {chainStatus.summary.blockedCount}{' '}
+                / 检验中 {chainStatus.summary.pendingCount}
+              </span>
+              {chainStatus.summary.terminated && (
+                <span className="text-rose-600">
+                  整链已终止（MRB 退货 / 报废），下游禁止建单、已建单需冻结
+                </span>
+              )}
+            </div>
+            <div className="flex items-stretch gap-2 overflow-x-auto pb-1">
+              {chainStatus.stages.map((stage) => {
+                const gateTone = TRANSFER_GATE_TONE[stage.decision.code];
+                const evidence = permitEvidenceText(stage.decision);
+                return (
+                  <div
+                    key={`${stage.stage}-${stage.orderNo ?? stage.seq}`}
+                    className="min-w-[190px] shrink-0 rounded border border-slate-200 bg-white p-2 space-y-1"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-semibold text-slate-700">
+                        {stage.seq}. {stage.stage}
+                      </span>
+                      <span
+                        className={`px-1.5 py-0.5 rounded text-[10px] ${CHAIN_STATE_TONE[stage.state].badge}`}
+                      >
+                        {CHAIN_STATE_LABEL[stage.state]}
+                      </span>
+                    </div>
+                    <div className="text-[11px] font-mono text-slate-600 break-all">
+                      {display(stage.orderNo)}
+                    </div>
+                    <div className={`px-1.5 py-0.5 rounded text-[10px] inline-block ${gateTone.badge}`}>
+                      进入闸门：{TRANSFER_GATE_LABEL[stage.decision.code]}
+                    </div>
+                    <div className="text-[10px] text-slate-500 break-all">
+                      {gateUpstreamText(stage.decision)}
+                    </div>
+                    {evidence !== '' && (
+                      <div className="text-[10px] text-amber-700 break-all">{evidence}</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="text-[10px] text-slate-400">
+              闸门来自服务端实时判定（与现场建单 422、台账徽标同一份判定）；环节行由检验单派生，
+              不看终判才落库的追溯节点 —— 否则「检验中」会被误读成「缺失」。
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 批次概览 + 影响面（影响面恒按生产流向计算，与查询方向无关） */}
       {graph !== null && (
         <div className="bg-white border border-slate-100 rounded-lg p-4 shadow-sm space-y-3">
@@ -738,70 +809,6 @@ export function TraceabilityPage() {
               )}
             </div>
           </div>
-
-          {chainStatus !== null && chainStatus.stages.length > 0 && (
-            <div className="rounded border border-slate-100 bg-slate-50/60 p-3 space-y-2">
-              <div className="flex items-center gap-2 text-xs flex-wrap">
-                <span className="font-semibold text-slate-700">传递链闸门（合格后传递）</span>
-                <span
-                  className={`px-2 py-0.5 rounded ${CHAIN_STATE_TONE[chainStatus.summary.state].badge}`}
-                >
-                  {CHAIN_STATE_LABEL[chainStatus.summary.state]}
-                </span>
-                <span className="text-slate-400">
-                  锚点 {chainStatus.anchor.kind}={display(chainStatus.anchor.value)}
-                </span>
-                <span className="text-slate-500">
-                  已放行 {chainStatus.summary.releasedCount} / 阻断 {chainStatus.summary.blockedCount}{' '}
-                  / 检验中 {chainStatus.summary.pendingCount}
-                </span>
-                {chainStatus.summary.terminated && (
-                  <span className="text-rose-600">
-                    整链已终止（MRB 退货 / 报废），下游禁止建单、已建单需冻结
-                  </span>
-                )}
-              </div>
-              <div className="flex items-stretch gap-2 overflow-x-auto pb-1">
-                {chainStatus.stages.map((stage) => {
-                  const gateTone = TRANSFER_GATE_TONE[stage.decision.code];
-                  const evidence = permitEvidenceText(stage.decision);
-                  return (
-                    <div
-                      key={`${stage.stage}-${stage.orderNo ?? stage.seq}`}
-                      className="min-w-[190px] shrink-0 rounded border border-slate-200 bg-white p-2 space-y-1"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-[11px] font-semibold text-slate-700">
-                          {stage.seq}. {stage.stage}
-                        </span>
-                        <span
-                          className={`px-1.5 py-0.5 rounded text-[10px] ${CHAIN_STATE_TONE[stage.state].badge}`}
-                        >
-                          {CHAIN_STATE_LABEL[stage.state]}
-                        </span>
-                      </div>
-                      <div className="text-[11px] font-mono text-slate-600 break-all">
-                        {display(stage.orderNo)}
-                      </div>
-                      <div className={`px-1.5 py-0.5 rounded text-[10px] inline-block ${gateTone.badge}`}>
-                        进入闸门：{TRANSFER_GATE_LABEL[stage.decision.code]}
-                      </div>
-                      <div className="text-[10px] text-slate-500 break-all">
-                        {gateUpstreamText(stage.decision)}
-                      </div>
-                      {evidence !== '' && (
-                        <div className="text-[10px] text-amber-700 break-all">{evidence}</div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="text-[10px] text-slate-400">
-                闸门来自服务端实时判定（与现场建单 422、台账徽标同一份判定）；环节行由检验单派生，
-                不看终判才落库的追溯节点 —— 否则「检验中」会被误读成「缺失」。
-              </div>
-            </div>
-          )}
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-2 text-xs">
             {[
