@@ -7,6 +7,7 @@
  * 3. 场景 B（阻断态 BLOCKED）：检索 TEST2609-020，验证闸门显示「阻断」状态徽标与阻断统计
  * 4. 场景 C（终止态 TERMINATED）：检索 TEST2609-018，验证闸门显示「整链已终止（MRB 退货 / 报废）」告警文案与终止状态徽标
  * 5. 场景 D（检验中 PENDING）：检索 TEST2609-002，验证闸门显示「检验中」状态徽标与检验中统计
+ * 6. 场景 E（现有库演示批次，缺失自动 SKIP）：特采 / 上游不合格 / MRB 在途 / 返工在途 / 链首缺失
  */
 
 const { spawn } = require('node:child_process');
@@ -14,7 +15,10 @@ const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
 
-const PORT = 9338;
+// Windows Hyper-V/WSL 会动态保留 TCP 端口段（netsh ... show excludedportrange），
+// 落入排除段时 Chrome 绑定调试端口直接 WSAEACCES → CDP 起不来。
+// 候选端口按序尝试；可用 CDP_PORT 指定首选。
+const PORT_CANDIDATES = [Number(process.env.CDP_PORT || 0), 9500, 9830, 9338].filter((p) => p > 0);
 const OUT_DIR = path.resolve(__dirname, '../logs');
 const LOG = path.join(OUT_DIR, 'board-transfer-gate-ui-verify.log');
 fs.mkdirSync(OUT_DIR, { recursive: true });
@@ -157,28 +161,35 @@ async function main() {
   }
 
   const profileDir = path.resolve(OUT_DIR, 'chrome-profile-board-gate');
-  const chromeProc = spawn(chromeExe, [
-    '--headless=new',
-    '--remote-debugging-port=' + PORT,
-    '--user-data-dir=' + profileDir,
-    '--disable-extensions',
-    '--disable-crash-reporter',
-    '--no-sandbox',
-    '--no-first-run',
-    '--no-default-browser-check',
-    'about:blank',
-  ], { detached: false, stdio: 'ignore' });
-
+  let chromeProc = null;
+  let cdpBase = null;
+  let usedPort = 0;
   try {
-    let cdpBase = null;
-    for (let i = 0; i < 30; i++) {
-      try {
-        cdpBase = await resolveCdpBase(PORT);
-        if (cdpBase) break;
-      } catch {}
-      await sleep(200);
+    for (const port of PORT_CANDIDATES) {
+      chromeProc = spawn(chromeExe, [
+        '--headless=new',
+        '--remote-debugging-port=' + port,
+        '--user-data-dir=' + profileDir,
+        '--disable-extensions',
+        '--disable-crash-reporter',
+        '--no-sandbox',
+        '--no-first-run',
+        '--no-default-browser-check',
+        'about:blank',
+      ], { detached: false, stdio: 'ignore' });
+      for (let i = 0; i < 40; i++) {
+        try {
+          cdpBase = await resolveCdpBase(port);
+          if (cdpBase) { usedPort = port; break; }
+        } catch {}
+        await sleep(250);
+      }
+      if (cdpBase) break;
+      try { chromeProc.kill(); } catch {}
+      chromeProc = null;
+      await sleep(500);
     }
-    check('CDP 调试端口启动成功 (:9338)', Boolean(cdpBase), { cdpBase });
+    check('CDP 调试端口启动成功 (:' + (usedPort || PORT_CANDIDATES.join('/')) + ')', Boolean(cdpBase), { cdpBase });
     if (!cdpBase) {
       process.exitCode = 1;
       return;
@@ -327,6 +338,45 @@ async function main() {
     `);
     check('场景 D：显示「检验中」状态徽标', gateInfoD.hasPendingBadge);
     check('场景 D：检验中计数正确 (检验中 1)', gateInfoD.hasPendingCount);
+
+    // --- 场景 E：现有库演示批次（非夹具数据，缺失时 SKIP 不计失败）---
+    // 覆盖 A-D 之外的理由码：UPSTREAM_CONCESSION / UPSTREAM_FAILED / UPSTREAM_UNDER_MRB /
+    // UPSTREAM_REINSPECTING / 单环节链首 UPSTREAM_MISSING。
+    const skip = (name, why) => log('SKIP :: ' + name + ' :: ' + why);
+    const demoScenario = async (batch, expects) => {
+      const s = await searchBatch(batch);
+      if (!s || !s.ok) { skip(batch, '检索未命中（演示数据不在库）'); return; }
+      await sleep(500);
+      const info = await evalJs(cdp, `
+        (() => {
+          const bodyText = document.body.innerText || '';
+          return {
+            hasGate: bodyText.includes('传递链闸门（合格后传递）'),
+            checks: ${JSON.stringify(expects)}.map(([name, needle]) => [name, bodyText.includes(needle)]),
+          };
+        })()
+      `);
+      if (!info.hasGate) { skip(batch, '闸门区块未渲染（演示数据不在库）'); return; }
+      for (const [name, ok] of info.checks) check(batch + '：' + name, ok);
+    };
+    await demoScenario('B20231011-92', [
+      ['特采姿态徽标「让步接收（受限放行）」', '让步接收（受限放行）'],
+      ['让步放行凭证含 MRB 单号', 'MRB-20231011-01'],
+    ]);
+    await demoScenario('TEST2609-HT-004A', [
+      ['阻断姿态徽标「上游不合格」', '上游不合格'],
+      ['指名拦截单 OQC-HT-20260923-9105', 'OQC-HT-20260923-9105'],
+    ]);
+    await demoScenario('B20231013-03', [
+      ['MRB 在途姿态「上游 MRB 评审中」', '上游 MRB 评审中'],
+    ]);
+    await demoScenario('TEST2609-011', [
+      ['返工在途姿态「返工复检中」', '返工复检中'],
+    ]);
+    await demoScenario('B20231013-02', [
+      ['已放行徽标', '已放行'],
+      ['链首缺失提示「上游环节缺失」', '上游环节缺失'],
+    ]);
 
     cdp.ws.close();
   } finally {

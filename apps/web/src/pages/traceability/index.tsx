@@ -767,6 +767,16 @@ export function TraceabilityPage() {
                     <div className="text-[11px] font-mono text-slate-600 break-all">
                       {display(stage.orderNo)}
                     </div>
+                    {stage.stateCode !== undefined && TRANSFER_GATE_TONE[stage.stateCode] !== undefined && (
+                      <div
+                        className={`px-1.5 py-0.5 rounded text-[10px] inline-block ${TRANSFER_GATE_TONE[stage.stateCode].badge}`}
+                      >
+                        传递姿态：{TRANSFER_GATE_LABEL[stage.stateCode]}
+                      </div>
+                    )}
+                    {stage.stateReason !== undefined && stage.stateReason !== '' && (
+                      <div className="text-[10px] text-slate-500 break-all">{stage.stateReason}</div>
+                    )}
                     <div className={`px-1.5 py-0.5 rounded text-[10px] inline-block ${gateTone.badge}`}>
                       进入闸门：{TRANSFER_GATE_LABEL[stage.decision.code]}
                     </div>
