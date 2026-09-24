@@ -71,6 +71,15 @@
   - 签核人 = 当前登录用户：请求体**不接受**「自称的签核人」；角色门禁 `QA_MANAGER` / `ADMIN` / `SYSTEM`，其余角色 403；重复签核幂等覆盖（换人 / 换时间），历史动作留在审计日志里（口径见 `docs/35` §5）。
 - `PATCH /api/v1/inspections/:id/measurements`: 批量录入或暂存抽样实测数值。
 - `POST /api/v1/inspections/:id/evaluate`: 触发 AQL 与公差自动裁决，更新单据状态为 `PASS` 或 `FAIL`。
+- `GET /api/v1/inspections/heat-batch-trace`: 出货检验录入页的**炉批号溯源联动**查询（口径见 `docs/47` §3，实现见 §9）。
+  - **请求参数**：`heatBatchNo`（必填，炉批号）、`materialCode`（选填，参与物料维度匹配）。炉批号的大小写 / 前后空格 / 全角空格 / 连字符 / 下划线差异一律**归一后**匹配（归一列 `furnace_heat_batch_no_norm`，迁移 034）。
+  - **响应结果**：`FurnaceHeatTraceResponse` = `heatBatchNo`（回显**原值**，非归一值）+ `sourceType`（`OUTSOURCE_HEAT_TREATMENT` / `IQC_RAW_MATERIAL` / `NONE`）+ `matchScope`（`MATERIAL` 同物料 / `GLOBAL` 跨物料，界面据此提示「跨物料命中，请确认炉次归属」）+ `sourceOrderNo` / `sourceOrderId` / `sourceMaterialCode` / `inspectedAt` + `inheritedItems[]`。
+  - **三级链路逐级回退且级别之间不合并**：L1 `OQC_HEAT`（委外热处理）→ L2 `IQC`（来料检验）→ L3 空态；同级多命中取「**最近一次终判**」的一张；**未终判或判不合格的源单不参与带出**。
+  - **带出范围（白名单）**：只带 `metricCategory` 属于化学成分 / 力学性能 / 硬度 / 抗拉强度的项，且只带**源单里有实测值**的项；按 `itemCode` 精确匹配优先、`name` 归一包含兜底；匹配不到的目标指标行保持空值（不猜、不填 0）。尺寸 / 外观类默认不带出。
+  - 查无记录返回 `NONE` 空态（HTTP 200），不报错、不带任何值（界面不显示 Banner）。
+- `PATCH /api/v1/inspections/:id/header`: 出货检验录入页提交前落库**表头业务事实**（`furnaceHeatNo` 炉批号 / `materialGrade` 材质牌号 / `techStandard` 执行技术标准 / `inspectedDate` 检验日期；**空串 = 清空**）。
+  - 服务端**自行重新解析**带出源并落溯源留痕（`heatSourceType` / `heatSourceOrderNo`），**不接受前端自称来源**；操作人与 PBAC 一律取当前登录用户（口径见 `docs/47` §3.6）。
+  - 此前出货检验表头**没有任何写路径**（界面填了炉号、库里仍为空，下游单据与质保书炉号栏无来源），本接口是 D1 / D3 的修复点。
 
 ### 3.4 生产强制放行关卡 (`/api/v1/release-gates`)
 - `GET /api/v1/release-gates/check`:
@@ -254,12 +263,38 @@
 ### 3.9 主数据档案与企业档案 (`/api/v1/master-data`)
 
 - `GET /api/v1/master-data/{suppliers|customers|inventory|workshops|employees|categories}`: 各类主数据只读清单。
+
+> **前端入口（2026-09-23 起）**：六类主数据只读清单**没有独立的维护页** —— 管家婆 ERP 是唯一权威来源，QMS 侧只落只读副本供检验单、质检方案与 PBAC 引用
+> （【ERP基础档案】模块已下线，见 `docs/01-PRD` §3.9 与 `docs/实施进度` §47）；**企业档案也一并无前端维护界面** —— 证书侧仍读 `GET /master-data/company-profile`，未维护即留白，调整须经运维改库或种子。
+
 - `GET /api/v1/master-data/company-profile`: 读取**企业档案单行主数据**（质量 / 制造证书抬头、印章文字、「供货单位·产地」的唯一来源）。
   - **无行时返回 `null`**（不是空对象、更不是编造默认值）：调用方据此提示「企业档案未维护」，并让证书对应单元格留白。
 - `PUT /api/v1/master-data/company-profile`: 维护企业档案（服务端 upsert）。
   - **只更新请求体显式给出的字段**（空串 = 清空）；`email` 受契约 `z.string().email()` 约束，**留空须不下发该字段**（传空串会被判非法 → 400）。
   - `updated_by` / `updated_at` 由服务端按**当前登录用户**与 `now()` 写入，客户端不可传入。
   - 设计口径见 `docs/35` §6，物理表定义见 `docs/03` §2.14。
+
+### 3.10 「合格后传递」传递门禁 (`/api/v1/inspections` · `/api/v1/traceability/chain-status` · `/api/v1/release-gates`)
+
+> 规则唯一真相：`@letian/domain` 的 `canTransferToNextStage` / `evaluateStageVerdict`（纯函数）；
+> 环节先后顺序唯一真相：`models/stage-sequence.ts`（`IQC` → `IPQC_CT` → `IPQC_RL` → `IPQC_FN` → 委外八类并列 → `OQC_SH`）。
+> 业务口径与验收用例见 `docs/48-合格后传递通用链路规则设计与改造方案.md`；**前端只翻译、不判定**（硬约束 6：以服务端 422 为准）。
+
+| 入口 | 说明 |
+|:---|:---|
+| `POST /api/v1/inspections`（建单） | **唯一执法点**：上游未合格（或 MRB 未放行）→ `422 TRANSFER_BLOCKED`（problem+json，`details.transferDecision` 带完整判定 + `details.blockedBy` 三元组）；阻断同时落审计 `GATE_BLOCKED` 与 Outbox `TRANSFER_BLOCKED` / `CHAIN_TERMINATED`（另开事务，不随回滚消失） |
+| `GET /api/v1/inspections`（台账） | 每行下发**只读派生**字段：`canTransfer` / `transferCode` / `chainKey` / `predecessorOrderNo` / `blockedBy`（`withTransfer=false` 可关闭本批判定以省开销）。`canTransfer=true` + `transferCode=UPSTREAM_MISSING` = 放行但上游缺失（TBD-01），界面必须显式标注缺失 |
+| `POST /api/v1/inspections/transfer-permits` | 批量预览（建单前预览 / 台账徽标 / 看板 / MES 关卡共用）：纯读，不写审计、不写 Outbox、不加锁；整批一个事务 |
+| `GET /api/v1/traceability/chain-status?batchNo=` | 看板「传递链状态」：链路各环节排序 + 每环节传递判定（P1 新增，详见 `docs/api/letian-qms-openapi.yaml`） |
+| `GET /api/v1/release-gates/{batchNo}` | 成品 / 出货放行关卡（MES 过站调用）：与建单门禁**同一份判定**；阻断 409 problem+json（`code = gate-failed` + `gateCode`）；放行 200（`releaseScope = STANDARD` / 特采 `CONCESSION`） |
+
+理由码（`TransferGateCode`）语义：`UPSTREAM_PASSED` 合格传递 / `UPSTREAM_CONCESSION` 让步接收（受限放行，须可举证客户书面授权件）/
+`UPSTREAM_REWORK_PASSED` 返工复检合格 / `UPSTREAM_MISSING` 上游缺失（TBD-01 放行留痕）/ `UPSTREAM_INSPECTING` 上游检验中 /
+`UPSTREAM_REINSPECTING` 返工复检中 / `UPSTREAM_UNDER_MRB` MRB 未结案 / `UPSTREAM_FAILED` 上游不合格 /
+`CHAIN_TERMINATED` 退货或报废导致整链终止 / `NO_PREDECESSOR_STAGE` 无门禁上游（来料检验）/ `ANCHOR_UNRESOLVED` 锚点未解析。
+
+链路锚点优先级（命中即停，不混合）：**同批次 `BATCH` > 同炉批号 `HEAT` > 同工单 `WORK_ORDER`**；
+同锚点同环节多张单取「**复检轮次最高 → 最近一次终判**」（`updatedAt DESC → createdAt DESC → orderNo DESC`），禁止取首条。
 
 ## 4. 高级复合过滤 DSL 规范 (Query Filter DSL)
 
