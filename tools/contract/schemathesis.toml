@@ -25,6 +25,9 @@ extract_selector = "/token"
 [generation]
 allow-x00 = false
 allow-extra-parameters = false
+# 限定可 UTF-8 编码字符串：默认生成器会产出孤立代理（lone surrogate）字符，
+# 序列化后不是合法 JSON，在 Fastify 解析层被 400 拒（与 schema 无关的噪声）
+codec = "utf-8"
 
 # 业务状态依赖的领域守门按项目约定一律收敛为 400（contracts inspection.ts
 # 「领域守门（一律 400）」、docs/04 §206）：schema 完全合规的请求在状态冲突 /
@@ -102,3 +105,19 @@ include-operation-id = "reviewTransferOverrideTicket"
 include-operation-id = "batchFreezeTerminatedChains"
   [operations.checks.positive_data_acceptance]
   expected-statuses = ["2xx", "400", "401", "403", "404", "409", "429", "5xx"]
+
+[[operations]]
+include-operation-id = "saveReviewFlow"
+  [operations.checks.positive_data_acceptance]
+  expected-statuses = ["2xx", "400", "401", "403", "404", "409", "429", "5xx"]
+
+[[operations]]
+include-operation-id = "toggleReviewFlowActive"
+  [operations.checks.positive_data_acceptance]
+  expected-statuses = ["2xx", "400", "401", "403", "404", "409", "429", "5xx"]
+
+# 集成同步是真实长任务（ERP 清点 / MES 批量拉取），默认 10s 读超时必然误报；
+# 加长到 120s（仍受 max-time 全局约束）
+[[operations]]
+include-operation-id = "triggerIntegrationSync"
+request-timeout = 120

@@ -359,7 +359,7 @@ paths:
           description: 检验类型多选，逗号分隔契约枚举值；逐项按 InspectionType 校验，非法值返回 400
           schema:
             type: string
-            pattern: '^\s*(IQC|IPQC_CT|IPQC_RL|IPQC_FN|OQC_SF|OQC_SH|OQC_HEAT|OQC_BLACK|OQC_ZINC|OQC_NICKEL|OQC_PHOSPH|OQC_DACRO|OQC_MACH)\s*(,\s*(IQC|IPQC_CT|IPQC_RL|IPQC_FN|OQC_SF|OQC_SH|OQC_HEAT|OQC_BLACK|OQC_ZINC|OQC_NICKEL|OQC_PHOSPH|OQC_DACRO|OQC_MACH)\s*)*$'
+            pattern: '^(\s*,)*\s*((IQC|IPQC_CT|IPQC_RL|IPQC_FN|OQC_SF|OQC_SH|OQC_HEAT|OQC_BLACK|OQC_ZINC|OQC_NICKEL|OQC_PHOSPH|OQC_DACRO|OQC_MACH)(\s*,\s*(IQC|IPQC_CT|IPQC_RL|IPQC_FN|OQC_SF|OQC_SH|OQC_HEAT|OQC_BLACK|OQC_ZINC|OQC_NICKEL|OQC_PHOSPH|OQC_DACRO|OQC_MACH)?)*)?(\s*,)*\s*$'
         - name: status
           in: query
           schema:
@@ -370,7 +370,7 @@ paths:
           description: 状态多选，逗号分隔（如 `PENDING,INSPECTING`）；与 `status` 互斥，优先 `statuses`；逐项按 InspectionStatus 校验，非法值返回 400
           schema:
             type: string
-            pattern: '^\s*(PENDING|INSPECTING|DRAFT|PASSED|FAILED|IN_MRB_REVIEW|RE_INSPECTING|COMPLETED)\s*(,\s*(PENDING|INSPECTING|DRAFT|PASSED|FAILED|IN_MRB_REVIEW|RE_INSPECTING|COMPLETED)\s*)*$'
+            pattern: '^(\s*,)*\s*((PENDING|INSPECTING|DRAFT|PASSED|FAILED|IN_MRB_REVIEW|RE_INSPECTING|COMPLETED)(\s*,\s*(PENDING|INSPECTING|DRAFT|PASSED|FAILED|IN_MRB_REVIEW|RE_INSPECTING|COMPLETED)?)*)?(\s*,)*\s*$'
         - name: inspectionState
           in: query
           description: >-
@@ -409,7 +409,7 @@ paths:
           description: 检验人多选，逗号分隔员工 UUID；逐项按 UUID 校验，非法值返回 400
           schema:
             type: string
-            pattern: '^\s*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*(,\s*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*)*$'
+            pattern: '^(\s*,)*\s*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(\s*,\s*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})?)*)?(\s*,)*\s*$'
         - name: furnaceHeatNo
           in: query
           description: 炉批号模糊匹配（出货检验台账「炉批号」筛选框，docs/47 §4.2⑤）
@@ -1254,7 +1254,7 @@ paths:
           description: 评审状态过滤，支持逗号分隔多值（「已评审」页签 = DISPOSED,REJECTED）；逐项按 MRBStatusEnum 校验，非法值返回 400
           schema:
             type: string
-            pattern: '^\s*(PENDING_REVIEW|UNDER_REVIEW|DISPOSED|REJECTED)\s*(,\s*(PENDING_REVIEW|UNDER_REVIEW|DISPOSED|REJECTED)\s*)*$'
+            pattern: '^(\s*,)*\s*(PENDING_REVIEW|UNDER_REVIEW|DISPOSED|REJECTED)(\s*,\s*(PENDING_REVIEW|UNDER_REVIEW|DISPOSED|REJECTED)?)*(\s*,)*\s*$'
             example: DISPOSED,REJECTED
         - name: mrbNo
           in: query
