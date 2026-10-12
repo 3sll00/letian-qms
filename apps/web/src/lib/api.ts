@@ -181,6 +181,22 @@ export async function loginUser(userId: string): Promise<SessionUser> {
   return acceptLogin((await res.json()) as { token?: string; user?: Partial<SessionUser> });
 }
 
+/**
+ * 登录页主路径：用户名（职员工号或姓名）+ 密码。
+ * 口令错误由后端统一返回 401「用户名或密码错误」，前端原样透出，不在前端判断用户名是否存在。
+ */
+export async function loginWithPassword(userName: string, password: string): Promise<SessionUser> {
+  const res = await fetch(`${API_BASE}${DEV_LOGIN_PATH}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userName, password }),
+  });
+  if (!res.ok) {
+    throw await parseErrorResponse(res);
+  }
+  return acceptLogin((await res.json()) as { token?: string; user?: Partial<SessionUser> });
+}
+
 /** Mock 模式兜底：以默认演示身份登录（MSW 拦截 /auth/login，不依赖后端） */
 export async function loginAsDefault(): Promise<SessionUser> {
   const res = await fetch(`${API_BASE}${DEV_LOGIN_PATH}`, {

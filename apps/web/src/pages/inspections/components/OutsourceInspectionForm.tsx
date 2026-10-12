@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ArrowLeft, Printer, ShieldCheck, Activity, Flame, Layers, ClipboardList } from 'lucide-react';
 import { CertificatePrintModal } from '../../../components/certificate/CertificatePrintModal';
+import { TransferOverridePanel } from './TransferOverridePanel';
 import { PlanMatchBanner } from '../../../components/common/PlanMatchBanner';
 import { ApprovalButton } from '../../../components/common/ApprovalButton';
 import { ManufacturingCertData, OutsourceTestResult } from '../../../lib/inspectionTypes';
@@ -12,8 +13,8 @@ import {
   summarizeJudgements,
   type PlanIndicatorRow,
 } from '../../../lib/planMatch';
-import type { InspectionType, TransferDecision } from '@letian/contracts';
-import { api, errorMessage } from '../../../lib/api';
+import type { InspectionType, TransferDecision, TransferOverrideTicket } from '@letian/contracts';
+import { api, errorMessage, getCurrentUser } from '../../../lib/api';
 import { loadCompanyProfile, type CompanyProfile } from '../../../lib/companyProfile';
 import {
   TRANSFER_GATE_LABEL,
@@ -250,6 +251,10 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
   const [permitDecision, setPermitDecision] = useState<TransferDecision | null>(null);
   const [permitError, setPermitError] = useState('');
 
+  // 特批豁免：门禁阻断时经「提报 → 审批 → 核销」放行建单（docs/48 §4.4 / §8 P2）。
+  // 选中一张已审批工单后随建单请求下发，服务端会校验状态并做一单一核销。
+  const [overrideTicket, setOverrideTicket] = useState<TransferOverrideTicket | null>(null);
+
   // 打印预览控制
   const [printModalOpen, setPrintModalOpen] = useState(false);
   const [manufacturingCertData, setManufacturingCertData] = useState<ManufacturingCertData | null>(null);
@@ -333,7 +338,9 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
   }, [isNewOrder, inspectionType, batchNo, materialCode]);
 
   /** 服务端已明确不允许建单：界面据此置灰提交按钮。绕过界面直接调接口仍会被服务端 422 拒绝 */
-  const permitBlocked = permitDecision !== null && permitDecision.allowed === false;
+  // 门禁判定为阻断；已选用一张已审批的豁免工单时改建单走特批通道，不再置灰
+  const gateBlocked = permitDecision !== null && permitDecision.allowed === false;
+  const permitBlocked = gateBlocked && overrideTicket === null;
 
   // 存货主数据：选择器的选项来源。主数据不可用时保持空列表（界面提示未维护），绝不回落硬编码物料。
   useEffect(() => {
@@ -666,6 +673,20 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
           ...(inspector.trim() !== '' ? { inspectorName: inspector } : {}),
           // 命中的方案版本 ID 原样回传，服务端按该版本固化 planSnapshot 快照
           ...(planVersionId !== null ? { planVersionId } : {}),
+          // 特批豁免核销：带上门禁阻断时另附一张已审批的豁免工单（docs/48 §4.4）。
+          // 服务端会校验工单状态为 APPROVED、批次/物料/类型三元组匹配、且未被核销过。
+          ...(overrideTicket !== null
+            ? {
+                transferOverride: {
+                  reason: overrideTicket.reason,
+                  approverId: overrideTicket.reviewerId ?? getCurrentUser()?.userId ?? '',
+                  ticketNo: overrideTicket.ticketNo,
+                  ...(overrideTicket.approvalDocNo !== null && overrideTicket.approvalDocNo !== undefined && overrideTicket.approvalDocNo !== ''
+                    ? { approvalDocNo: overrideTicket.approvalDocNo }
+                    : {}),
+                },
+              }
+            : {}),
         });
         if (created.id === undefined || created.id === '') {
           throw new Error('服务端未返回检验单主键，无法继续录入实测值');
@@ -839,9 +860,31 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
                   提交按钮已置灰；即便绕过界面直接调接口，服务端也会以 422 拒绝建单（界面置灰不算数）。
                 </div>
               )}
+              {gateBlocked && !permitBlocked && (
+                <div>
+                  已选用豁免工单 <span className="font-mono">{overrideTicket?.ticketNo}</span>，
+                  提交将按特批通道放行（服务端仍会校验工单状态与批次/物料/类型匹配）。
+                </div>
+              )}
             </>
           )}
         </div>
+      )}
+
+      {/*
+        特批豁免通道（docs/48 §4.4 / §8 P2）：仅在门禁判定为阻断、且本单还是新建单时出现。
+        已保存的老单不适用 —— 它当初能建成，说明门禁当时就放行了（含特批）。
+      */}
+      {isNewOrder && gateBlocked && (
+        <TransferOverridePanel
+          batchNo={batchNo}
+          materialCode={materialCode}
+          inspectionType={inspectionType}
+          upstreamOrderNo={permitDecision?.predecessorOrderNo}
+          workOrderNo={outsourceNo.trim() !== '' ? outsourceNo.trim() : undefined}
+          furnaceHeatNo={heatNo.trim() !== '' ? heatNo.trim() : undefined}
+          onUseTicket={setOverrideTicket}
+        />
       )}
 
       {/*
@@ -1592,7 +1635,13 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
               void handleSubmitInternal();
             }}
             disabled={submitting || permitBlocked}
-            title={permitBlocked ? '上游未放行：服务端会以 422 拒绝建单（docs/48 §2.3 传递判定矩阵）' : undefined}
+            title={
+              permitBlocked
+                ? '上游未放行：服务端会以 422 拒绝建单。可在下方「特批豁免放行通道」提报申请，经质量负责人审批后核销建单（docs/48 §2.3 / §4.4）'
+                : gateBlocked
+                  ? `已选用豁免工单 ${overrideTicket?.ticketNo ?? ''}，提交将按特批通道放行`
+                  : undefined
+            }
             className="px-4 py-1.5 rounded bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
           >
             {submitting ? '提交中…' : '保存并提交委外判定'}

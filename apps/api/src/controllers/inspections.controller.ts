@@ -206,6 +206,8 @@ async function withTransferState(
         ...(row.furnaceHeatNo !== undefined ? { furnaceHeatNo: row.furnaceHeatNo } : {}),
         ...(row.workOrderNo !== undefined ? { workOrderNo: row.workOrderNo } : {}),
         orderNo: row.orderNo,
+        // 建单留痕：特批豁免放行的单，上游那次阻断已被正式解除，读侧不得再显示成阻断
+        ...(row.transferTrace !== undefined ? { transferTrace: row.transferTrace } : {}),
       })
     )
   );
@@ -945,69 +947,12 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
     }
   );
 
-  /**
-   * 质量负责人豁免通道申请（TBD-09，036 审批流）
-   * POST /api/v1/inspections/transfer-overrides
-   */
-  fastify.post(
-    '/transfer-overrides',
-    async (request, reply) => {
-      const operator = operatorOf(request);
-      const body = request.body as any;
-      const result = await container.useCases.createTransferOverrideTicket.execute({
-        batchNo: body.batchNo,
-        materialCode: body.materialCode,
-        inspectionType: body.inspectionType,
-        ...(body.workOrderNo ? { workOrderNo: body.workOrderNo } : {}),
-        ...(body.furnaceHeatNo ? { furnaceHeatNo: body.furnaceHeatNo } : {}),
-        ...(body.upstreamOrderNo ? { upstreamOrderNo: body.upstreamOrderNo } : {}),
-        reason: body.reason,
-        applicantId: body.applicantId ?? operator.userId,
-        ...(body.applicantName ? { applicantName: body.applicantName } : { applicantName: operator.userName }),
-      });
-      return reply.status(201).send(result);
-    }
-  );
-
-  /**
-   * 质量主管审批豁免申请
-   * POST /api/v1/inspections/transfer-overrides/:id/review
-   */
-  fastify.post(
-    '/transfer-overrides/:id/review',
-    async (request, reply) => {
-      const { id } = request.params as { id: string };
-      const operator = operatorOf(request);
-      const body = request.body as any;
-      const result = await container.useCases.reviewTransferOverrideTicket.execute(id, {
-        action: body.action,
-        reviewerId: body.reviewerId ?? operator.userId,
-        ...(body.reviewerName ? { reviewerName: body.reviewerName } : { reviewerName: operator.userName }),
-        ...(body.reviewNotes ? { reviewNotes: body.reviewNotes } : {}),
-        ...(body.approvalDocNo ? { approvalDocNo: body.approvalDocNo } : {}),
-      });
-      return reply.status(200).send(result);
-    }
-  );
-
-  /**
-   * 豁免申请台账列表
-   * GET /api/v1/inspections/transfer-overrides
-   */
-  fastify.get(
-    '/transfer-overrides',
-    async (request, reply) => {
-      const query = request.query as any;
-      const result = await container.useCases.listTransferOverrideTickets.execute({
-        ...(query.batchNo ? { batchNo: query.batchNo } : {}),
-        ...(query.materialCode ? { materialCode: query.materialCode } : {}),
-        ...(query.status ? { status: query.status } : {}),
-        page: query.page ? Number(query.page) : 1,
-        pageSize: query.pageSize ? Number(query.pageSize) : 20,
-      });
-      return reply.status(200).send(result);
-    }
-  );
+  // 旧版「/transfer-overrides」三路由（申请 / 审批 / 列表）已删除：
+  //   与下方 2.6~2.8 的「/transfer-overrides/tickets」是重复实现，且更不安全 ——
+  //   既缺 `assertQualityApprover` 角色门禁（任意登录用户可审批豁免申请），
+  //   又直接采信请求体的 `applicantId` / `reviewerId`（可自称申请人与审批人），
+  //   也没有 Zod 校验与安全上下文。全仓库无调用方，特此移除以消除第二条无审计路径。
+  //   统一走 tickets 路径：`/transfer-overrides/tickets`、`.../tickets/:ticketNo/review`。
 
   /**
    * 链路终止的下游在制单据安全冻结批处理（TBD-06）

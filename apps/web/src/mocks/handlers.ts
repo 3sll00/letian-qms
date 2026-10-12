@@ -81,6 +81,12 @@ let mockCurrentUser = {
 /** 企业档案 Mock 单行：null = 未维护（与真实后端 GET 无行返回 null 同口径） */
 let companyProfileRow: CompanyProfile | null = { ...mockCompanyProfile };
 
+/** 演示环境全员统一初始密码（与后端 auth.controller 的 defaultLoginPassword() 同口径） */
+const MOCK_DEFAULT_PASSWORD = '123456';
+
+/** 统一的账号/口令错误文案：不区分用户不存在与密码错误，避免账号枚举 */
+const MOCK_INVALID_CREDENTIALS = '用户名或密码错误';
+
 /** RFC 7807 problem+json 错误体（与后端异常处理器的输出结构保持一致） */
 function problemResponse(status: number, title: string, detail: string) {
   return HttpResponse.json({ type: 'about:blank', title, status, detail }, { status });
@@ -218,11 +224,20 @@ export const handlers = [
   // 登录页名单：与真实后端 GET /api/v1/auth/users 同口径（在职职员 + 主角色名）
   http.get('/api/v1/auth/users', () => HttpResponse.json(mockAuthUsers)),
 
-  // 登录：与真实后端 POST /api/v1/auth/login 同口径 —— 传 userId 必须能在职员档案里查到，
-  // 查不到即 401（不接受请求体自称姓名/角色）；缺省身份固定为质量主管「张强」。
+  // 登录：与真实后端 POST /api/v1/auth/login 同口径 ——
+  //   · 传 userId（一键登录演示）：不校验密码，身份必须在职员档案里查到；
+  //   · 传 userName + password（登录页主路径）：密码须为统一初始密码，身份按姓名或工号匹配，
+  //     不接受请求体自称姓名/角色；
+  //   · 都不传：缺省身份固定为质量主管「张强」。
   http.post('/api/v1/auth/login', async ({ request }) => {
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     const claimedId = typeof body.userId === 'string' ? body.userId : undefined;
+    const claimedPassword = typeof body.password === 'string' ? body.password : undefined;
+
+    const passwordProvided = claimedPassword !== undefined && claimedPassword !== '';
+    if (passwordProvided && claimedPassword !== MOCK_DEFAULT_PASSWORD) {
+      return problemResponse(401, 'Unauthorized', MOCK_INVALID_CREDENTIALS);
+    }
 
     let userId: string;
     let userName: string;
@@ -233,6 +248,18 @@ export const handlers = [
       const employee = mockAuthUsers.find((u) => u.id === claimedId);
       if (employee === undefined) {
         return problemResponse(401, 'Unauthorized', `用户不存在或未在员工档案注册: ${claimedId}`);
+      }
+      userId = employee.id;
+      userName = employee.name;
+      role = employee.roleCode;
+      roleName = employee.roleName;
+    } else if (passwordProvided) {
+      const loginName = typeof body.userName === 'string' ? body.userName.trim() : '';
+      const employee = mockAuthUsers.find(
+        (u) => u.name === loginName || (u.employeeCode ?? '').toLowerCase() === loginName.toLowerCase()
+      );
+      if (employee === undefined) {
+        return problemResponse(401, 'Unauthorized', MOCK_INVALID_CREDENTIALS);
       }
       userId = employee.id;
       userName = employee.name;
