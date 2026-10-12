@@ -41,12 +41,11 @@ export type TransferGateCode =
   | 'UPSTREAM_FAILED'
   | 'UPSTREAM_REINSPECTING'
   | 'CHAIN_TERMINATED'
-  | 'NO_PREDECESSOR_STAGE'
-  | 'ANCHOR_UNRESOLVED';
+  | 'NO_PREDECESSOR_STAGE';
 
 /** 放行凭证：三种处置方式的差别不是「能不能继续」，而是「凭不凭得出证据」（docs/48 §4.8） */
 export interface TransferPermitEvidence {
-  kind: 'NONE' | 'MRB_CONCESSION' | 'REWORK_REINSPECTION';
+  kind: 'NONE' | 'MRB_CONCESSION' | 'REWORK_REINSPECTION' | 'MANUAL_OVERRIDE';
   mrbNo?: string;
   orderNo?: string;
   /** 是否必须有客户书面授权件才能放行（特采 = true） */
@@ -69,6 +68,13 @@ export interface TransferDecision {
   permitEvidence: TransferPermitEvidence;
   /** 退货 / 报废：整条链终止，下游不得建单、已建未终判单需冻结 */
   terminateChain: boolean;
+  /**
+   * 权威上游与本单**物料编码不同**（同炉批号跨物料命中）。
+   *
+   * 用途是**可解释性**：现场看到「来料检验（盘条）挡住了下料检（毛坯）」时必须能一眼看出
+   * 这是同一炉号的不同工序物料，而不是系统串错了单。不参与阻断判定本身。
+   */
+  crossMaterialUpstream?: boolean;
   /** 中文可读理由，界面与 MES 直接展示（不得只给码让人猜） */
   reason: string;
 }
@@ -89,6 +95,15 @@ export interface UpstreamCandidate {
   order: UpstreamOrderLike;
   /** 该候选单命中的锚点集合（由仓储按锚点取数时标注） */
   matchedAnchors: readonly ChainAnchorKind[];
+  /**
+   * 该候选单与本单**物料编码不同**（跨物料上游，由仓储标注）。
+   *
+   * 口径（2026-10-08 客户定稿）：**同一炉批号（HEAT 锚点）下的跨物料上游必须参与门禁** ——
+   * 紧固件工艺链上物料编码必然随工序变化（盘条 → 毛坯 → 搓丝半成品 → 成品），
+   * 若只认同物料，炉批号链路会在最需要它的跨工序场景失效。
+   * 该标记只用于**可解释性**，不参与「是否阻断」的判定。
+   */
+  crossMaterial?: boolean;
 }
 
 /** MRB 结论快照（`MRBReview` DTO 天然满足） */
@@ -109,7 +124,26 @@ export interface TransferGateInput {
   /** 候选单的 MRB 结论（按 sourceOrderNo 建索引，批量预取，避免 N+1） */
   mrbByOrderNo?: ReadonlyMap<string, MrbSnapshotLike>;
   /**
-   * 同锚点但**跨物料**命中的上游单数量（TBD-03：跨物料只提示不阻断，仅用于理由文案）。
+   * **本单**建单时的传递留痕码（迁移 035 `upstream_gate_code`）。
+   *
+   * 值为 `UPSTREAM_OVERRIDDEN` 表示这张单当初是靠质量负责人特批豁免才建成的 ——
+   * 也就是说，它上游那次阻断**已经被正式特批解除过**。
+   *
+   * 口径边界（重要）：
+   * - 只解除**上游阻断**这一项，不改变本单自身的检验结论。本单判不合格仍走 MRB 三分支，
+   *   不会因为有豁免留痕就自动放行 —— 特批豁免的是「准不准建这张单」，不是「这张单合不合格」。
+   * - 链路终止（退货 / 报废）优先级高于特批：`CHAIN_TERMINATED` 时仍阻断。
+   *
+   * 没有这一项时，一张特批建成的单在台账 / 看板 / 预览上会重算出原始阻断码，
+   * 与「它确实被放行建成了」自相矛盾（现场看到的和实际放行状态对不上）。
+   */
+  selfOverrideCode?: string | undefined;
+  /**
+   * 同锚点但**跨物料**命中的上游单数量。
+   *
+   * 口径变更（2026-10-08 客户定稿，取代原 TBD-03「跨物料只提示不阻断」）：
+   * **同炉批号（HEAT 锚点）下的跨物料上游已参与门禁**（由仓储直接取回，见 `crossMaterial`）；
+   * 本计数仅保留给「连跨物料都没有候选」的兜底提示，用于解释「链路上确实一张上游单都没有」。
    */
   crossMaterialCandidateCount?: number;
 }
@@ -188,7 +222,6 @@ const CODE_SEVERITY: Readonly<Record<TransferGateCode, number>> = {
   UPSTREAM_UNDER_MRB: 80,
   UPSTREAM_REINSPECTING: 70,
   UPSTREAM_INSPECTING: 60,
-  ANCHOR_UNRESOLVED: 20,
   UPSTREAM_MISSING: 10,
   NO_PREDECESSOR_STAGE: 0,
   UPSTREAM_PASSED: 0,
@@ -230,7 +263,7 @@ export function canTransferToNextStage(input: TransferGateInput): TransferDecisi
   if (selection === null) {
     const crossHint =
       (input.crossMaterialCandidateCount ?? 0) > 0
-        ? '；同锚点存在跨物料上游单，按 TBD-03 不参与门禁（仅提示）'
+        ? '；注意：同锚点存在跨物料单据，但均不属于本环节的门禁上游'
         : '';
     return {
       ...base,
@@ -249,6 +282,10 @@ export function canTransferToNextStage(input: TransferGateInput): TransferDecisi
 
   const blocked = subDecisions.filter((decision) => !decision.allowed);
   const anchorPatch = { chainKey: selection.anchor.value, chainKeyKind: selection.anchor.kind };
+  /** 权威上游是否跨物料（同炉批号的不同工序物料）—— 只作解释，不改判定 */
+  const crossMaterialUpstream = selection.groups.some((group) => group.authoritative.crossMaterial === true)
+    ? true
+    : undefined;
 
   if (blocked.length > 0) {
     const worst = [...blocked].sort((left, right) => {
@@ -256,6 +293,26 @@ export function canTransferToNextStage(input: TransferGateInput): TransferDecisi
       if (bySeverity !== 0) return bySeverity;
       return stageSeqOf(right.precedentStage) - stageSeqOf(left.precedentStage);
     })[0]!;
+
+    // 本单带特批豁免留痕：把「建单当初那次上游阻断」改判为已解除，按放行呈现。
+    // 链路终止（退货 / 报废）不在特批可解除范围内 —— 整链已终止，一张单的特批救不回来。
+    if (input.selfOverrideCode === 'UPSTREAM_OVERRIDDEN' && worst.code !== 'CHAIN_TERMINATED') {
+      return {
+        ...base,
+        ...anchorPatch,
+        allowed: true,
+        code: 'UPSTREAM_OVERRIDDEN',
+        ...(worst.precedentStage !== undefined ? { precedentStage: worst.precedentStage } : {}),
+        ...(worst.predecessorOrderNo !== undefined
+          ? { predecessorOrderNo: worst.predecessorOrderNo }
+          : {}),
+        ...(worst.predecessorStatus !== undefined ? { predecessorStatus: worst.predecessorStatus } : {}),
+        permitEvidence: { kind: 'MANUAL_OVERRIDE', attachmentRequired: true },
+        ...(crossMaterialUpstream !== undefined ? { crossMaterialUpstream } : {}),
+        reason: `上游 [${worst.precedentStage}] ${worst.predecessorOrderNo} 原判定为 [${worst.code}]，本单已由质量负责人特批豁免放行（建单留痕 UPSTREAM_OVERRIDDEN）`,
+      };
+    }
+
     return {
       ...base,
       ...anchorPatch,
@@ -270,6 +327,7 @@ export function canTransferToNextStage(input: TransferGateInput): TransferDecisi
       ...(worst.mrbDisposition !== undefined ? { mrbDisposition: worst.mrbDisposition } : {}),
       permitEvidence: worst.permitEvidence,
       terminateChain: subDecisions.some((decision) => decision.terminateChain),
+      ...(crossMaterialUpstream !== undefined ? { crossMaterialUpstream } : {}),
       reason: worst.reason,
     };
   }
@@ -299,6 +357,7 @@ export function canTransferToNextStage(input: TransferGateInput): TransferDecisi
     ...(reported.mrbNo !== undefined ? { mrbNo: reported.mrbNo } : {}),
     ...(reported.mrbDisposition !== undefined ? { mrbDisposition: reported.mrbDisposition } : {}),
     permitEvidence: reported.permitEvidence,
+    ...(crossMaterialUpstream !== undefined ? { crossMaterialUpstream } : {}),
     reason:
       code === 'UPSTREAM_CONCESSION'
         ? `上游 [${reported.precedentStage}] ${reported.predecessorOrderNo} 经 MRB 让步接收放行（受限传递），下游须携带特采标记`

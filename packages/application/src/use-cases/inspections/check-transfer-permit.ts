@@ -31,6 +31,13 @@ export interface TransferPermitQuery {
   workOrderNo?: string | undefined;
   /** 调用方持有的单号，仅回显（便于前端对号入座） */
   orderNo?: string | undefined;
+  /**
+   * **本单**建单传递留痕码（迁移 035 `upstream_gate_code`），来自 `InspectionOrder.transferTrace`。
+   *
+   * 透传给领域函数用于识别「本单是靠特批豁免建成的」，从而把建单当初那次上游阻断
+   * 呈现为已解除，而不是重算出原始阻断码。缺省即无留痕，行为与改造前一致。
+   */
+  selfOverrideCode?: string | undefined;
 }
 
 /**
@@ -63,10 +70,15 @@ export async function evaluateTransferDecision(
   const candidates = await ctx.inspectionOrders.findChainCandidates(anchors, {
     inspectionTypes: predecessorStages,
     ...(materialCode !== '' ? { materialCode } : {}),
+    // 客户定稿口径（取代原 TBD-03「跨物料只提示不阻断」）：
+    // 同一炉批号（HEAT 锚点）下的跨物料上游**必须参与门禁** —— 紧固件工艺链物料编码必然随工序变化，
+    // 若只认同物料，炉批号链路会在最需要它的跨工序场景静默失效。
+    // 不传此参数时（即 TBD-03 旧口径）则退化为严格同物料，保持向后兼容。
+    crossMaterialAnchorKinds: ['HEAT'],
   });
 
-  // 跨物料提示（TBD-03）：同锚点、同上游环节但物料不同的单只提示、不参与门禁。
-  // 仅在「同物料没有任何候选」时才值得提示，避免同一批次多物料并存时噪声盖过主结论。
+  // 跨物料提示（兜底）：仅当「连跨物料都没有任何候选」时，提示同锚点存在跨物料单据但不属于本环节门禁上游，
+  // 便于现场理解「为什么链路上一张上游单都没有」。HEAT 跨物料上游已直接参与门禁，不在此计数。
   const crossMaterialCandidateCount =
     materialCode !== '' && candidates.length === 0
       ? await ctx.inspectionOrders.countCrossMaterialCandidates(anchors, {
@@ -77,13 +89,35 @@ export async function evaluateTransferDecision(
 
   const mrbByOrderNo = await loadMrbSnapshots(ctx, candidates);
 
+  // 本单建单留痕（特批豁免）：优先用调用方直接给的；调用方只给了单号时回查一次，
+  // 保证「台账 / 看板 / 建单前预览」三条读侧对同一张单给出同一个结论 ——
+  // 否则会出现「台账说已放行、预览说仍阻断」这种口径打架（docs/48 §2.1 要避免的情形）。
+  const selfOverrideCode =
+    query.selfOverrideCode ?? (await resolveOverrideTraceOfOrder(ctx, query.orderNo));
+
   return canTransferToNextStage({
     stage: query.inspectionType,
     anchors,
     candidates,
     mrbByOrderNo,
     crossMaterialCandidateCount,
+    ...(selfOverrideCode !== undefined ? { selfOverrideCode } : {}),
   });
+}
+
+/**
+ * 按单号回查建单留痕码（迁移 035 `upstream_gate_code`）。
+ * 单号未给或查无此单时返回 undefined（= 无留痕，行为与改造前一致）。
+ */
+async function resolveOverrideTraceOfOrder(
+  ctx: IUnitOfWorkContext,
+  orderNo: string | undefined
+): Promise<string | undefined> {
+  if (orderNo === undefined || orderNo.trim() === '') {
+    return undefined;
+  }
+  const row = await ctx.inspectionOrders.findByOrderNo(orderNo);
+  return row?.transferTrace?.upstreamGateCode;
 }
 
 /**
@@ -192,7 +226,10 @@ export function transferPermitQueryOfOrder(order: {
   furnaceHeatNo?: string | undefined;
   workOrderNo?: string | undefined;
   orderNo?: string | undefined;
+  /** 建单传递留痕（迁移 035）；其中 `upstreamGateCode = UPSTREAM_OVERRIDDEN` 表示本单是特批放行建成的 */
+  transferTrace?: { upstreamGateCode?: string | undefined } | undefined;
 }): TransferPermitQuery {
+  const selfOverrideCode = order.transferTrace?.upstreamGateCode;
   return {
     inspectionType: order.inspectionType,
     batchNo: order.batchNo,
@@ -200,5 +237,6 @@ export function transferPermitQueryOfOrder(order: {
     ...(order.furnaceHeatNo !== undefined ? { furnaceHeatNo: order.furnaceHeatNo } : {}),
     ...(order.workOrderNo !== undefined ? { workOrderNo: order.workOrderNo } : {}),
     ...(order.orderNo !== undefined ? { orderNo: order.orderNo } : {}),
+    ...(selfOverrideCode !== undefined ? { selfOverrideCode } : {}),
   };
 }

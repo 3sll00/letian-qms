@@ -22,7 +22,7 @@ const crypto = require('node:crypto');
 const API_BASE = process.env.API_BASE || 'http://127.0.0.1:3100/api/v1';
 const DB_URL =
   process.env.DATABASE_URL ||
-  'postgresql://letian_user:letian_secure_pass_2026@127.0.0.1:5432/letian_qms_db';
+  'postgresql://letian_user:letian_secure_pass_2026@127.0.0.1:5433/letian_qms_db';
 /** 张强（QA_MANAGER，material_categories = ["*"]）：写侧 PBAC 三维校验不会拦住夹具批次 */
 const OPERATOR_ID = '11000000-0000-4000-8000-000000000001';
 const PREFIX = 'GATE2609';
@@ -619,6 +619,38 @@ async function main() {
   check('AC-P2-06 Outbox TRANSFER_GATE_OVERRIDDEN（下游系统可订阅豁免事件）', p2aOutbox[0].n >= 1, p2aOutbox[0]);
   const p2aAudit = await q("SELECT count(*)::int AS n FROM audit_logs WHERE action = 'STATUS_CHANGE' AND diff_patch->>'orderNo' = $1 AND diff_patch->>'originalGateCode' = 'UPSTREAM_FAILED'", [p2aOrderNo]);
   check('AC-P2-06 审计留痕含原判定码与豁免原因（事后可解释为什么放行）', p2aAudit[0].n >= 1, p2aAudit[0]);
+
+  // 读侧口径（2026-10-12 修复项）：特批放行的单在台账 / 预览上必须呈现为「已放行 · 特批豁免」，
+  // 不能重算出建单当初那条 UPSTREAM_FAILED 阻断码 —— 否则现场看到的与实际放行状态自相矛盾。
+  const p2aLedger = await ledgerRow(p2aOrderNo);
+  check(
+    'AC-P2-14 台账读侧：特批单 canTransfer=true + transferCode=UPSTREAM_OVERRIDDEN 且无 blockedBy',
+    p2aLedger !== null &&
+      p2aLedger.canTransfer === true &&
+      p2aLedger.transferCode === 'UPSTREAM_OVERRIDDEN' &&
+      (p2aLedger.blockedBy === undefined || p2aLedger.blockedBy === null),
+    p2aLedger === null ? null : { canTransfer: p2aLedger.canTransfer, transferCode: p2aLedger.transferCode, blockedBy: p2aLedger.blockedBy }
+  );
+  const p2aPermit = await post('/inspections/transfer-permits', {
+    items: [{ inspectionType: 'IPQC_CT', batchNo: PREFIX + '-P2A', materialCode: MATERIALS.BLANK.code, orderNo: p2aOrderNo }],
+  });
+  const p2aPermitDecision =
+    p2aPermit.body && Array.isArray(p2aPermit.body.items) && p2aPermit.body.items[0]
+      ? p2aPermit.body.items[0].decision
+      : null;
+  check(
+    'AC-P2-14 传递许可预览与台账同口径（allowed=true + code=UPSTREAM_OVERRIDDEN）',
+    p2aPermit.status === 200 && p2aPermitDecision !== null && p2aPermitDecision !== undefined &&
+      p2aPermitDecision.allowed === true && p2aPermitDecision.code === 'UPSTREAM_OVERRIDDEN',
+    p2aPermitDecision === null || p2aPermitDecision === undefined ? { status: p2aPermit.status } : { allowed: p2aPermitDecision.allowed, code: p2aPermitDecision.code }
+  );
+  check(
+    'AC-P2-14 特批只解除建单那次阻断（仍如实回指被豁免的上游单与原判定）',
+    p2aPermitDecision !== null && p2aPermitDecision !== undefined &&
+      p2aPermitDecision.precedentStage === 'IQC' &&
+      p2aPermitDecision.predecessorOrderNo === PREFIX + '-P2A-IQC',
+    p2aPermitDecision === null || p2aPermitDecision === undefined ? null : { precedentStage: p2aPermitDecision.precedentStage, predecessorOrderNo: p2aPermitDecision.predecessorOrderNo }
+  );
 
   const p2aReuse = await createOrder({ inspectionType: 'IPQC_CT', materialCode: MATERIALS.BLANK.code, batchNo: PREFIX + '-P2A', sampleQty: 5, totalQty: 100,
     transferOverride: { reason: 'P0 验收：已核销工单复用应被拒', approverId: OPERATOR_ID, ticketNo: p2aTicketNo } });

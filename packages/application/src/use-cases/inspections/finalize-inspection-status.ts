@@ -1,4 +1,8 @@
-import { InspectionStatusEnum, type InspectionOrder as InspectionOrderDTO } from '@letian/contracts';
+import {
+  InspectionStatusEnum,
+  OverallDecisionEnum,
+  type InspectionOrder as InspectionOrderDTO,
+} from '@letian/contracts';
 import { NotFoundError, ValidationFailedError } from '../../errors/application-error.js';
 import type { ISecurityContext } from '../../security/security-context.js';
 import type { IUnitOfWork, IUnitOfWorkContext } from '../../tx/unit-of-work.js';
@@ -106,11 +110,14 @@ export class FinalizeInspectionStatusUseCase {
     }
     const targetStatus = parsedStatus.data;
 
-    if (cmd.judgment !== undefined && !InspectionStatusEnum.safeParse(cmd.judgment).success) {
+    // 判定结论用 OverallDecisionEnum（PASSED / FAILED / CONCESSION）校验，
+    // 不是 InspectionStatusEnum —— 后者不含 CONCESSION，用错枚举会让合法的让步接收
+    // 终判被拒，且错误提示里列出的是状态取值，现场排查会被带偏。
+    if (cmd.judgment !== undefined && !OverallDecisionEnum.safeParse(cmd.judgment).success) {
       throw new ValidationFailedError(`非法的综合判定结论: [${cmd.judgment}]`, [
         {
           name: 'judgment',
-          reason: `合法取值为 ${InspectionStatusEnum.options.join(' / ')}`,
+          reason: `合法取值为 ${OverallDecisionEnum.options.join(' / ')}`,
         },
       ]);
     }

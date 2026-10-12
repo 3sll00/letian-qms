@@ -180,8 +180,18 @@ export const AuthUserSchema = z
 
 export const LoginRequestSchema = z
   .object({
-    userId: z.string().uuid().optional().openapi({ description: '职员档案用户 UUID' }),
-    userName: z.string().optional().openapi({ description: '用户名称（自定义模式）' }),
+    userId: z.string().uuid().optional().openapi({ description: '职员档案用户 UUID（一键登录模式）' }),
+    userName: z
+      .string()
+      .optional()
+      .openapi({ description: '登录用户名：职员工号或姓名（用户名+密码模式）；自定义模式下的自称姓名' }),
+    password: z
+      .string()
+      .optional()
+      .openapi({
+        description:
+          '登录密码。传入即进入「用户名+密码」校验分支（身份必须能在职员档案中查到）；不传则为开发态一键登录',
+      }),
     role: z.string().optional().openapi({ description: '角色编码（自定义模式）' }),
   })
   .openapi('LoginRequest');

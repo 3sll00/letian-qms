@@ -19,6 +19,20 @@ function jwtSecret(): string {
 }
 
 /**
+ * 开发/演示环境全员统一初始密码。
+ * 同样在请求时读取（原因同 jwtSecret），可用环境变量 DEFAULT_LOGIN_PASSWORD 覆盖。
+ *
+ * ⚠️ 安全边界：这是明文比对、无独立用户表、无锁定策略，仅满足演示环境的固定口令需求；
+ * 接入真实身份源（SSO / LDAP / 密码哈希）前不可用于生产。
+ */
+function defaultLoginPassword(): string {
+  return process.env.DEFAULT_LOGIN_PASSWORD || '123456';
+}
+
+/** 统一的账号/口令错误文案：不区分「用户不存在」与「密码错误」，避免账号枚举 */
+const INVALID_CREDENTIALS = '用户名或密码错误';
+
+/**
  * 开发环境登录入口（独立登录页 / 用户切换演示用）
  *
  * ⚠️ 安全边界：按职员档案 UUID 直接签发 JWT，等价于"任何人可自称任意员工"，
@@ -76,7 +90,12 @@ export const authController: FastifyPluginAsync<{ container: ApiContainer }> = a
 
   /**
    * 2. 用户登录
-   * 支持传 userId 快速切换登录，或传传统自定义身份
+   *
+   * 三种模式（按优先级）：
+   * - userId：一键登录开发态，供探针脚本与身份切换使用，不校验密码；
+   * - userName + password：登录页主路径。密码须等于全员统一初始密码，
+   *   身份必须能在职员档案中按工号或姓名查到 —— 不接受请求体自称姓名/角色；
+   * - 两者都不传：缺省演示身份（质量主管「张强」）。
    */
   fastify.post(
     '/login',
@@ -96,6 +115,12 @@ export const authController: FastifyPluginAsync<{ container: ApiContainer }> = a
       let role = body.role;
       let roleName: string | undefined;
 
+      // 传了 password 就走口令校验分支；口令不对一律用统一文案，不泄露用户是否存在
+      const passwordProvided = typeof body.password === 'string' && body.password !== '';
+      if (passwordProvided && body.password !== defaultLoginPassword()) {
+        throw new UnauthorizedError(INVALID_CREDENTIALS);
+      }
+
       if (userId) {
         // 从职员主数据解析真实身份
         const employees = await masterData.getEmployees();
@@ -107,6 +132,33 @@ export const authController: FastifyPluginAsync<{ container: ApiContainer }> = a
           throw new UnauthorizedError(`该员工账号已停用: ${emp.name}`);
         }
 
+        userName = emp.name;
+        role = emp.roleCode ?? 'GUEST';
+
+        if (emp.roleCode) {
+          const roleEntity = await rolesRepo.findByCode(emp.roleCode);
+          if (roleEntity) {
+            roleName = roleEntity.roleName;
+          }
+        }
+      } else if (passwordProvided) {
+        // 用户名 + 密码：用户名支持「工号」或「姓名」，均以职员档案为准
+        const loginName = (body.userName ?? '').trim();
+        const employees = await masterData.getEmployees();
+        const emp = employees.find(
+          (e) => e.name === loginName || (e.employeeCode ?? '').toLowerCase() === loginName.toLowerCase()
+        );
+        if (!emp) {
+          throw new UnauthorizedError(INVALID_CREDENTIALS);
+        }
+        if (emp.isActive === false) {
+          throw new UnauthorizedError(`该员工账号已停用: ${emp.name}`);
+        }
+
+        userId = emp.id ?? undefined;
+        if (!userId) {
+          throw new UnauthorizedError(INVALID_CREDENTIALS);
+        }
         userName = emp.name;
         role = emp.roleCode ?? 'GUEST';
 

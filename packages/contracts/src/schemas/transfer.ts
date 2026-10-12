@@ -31,7 +31,6 @@ export const TransferGateCodeEnum = z
     'UPSTREAM_REINSPECTING',
     'CHAIN_TERMINATED',
     'NO_PREDECESSOR_STAGE',
-    'ANCHOR_UNRESOLVED',
   ])
   .openapi('TransferGateCode');
 
@@ -145,7 +144,7 @@ export const TransferKpisSchema = z
 /** 放行凭证：特采必须能举证客户书面授权件，返工必须能举证复检合格 */
 export const TransferPermitEvidenceSchema = z
   .object({
-    kind: z.enum(['NONE', 'MRB_CONCESSION', 'REWORK_REINSPECTION']).openapi({
+    kind: z.enum(['NONE', 'MRB_CONCESSION', 'REWORK_REINSPECTION', 'MANUAL_OVERRIDE']).openapi({
       description: '放行凭证类别：无凭据 / MRB 让步接收 / 返工复检合格',
     }),
     mrbNo: z.string().optional().openapi({ description: '让步接收对应的 MRB 评审单号' }),
@@ -177,6 +176,14 @@ export const TransferDecisionSchema = z
       description: '是否终止整条链（退货 / 报废）：下游禁止建单、已建未终判单需冻结',
     }),
     reason: z.string().openapi({ description: '中文可读理由（界面直接展示，不得只给码）' }),
+    crossMaterialUpstream: z
+      .boolean()
+      .optional()
+      .openapi({
+        description:
+          '权威上游与本单物料编码不同（同炉批号跨物料命中）；仅作可解释性，不参与阻断判定。' +
+          '界面据此向现场说明「为什么被一张不同物料的单挡住」（如：来料检验盘条挡住了下料检毛坯）',
+      }),
   })
   .openapi('TransferDecision');
 

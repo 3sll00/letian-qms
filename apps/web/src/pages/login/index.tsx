@@ -1,9 +1,21 @@
 import React, { useEffect, useState } from 'react';
-import { LogIn, RefreshCw, ShieldCheck, UserRound } from 'lucide-react';
+import {
+  AlertCircle,
+  ChevronDown,
+  ChevronUp,
+  Eye,
+  EyeOff,
+  Lock,
+  LogIn,
+  RefreshCw,
+  ShieldCheck,
+  UserRound,
+} from 'lucide-react';
 import {
   fetchAuthUsers,
   loginAsDefault,
   loginUser,
+  loginWithPassword,
   errorMessage,
   type AuthUserOption,
   type SessionUser,
@@ -14,6 +26,9 @@ interface LoginPageProps {
   onLoggedIn: (user: SessionUser) => void;
 }
 
+/** 开发/演示环境统一初始密码，与后端 auth.controller 的 defaultLoginPassword() 保持一致 */
+const DEFAULT_PASSWORD = '123456';
+
 /** 姓名首字作为头像字符（中文取第一个字，其他取首字母大写） */
 function initialOf(name: string): string {
   const text = name.trim();
@@ -21,44 +36,62 @@ function initialOf(name: string): string {
   return /[一-龥]/.test(text[0] as string) ? (text[0] as string) : (text[0] as string).toUpperCase();
 }
 
+const USERNAME_STORAGE_KEY = 'letian_qms_last_username';
+
+/** 读取上次输入的用户名：便于演示环境重复登录，localStorage 不可用时静默降级 */
+function readLastUsername(): string {
+  try {
+    return typeof window !== 'undefined' ? (window.localStorage.getItem(USERNAME_STORAGE_KEY) ?? '') : '';
+  } catch {
+    return '';
+  }
+}
+
+function writeLastUsername(value: string): void {
+  try {
+    if (typeof window !== 'undefined') window.localStorage.setItem(USERNAME_STORAGE_KEY, value);
+  } catch {
+    /* 隐私模式/桌面端 file:// 下可能抛异常，忽略即可 */
+  }
+}
+
 /**
  * 独立登录页（开发/演示环境）：
- * 从职员档案拉取在职用户，一键登录并写入会话。
- * 生产环境后端不注册 /auth 路由，列表接口 404 时展示环境提示。
+ * 主路径为「用户名（工号或姓名）+ 密码」；另保留折叠的演示身份切换区，
+ * 用于快速对比不同职员的三维物料权限。
+ * 生产环境后端不注册 /auth 路由，登录接口 404 时展示环境提示。
  */
 export function LoginPage({ onLoggedIn }: LoginPageProps) {
-  const [users, setUsers] = useState<AuthUserOption[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [userName, setUserName] = useState<string>(() => readLastUsername());
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function loadUsers() {
-    setLoading(true);
-    setError(null);
-    try {
-      const list = await fetchAuthUsers();
-      setUsers(list);
-      // 默认选中质量主管（张强，全量通配规则），没有则选第一位
-      const preferred = list.find((u) => u.roleCode === 'QA_MANAGER') ?? list[0];
-      setSelectedId(preferred?.id ?? null);
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setLoading(false);
+  // 演示身份切换区（折叠，按需加载）
+  const [showDemo, setShowDemo] = useState(false);
+  const [users, setUsers] = useState<AuthUserOption[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [loadingUsers, setLoadingUsers] = useState(false);
+
+  /** 用户名+密码登录：用户名/密码为空时本地拦截，不发请求 */
+  async function handleSubmit(event?: React.FormEvent) {
+    event?.preventDefault();
+    const name = userName.trim();
+    if (name === '') {
+      setError('请输入用户名');
+      return;
     }
-  }
+    if (password === '') {
+      setError('请输入密码');
+      return;
+    }
 
-  useEffect(() => {
-    void loadUsers();
-  }, []);
-
-  async function handleEnter() {
-    if (selectedId === null) return;
     setSubmitting(true);
     setError(null);
     try {
-      const user = await loginUser(selectedId);
+      const user = await loginWithPassword(name, password);
+      writeLastUsername(name);
       onLoggedIn(user);
     } catch (err) {
       setError(errorMessage(err));
@@ -67,13 +100,45 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
     }
   }
 
-  /** Mock 构建或后端异常时的兜底：以默认演示身份（张强）直接进入 */
+  /** 展开演示区时才拉取职员名单，避免每次进登录页都打一次接口 */
+  useEffect(() => {
+    if (!showDemo || users.length > 0 || loadingUsers) return;
+    void (async () => {
+      setLoadingUsers(true);
+      setError(null);
+      try {
+        const list = await fetchAuthUsers();
+        setUsers(list);
+        const preferred = list.find((u) => u.roleCode === 'QA_MANAGER') ?? list[0];
+        setSelectedId(preferred?.id ?? null);
+      } catch (err) {
+        setError(errorMessage(err));
+      } finally {
+        setLoadingUsers(false);
+      }
+    })();
+  }, [showDemo, users.length, loadingUsers]);
+
+  /** 演示身份一键登录（不校验密码，仅开发态可用） */
+  async function enterAs(userId: string) {
+    if (userId === '') return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      onLoggedIn(await loginUser(userId));
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  /** 名单接口不可用时（后端未启动）的兜底：以默认演示身份「张强」进入 */
   async function handleDefaultLogin() {
     setSubmitting(true);
     setError(null);
     try {
-      const user = await loginAsDefault();
-      onLoggedIn(user);
+      onLoggedIn(await loginAsDefault());
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -81,7 +146,10 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
     }
   }
 
-  const selectedUser = users.find((u) => u.id === selectedId);
+  function handleToggleDemo() {
+    setShowDemo((prev) => !prev);
+    setError(null);
+  }
 
   return (
     <div className="h-screen w-screen flex items-center justify-center bg-[#1E293B] font-sans antialiased p-6">
@@ -116,97 +184,179 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
 
         {/* 右侧登录区 */}
         <div className="flex-1 p-8 flex flex-col min-h-[520px]">
-          <div className="flex items-center justify-between">
+          <div className="flex items-start justify-between">
             <div>
-              <h1 className="text-lg font-bold text-slate-800">选择登录用户</h1>
-              <p className="text-xs text-slate-400 mt-1">来自职员档案的在职用户 · 一键切换身份体验数据权限隔离</p>
+              <h1 className="text-lg font-bold text-slate-800">用户登录</h1>
+              <p className="text-xs text-slate-400 mt-1">请输入职员工号或姓名登录系统</p>
             </div>
-            <button
-              type="button"
-              onClick={() => void loadUsers()}
-              disabled={loading}
-              title="刷新用户列表"
-              className="w-8 h-8 flex items-center justify-center rounded border border-slate-200 text-slate-500 hover:bg-slate-50 disabled:opacity-50"
-            >
-              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-            </button>
+            {showDemo && (
+              <button
+                type="button"
+                onClick={() => {
+                  setLoadingUsers(true);
+                  void (async () => {
+                    try {
+                      const list = await fetchAuthUsers();
+                      setUsers(list);
+                      const preferred = list.find((u) => u.roleCode === 'QA_MANAGER') ?? list[0];
+                      setSelectedId(preferred?.id ?? null);
+                    } catch (err) {
+                      setError(errorMessage(err));
+                    } finally {
+                      setLoadingUsers(false);
+                    }
+                  })();
+                }}
+                disabled={loadingUsers}
+                title="刷新用户列表"
+                className="w-8 h-8 flex items-center justify-center rounded border border-slate-200 text-slate-500 hover:bg-slate-50 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-4 h-4 ${loadingUsers ? 'animate-spin' : ''}`} />
+              </button>
+            )}
           </div>
 
-          <div className="flex-1 mt-4 overflow-y-auto border border-slate-200/80 rounded-lg divide-y divide-slate-100">
-            {loading && (
-              <div className="h-full flex items-center justify-center text-sm text-slate-400 py-16">
-                正在加载用户列表...
+          <form onSubmit={(e) => void handleSubmit(e)} className="mt-5 space-y-4">
+            {/* 用户名 */}
+            <div>
+              <label htmlFor="login-username" className="block text-xs font-medium text-slate-600 mb-1.5">
+                用户名
+              </label>
+              <div className="relative">
+                <UserRound className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+                <input
+                  id="login-username"
+                  name="username"
+                  type="text"
+                  autoComplete="username"
+                  autoFocus
+                  value={userName}
+                  onChange={(e) => {
+                    setUserName(e.target.value);
+                    if (error !== null) setError(null);
+                  }}
+                  placeholder="请输入工号或姓名"
+                  className="w-full h-10 pl-9 pr-3 rounded border border-slate-300 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition"
+                />
               </div>
-            )}
-            {!loading && users.length === 0 && (
-              <div className="py-16 text-center space-y-3">
-                <p className="text-sm text-slate-500">未能获取用户列表（后端服务未启动或登录接口不可用）</p>
+            </div>
+
+            {/* 密码 */}
+            <div>
+              <label htmlFor="login-password" className="block text-xs font-medium text-slate-600 mb-1.5">
+                密码
+              </label>
+              <div className="relative">
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+                <input
+                  id="login-password"
+                  name="password"
+                  type={showPassword ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => {
+                    setPassword(e.target.value);
+                    if (error !== null) setError(null);
+                  }}
+                  placeholder="请输入密码"
+                  className="w-full h-10 pl-9 pr-10 rounded border border-slate-300 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition"
+                />
                 <button
                   type="button"
-                  onClick={() => void handleDefaultLogin()}
-                  disabled={submitting}
-                  className="px-4 py-2 rounded bg-slate-800 text-white text-xs font-medium hover:bg-slate-900 disabled:opacity-60"
+                  onClick={() => setShowPassword((v) => !v)}
+                  title={showPassword ? '隐藏密码' : '显示密码'}
+                  aria-label={showPassword ? '隐藏密码' : '显示密码'}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 flex items-center justify-center rounded text-slate-400 hover:text-slate-600 hover:bg-slate-50"
                 >
-                  以默认身份（张强 · 质量主管）进入
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
               </div>
-            )}
-            {!loading &&
-              users.map((u) => {
-                const active = u.id === selectedId;
-                return (
-                  <button
-                    key={u.id}
-                    type="button"
-                    onClick={() => setSelectedId(u.id)}
-                    className={`w-full flex items-center gap-3 px-4 py-3 text-left transition-colors ${
-                      active ? 'bg-blue-50/70' : 'hover:bg-slate-50'
-                    }`}
-                  >
-                    <span
-                      className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-medium shrink-0 ${
-                        active ? 'bg-blue-600 text-white' : 'bg-slate-200 text-slate-600'
-                      }`}
-                    >
-                      {initialOf(u.name)}
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-sm font-medium text-slate-800">
-                        {u.name}
-                        {u.employeeCode && (
-                          <span className="ml-2 text-[11px] font-normal text-slate-400">{u.employeeCode}</span>
-                        )}
-                      </span>
-                      <span className="block text-xs text-slate-500 mt-0.5 truncate">
-                        {u.roleName ?? u.roleCode ?? '未分配角色'}
-                        {u.department ? ` · ${u.department}` : ''}
-                      </span>
-                    </span>
-                    <span
-                      className={`w-4 h-4 rounded-full border shrink-0 ${
-                        active ? 'border-blue-600 bg-blue-600 ring-2 ring-blue-100' : 'border-slate-300'
-                      }`}
-                    />
-                  </button>
-                );
-              })}
-          </div>
-
-          {error && (
-            <div className="mt-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-              {error}
             </div>
-          )}
 
-          <button
-            type="button"
-            onClick={() => void handleEnter()}
-            disabled={selectedId === null || submitting || loading}
-            className="mt-4 w-full flex items-center justify-center gap-2 py-2.5 rounded bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
-          >
-            <LogIn className="w-4 h-4" />
-            {submitting ? '登录中...' : `进入系统${selectedUser ? `（${selectedUser.name}）` : ''}`}
-          </button>
+            {error && (
+              <div className="flex items-start gap-2 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                <span>{error}</span>
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={submitting}
+              className="w-full flex items-center justify-center gap-2 py-2.5 rounded bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+            >
+              <LogIn className="w-4 h-4" />
+              {submitting ? '登录中...' : '登录'}
+            </button>
+          </form>
+
+          <p className="mt-3 text-[11px] text-slate-400">
+            演示环境初始密码：<span className="font-mono text-slate-500">{DEFAULT_PASSWORD}</span>
+          </p>
+
+          {/* 演示：身份切换（开发态专用，绕过口令以快速对比物料权限） */}
+          <div className="mt-4 pt-4 border-t border-slate-100">
+            <button
+              type="button"
+              onClick={handleToggleDemo}
+              className="w-full flex items-center justify-between text-xs text-slate-500 hover:text-slate-700"
+            >
+              <span>演示：以其他身份快速进入（不校验密码）</span>
+              {showDemo ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+            </button>
+
+            {showDemo && (
+              <div className="mt-3">
+                <div className="max-h-[168px] overflow-y-auto border border-slate-200/80 rounded-lg divide-y divide-slate-100">
+                  {loadingUsers && (
+                    <div className="flex items-center justify-center text-sm text-slate-400 py-10">
+                      正在加载用户列表...
+                    </div>
+                  )}
+                  {!loadingUsers && users.length === 0 && (
+                    <div className="py-8 text-center space-y-3">
+                      <p className="text-xs text-slate-500 px-4">
+                        未能获取用户列表（后端服务未启动或登录接口不可用）
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => void handleDefaultLogin()}
+                        disabled={submitting}
+                        className="px-3 py-1.5 rounded bg-slate-800 text-white text-xs font-medium hover:bg-slate-900 disabled:opacity-60"
+                      >
+                        以默认身份（张强 · 质量主管）进入
+                      </button>
+                    </div>
+                  )}
+                  {!loadingUsers &&
+                    users.map((u) => (
+                      <button
+                        key={u.id}
+                        type="button"
+                        onClick={() => void enterAs(u.id)}
+                        disabled={submitting}
+                        className="w-full flex items-center gap-3 px-3 py-2 text-left transition-colors hover:bg-slate-50 disabled:opacity-60"
+                      >
+                        <span className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-medium shrink-0 bg-slate-200 text-slate-600">
+                          {initialOf(u.name)}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-xs font-medium text-slate-800">
+                            {u.name}
+                            {u.employeeCode && (
+                              <span className="ml-2 text-[11px] font-normal text-slate-400">{u.employeeCode}</span>
+                            )}
+                          </span>
+                          <span className="block text-[11px] text-slate-500 truncate">
+                            {u.roleName ?? u.roleCode ?? '未分配角色'}
+                          </span>
+                        </span>
+                      </button>
+                    ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>

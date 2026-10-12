@@ -24,7 +24,6 @@ export const TRANSFER_GATE_LABEL: Readonly<Record<TransferGateCode, string>> = {
   UPSTREAM_REINSPECTING: '返工复检中',
   CHAIN_TERMINATED: '链路已终止',
   NO_PREDECESSOR_STAGE: '无上游环节',
-  ANCHOR_UNRESOLVED: '链路锚点未解析',
 };
 
 interface Tone {
@@ -45,7 +44,6 @@ export const TRANSFER_GATE_TONE: Readonly<Record<TransferGateCode, Tone>> = {
   UPSTREAM_FAILED: { badge: 'bg-rose-50 text-rose-600', dot: 'bg-rose-500' },
   CHAIN_TERMINATED: { badge: 'bg-rose-50 text-rose-600', dot: 'bg-rose-500' },
   NO_PREDECESSOR_STAGE: { badge: 'bg-slate-100 text-slate-600', dot: 'bg-slate-400' },
-  ANCHOR_UNRESOLVED: { badge: 'bg-slate-100 text-slate-600', dot: 'bg-slate-400' },
 };
 
 export const CHAIN_STATE_LABEL: Readonly<Record<ChainStageState, string>> = {
@@ -96,6 +94,8 @@ export function permitEvidenceText(decision: TransferDecision): string {
       return `放行凭证：让步接收 ${text(evidence.mrbNo)}${evidence.attachmentRequired ? '（须可举证客户书面授权件）' : ''}`;
     case 'REWORK_REINSPECTION':
       return `放行凭证：返工复检合格 ${text(evidence.orderNo)}`;
+    case 'MANUAL_OVERRIDE':
+      return '放行凭证：质量负责人特批豁免（须可举证已审批的豁免工单）';
     default:
       return '';
   }

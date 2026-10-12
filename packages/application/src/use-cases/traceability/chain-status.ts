@@ -136,6 +136,10 @@ export class GetChainStatusUseCase {
               ? { workOrderNo: authoritative.workOrderNo }
               : {}),
             orderNo: authoritative.orderNo,
+            // 建单留痕：特批豁免放行的单，读侧呈现为已放行而非原始阻断码
+            ...(authoritative.transferTrace !== undefined
+              ? { transferTrace: authoritative.transferTrace }
+              : {}),
           })
         );
 
