@@ -160,7 +160,9 @@ pnpm dev
 
 ### 3. 已知约束
 
-- 后端在 `NODE_ENV=production` 下不注册开发态登录路由，而前端正式登录 UI 尚未实现，
-  因此桌面客户端当前面向开发/测试环境后端（浏览器版同受此限）；生产部署前需先补齐正式登录流程。
+- 生产部署登录采用**职员独立口令**（迁移 048）：`employees.password_hash` 存 scrypt 哈希；
+  未设独立口令的职员用共享初始口令（`DEFAULT_LOGIN_PASSWORD`）登录并被强制改密
+  （`POST /auth/change-password`，登录页引导）。生产环境仍需设 `ENABLE_LOCAL_AUTH=true`；
+  接入企业 SSO/LDAP 后将其关闭。管理员重置口令 = 把 `password_hash` 置 NULL。
 - Fastify + PostgreSQL 仍集中部署在服务器，桌面客户端仅是展示层原生化；
   放行阻断、PBAC 行级隔离等中心化管控语义与浏览器版完全一致。

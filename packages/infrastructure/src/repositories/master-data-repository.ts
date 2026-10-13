@@ -159,6 +159,43 @@ export class KyselyMasterDataRepository implements ErpPort {
     return rows.map((row) => this.mapEmployee(row));
   }
 
+  // --------------------------------------------------------------------------
+  // 登录凭证（迁移 048）：password_hash 是敏感列，**只经这两个方法读写**，
+  // 严禁并入 mapEmployee / 任何对外 DTO —— 职员档案接口不得泄露口令哈希。
+  // --------------------------------------------------------------------------
+
+  /**
+   * 读取职员登录凭证（仅登录与改密校验使用）。
+   * @returns 职员不存在时返回 null；passwordHash 为 null 表示尚未设置独立口令
+   */
+  public async getEmployeeCredential(
+    employeeId: string
+  ): Promise<{ passwordHash: string | null } | null> {
+    const row = await this.db
+      .selectFrom('employees')
+      .select(['id', 'passwordHash'])
+      .where('id', '=', employeeId)
+      .executeTakeFirst();
+    if (!row) return null;
+    return { passwordHash: row.passwordHash };
+  }
+
+  /**
+   * 写入职员独立口令哈希（scrypt，由 api 层生成）。
+   * 传 null 即重置回「共享初始口令 + 强制改密」流程（管理员重置口径）。
+   */
+  public async setEmployeePasswordHash(
+    employeeId: string,
+    passwordHash: string | null
+  ): Promise<boolean> {
+    const res = await this.db
+      .updateTable('employees')
+      .set({ passwordHash })
+      .where('id', '=', employeeId)
+      .executeTakeFirst();
+    return res.numUpdatedRows > 0n;
+  }
+
   /** 额外方法（非 ErpPort 契约）：存货分类档案，供物料分类下拉使用 */
   public async getInventoryCategories(query?: { categoryCode?: string }): Promise<InventoryCategory[]> {
     let q = this.db.selectFrom('inventoryCategories').selectAll();

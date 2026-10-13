@@ -132,6 +132,7 @@ export type PermissionCheckResponse = z.infer<typeof schemas.PermissionCheckResp
 export type AuthUser = z.infer<typeof schemas.AuthUserSchema>;
 export type LoginRequest = z.infer<typeof schemas.LoginRequestSchema>;
 export type LoginResponse = z.infer<typeof schemas.LoginResponseSchema>;
+export type ChangePasswordRequest = z.infer<typeof schemas.ChangePasswordRequestSchema>;
 
 // ============================================================================
 // 6. 质检报告打印与多模板引擎 DTOs

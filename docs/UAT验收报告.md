@@ -81,9 +81,9 @@ UAT/演示初始化：SEED_DEMO=true 时 migrate 继续运行种子 runner，API
 
 | # | 事项 | 建议处置 |
 |---|------|----------|
-| 1 | 统一身份认证（SSO / OAuth2 / LDAP）未接入 | 二期接入后 `ENABLE_LOCAL_AUTH=false` 关闭本地登录 |
-| 2 | HTTPS 终结 | 建议由前置 SLB / 反向代理统一终结，compose 内保持 HTTP |
-| 3 | 数据库备份策略 | 建议 `pg_dump` 定时任务或托管 RDS（docs/08 §4） |
+| 1 | 统一身份认证（SSO / OAuth2 / LDAP）未接入；已落地**职员独立口令**（迁移 048，scrypt 哈希 + 首次登录强制改密 + `POST /auth/change-password`），共享口令仅作初始/重置口令 | 二期接入 AD/LDAP 后 `ENABLE_LOCAL_AUTH=false` 关闭本地登录 |
+| 2 | HTTPS 终结 | **客户已确认纯内网部署，本期不做**；如未来开放公网访问再由前置反向代理统一终结 |
+| 3 | 数据库备份策略 | **已交付** `scripts/backup/`（pg_dump 每日定时备份 + 30 天轮换 + 计划任务安装脚本）；**遗留**：客户仅一台服务器，备份外拷（NAS/移动硬盘）需客户落实，见 `scripts/backup/README.md` |
 | 4 | Outbox 中继 / 告警 Webhook 未随 api 容器独立部署 | 如需独立部署可另建 worker 容器复用同一镜像 |
 
 ## 5. 验收结论与签字

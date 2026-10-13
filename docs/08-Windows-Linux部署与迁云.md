@@ -150,3 +150,18 @@ server {
 1. **核心原则**：云端 QMS 通过安全加密隧道（IPsec VPN 或 SD-WAN 专线）反向安全读取工厂本地管家婆数据库，严禁将工厂 ERP 直接暴露于公网。
 2. **数据迁移**：通过 `pg_dump` 逻辑导出本地 PostgreSQL 数据表，在云 RDS 上直接恢复，平滑上云无停机时间损耗。
 3. **备份与容灾**：开启 RDS 多可用区高可用与跨地域自动备份，恢复点目标 (RPO) < 5 分钟。
+
+---
+
+## 5. 客户 Windows Server 交接清单（2026-10-13 定稿口径）
+
+客户现场确认口径：Windows Server 单机部署、纯内网访问、无域账号承诺、无第二台备份机。
+
+| # | 事项 | 口径与操作 |
+|---|------|-----------|
+| 1 | **登录认证** | 职员独立口令（迁移 048）：`employees.password_hash` 存 scrypt 哈希；未设置的职员用共享初始口令（`DEFAULT_LOGIN_PASSWORD`，交付时必须改成高强度值并只告知管理员）首次登录后被强制改密（登录页弹「设置个人密码」，接口 `POST /api/v1/auth/change-password`）。管理员重置口令 = 把 `password_hash` 置 NULL。二期若客户确认有 AD 域，再接 LDAP |
+| 2 | **HTTPS** | 客户确认纯内网，本期不做。交付文档注明「系统仅在内网以 HTTP 提供服务，不得将该端口映射至公网」 |
+| 3 | **数据库备份** | 交付 `scripts/backup/`：`backup-qms.ps1`（pg_dump 每日全备 + 30 天轮换，Docker/原生两形态自适配，参数读 `.env`）+ `install-backup-task.ps1`（注册 Windows 计划任务，默认每日 02:00）。**遗留风险**：客户仅一台服务器，本机备份不防整机故障——交接时必须书面建议客户每天把 `D:\backups\qms` 拷到 NAS/移动硬盘（`scripts/backup/README.md` 内有 robocopy 命令模板） |
+| 4 | **服务自启** | 走 §1.2 NSSM 原生方案（Windows Server 不装 Docker Desktop 亦可跑）；若客户已装 Docker 可用 `docker-compose.prod.yml` |
+| 5 | **上线日顺序** | 装 PostgreSQL/Node → `pnpm db:migrate`（迁移 001–048）→ 配置 `.env`（DB/JWT/DEFAULT_LOGIN_PASSWORD）→ NSSM 注册 API 与 Web → 安装备份计划任务 → 管理员首次登录改密 → 按 `docs/UAT验收报告.md` 签字 |
+

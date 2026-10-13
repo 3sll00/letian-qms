@@ -47,6 +47,7 @@ import * as widenOutboxAuditIdColsMigration from './044_widen_outbox_audit_id_co
 import * as widenChainKeyColsMigration from './045_widen_chain_key_columns.js';
 import * as materialCodeAliasMigration from './046_create_material_code_alias.js';
 import * as backgroundOpsJobFieldsMigration from './047_background_ops_job_fields.js';
+import * as employeePasswordHashMigration from './048_add_employee_password_hash.js';
 
 class DynamicMigrationProvider implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -98,6 +99,7 @@ class DynamicMigrationProvider implements MigrationProvider {
       '045_widen_chain_key_columns': widenChainKeyColsMigration,
       '046_create_material_code_alias': materialCodeAliasMigration,
       '047_background_ops_job_fields': backgroundOpsJobFieldsMigration,
+      '048_add_employee_password_hash': employeePasswordHashMigration,
     };
   }
 }

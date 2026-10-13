@@ -184,8 +184,12 @@ export async function loginUser(userId: string): Promise<SessionUser> {
 /**
  * 登录页主路径：用户名（职员工号或姓名）+ 密码。
  * 口令错误由后端统一返回 401「用户名或密码错误」，前端原样透出，不在前端判断用户名是否存在。
+ * mustChangePassword=true 表示该职员仍使用共享初始口令，必须先设置独立口令才能进入系统。
  */
-export async function loginWithPassword(userName: string, password: string): Promise<SessionUser> {
+export async function loginWithPassword(
+  userName: string,
+  password: string
+): Promise<{ user: SessionUser; mustChangePassword: boolean }> {
   const res = await fetch(`${API_BASE}${DEV_LOGIN_PATH}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -194,7 +198,31 @@ export async function loginWithPassword(userName: string, password: string): Pro
   if (!res.ok) {
     throw await parseErrorResponse(res);
   }
-  return acceptLogin((await res.json()) as { token?: string; user?: Partial<SessionUser> });
+  const data = (await res.json()) as {
+    token?: string;
+    user?: Partial<SessionUser>;
+    mustChangePassword?: boolean;
+  };
+  return { user: acceptLogin(data), mustChangePassword: data.mustChangePassword === true };
+}
+
+/**
+ * 修改密码（独立口令）：凭「用户名 + 旧口令」本人自证，设置新的独立登录口令。
+ * 首次登录强制改密场景也走这里（此刻旧口令是共享初始口令）。
+ */
+export async function changePassword(
+  userName: string,
+  oldPassword: string,
+  newPassword: string
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/auth/change-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userName, oldPassword, newPassword }),
+  });
+  if (!res.ok) {
+    throw await parseErrorResponse(res);
+  }
 }
 
 /** Mock 模式兜底：以默认演示身份登录（MSW 拦截 /auth/login，不依赖后端） */

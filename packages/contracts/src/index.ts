@@ -46,6 +46,7 @@ export {
   LoginRequestSchema,
   LoginUserSchema,
   LoginResponseSchema,
+  ChangePasswordRequestSchema,
 } from './schemas/permission';
 
 // 批次追溯契约

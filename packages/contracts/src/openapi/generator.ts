@@ -25,6 +25,7 @@ import {
   AuthUserSchema,
   LoginRequestSchema,
   LoginResponseSchema,
+  ChangePasswordRequestSchema,
   TraceRelationTypeEnum,
   TraceNodeStatusEnum,
   TraceNodeSchema,
@@ -115,6 +116,7 @@ export function createLetianQmsOpenApiRegistry(): OpenAPIRegistry {
   registry.register('AuthUser', AuthUserSchema);
   registry.register('LoginRequest', LoginRequestSchema);
   registry.register('LoginResponse', LoginResponseSchema);
+  registry.register('ChangePasswordRequest', ChangePasswordRequestSchema);
 
   // 2. 注册核心 API 路由路径
   // 检验单列表查询
@@ -632,6 +634,31 @@ export function createLetianQmsOpenApiRegistry(): OpenAPIRegistry {
             schema: LoginResponseSchema,
           },
         },
+      },
+    },
+  });
+
+  // 修改密码（独立口令，迁移 048；不依赖 JWT，旧口令本人自证）
+  registry.registerPath({
+    method: 'post',
+    path: '/api/v1/auth/change-password',
+    summary: '凭旧口令设置新的独立登录口令',
+    tags: ['Auth'],
+    request: {
+      body: {
+        content: {
+          'application/json': {
+            schema: ChangePasswordRequestSchema,
+          },
+        },
+      },
+    },
+    responses: {
+      200: {
+        description: '密码修改成功',
+      },
+      401: {
+        description: '用户名或旧密码错误',
       },
     },
   });

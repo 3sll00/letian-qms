@@ -47,6 +47,7 @@
     "db:demo:repair": "pnpm --filter @letian/infrastructure exec tsx src/scripts/demo-inspections.ts repair",
     "db:demo:heat-trace": "pnpm --filter @letian/infrastructure exec tsx src/scripts/demo-inspections.ts seed",
     "db:test:purge": "node scripts/db/test-data-purge.cjs",
+    "db:backfill:heat": "pnpm --filter @letian/infrastructure exec tsx src/scripts/backfill-furnace-heat.ts",
     "erp:sync:ptype": "pnpm --filter @letian/infrastructure exec tsx src/scripts/sync-ptype.ts",
     "erp:sync:test-items": "pnpm --filter @letian/infrastructure exec tsx src/scripts/sync-test-items.ts",
     "verify:erp-readonly": "node scripts/testing/erp-readonly-check.cjs",

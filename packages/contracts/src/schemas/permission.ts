@@ -212,5 +212,29 @@ export const LoginResponseSchema = z
     user: LoginUserSchema,
     expiresInSeconds: z.number().int().optional(),
     devOnly: z.boolean().optional(),
+    /**
+     * 首次登录强制改密标记（迁移 048 独立口令）。
+     * 职员尚未设置独立口令（employees.password_hash IS NULL）时为 true：
+     * 前端必须引导其立刻调用 POST /auth/change-password 设置个人密码后才能进入系统。
+     */
+    mustChangePassword: z.boolean().optional(),
   })
   .openapi('LoginResponse');
+
+/**
+ * 修改密码请求（迁移 048 独立口令）
+ *
+ * 不依赖 JWT：凭「用户名 + 旧口令」本人自证后即可设置新口令，
+ * 旧口令校验口径与登录完全一致（已设独立口令验独立口令；未设的用共享初始口令验）。
+ */
+export const ChangePasswordRequestSchema = z
+  .object({
+    userName: z.string().min(1).openapi({ description: '登录用户名：职员工号或姓名' }),
+    oldPassword: z.string().min(1).openapi({ description: '旧口令（独立口令或共享初始口令）' }),
+    newPassword: z
+      .string()
+      .min(8)
+      .max(128)
+      .openapi({ description: '新口令：8~128 位，且不得与旧口令相同' }),
+  })
+  .openapi('ChangePasswordRequest');

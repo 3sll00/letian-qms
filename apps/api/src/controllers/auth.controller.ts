@@ -5,9 +5,12 @@ import {
   LoginRequestSchema,
   LoginResponseSchema,
   AuthUserSchema,
+  ChangePasswordRequestSchema,
 } from '@letian/contracts';
-import { UnauthorizedError } from '@letian/application';
+import { UnauthorizedError, ValidationFailedError } from '@letian/application';
 import type { ApiContainer } from '../container';
+import { hashPassword, verifyPassword } from '../lib/password';
+import { appendDbAuditLog } from '../lib/audit-log';
 
 /**
  * 使用时读取密钥：.env 由 dotenv 在运行时加载，模块级常量会固化 import 时刻的值，
@@ -130,9 +133,8 @@ export const authController: FastifyPluginAsync<{ container: ApiContainer }> = a
       if (isProduction && (!passwordProvided || body.userId !== undefined)) {
         throw new UnauthorizedError(INVALID_CREDENTIALS);
       }
-      if (passwordProvided && body.password !== defaultLoginPassword()) {
-        throw new UnauthorizedError(INVALID_CREDENTIALS);
-      }
+
+      let mustChangePassword = false;
 
       if (userId) {
         // 从职员主数据解析真实身份
@@ -143,6 +145,18 @@ export const authController: FastifyPluginAsync<{ container: ApiContainer }> = a
         }
         if (emp.isActive === false) {
           throw new UnauthorizedError(`该员工账号已停用: ${emp.name}`);
+        }
+
+        // userId + password 组合（开发态）：同样走该职员的独立口令校验，
+        // 不能把传了密码的请求当成一键登录放行
+        if (passwordProvided && emp.id) {
+          const cred = await masterData.getEmployeeCredential(emp.id);
+          const ok = cred?.passwordHash
+            ? verifyPassword(body.password as string, cred.passwordHash)
+            : body.password === defaultLoginPassword();
+          if (!ok) {
+            throw new UnauthorizedError(INVALID_CREDENTIALS);
+          }
         }
 
         userName = emp.name;
@@ -172,6 +186,22 @@ export const authController: FastifyPluginAsync<{ container: ApiContainer }> = a
         if (!userId) {
           throw new UnauthorizedError(INVALID_CREDENTIALS);
         }
+
+        // 独立口令校验（迁移 048）：已设置 password_hash 的职员只认独立口令，
+        // 共享初始口令对其立即失效；未设置的回落共享初始口令并标记强制改密，
+        // 前端按 mustChangePassword 引导其先调 /auth/change-password。
+        const cred = await masterData.getEmployeeCredential(userId);
+        if (cred?.passwordHash) {
+          if (!verifyPassword(body.password as string, cred.passwordHash)) {
+            throw new UnauthorizedError(INVALID_CREDENTIALS);
+          }
+        } else {
+          if (body.password !== defaultLoginPassword()) {
+            throw new UnauthorizedError(INVALID_CREDENTIALS);
+          }
+          mustChangePassword = true;
+        }
+
         userName = emp.name;
         role = emp.roleCode ?? 'GUEST';
 
@@ -214,7 +244,73 @@ export const authController: FastifyPluginAsync<{ container: ApiContainer }> = a
           roleName: roleName ?? role ?? 'GUEST',
           activeRulesCount,
         },
+        ...(mustChangePassword ? { mustChangePassword: true } : {}),
       });
+    }
+  );
+
+  /**
+   * 修改密码（独立口令，迁移 048）
+   *
+   * 凭「用户名 + 旧口令」本人自证即可设置新口令，不依赖 JWT——
+   * 这正好覆盖「首次登录强制改密」场景（此刻客户端手里的令牌也是刚签发的）。
+   * 旧口令校验口径与登录完全一致：已设独立口令验独立口令；未设的用共享初始口令验。
+   */
+  fastify.post(
+    '/change-password',
+    {
+      schema: {
+        body: ChangePasswordRequestSchema,
+      },
+    },
+    async (request, reply) => {
+      const body = request.body as z.infer<typeof ChangePasswordRequestSchema>;
+      const loginName = body.userName.trim();
+
+      const employees = await masterData.getEmployees();
+      const emp = employees.find(
+        (e) => e.name === loginName || (e.employeeCode ?? '').toLowerCase() === loginName.toLowerCase()
+      );
+      if (!emp || !emp.id) {
+        throw new UnauthorizedError(INVALID_CREDENTIALS);
+      }
+      if (emp.isActive === false) {
+        throw new UnauthorizedError(`该员工账号已停用: ${emp.name}`);
+      }
+
+      const cred = await masterData.getEmployeeCredential(emp.id);
+      const oldPasswordOk = cred?.passwordHash
+        ? verifyPassword(body.oldPassword, cred.passwordHash)
+        : body.oldPassword === defaultLoginPassword();
+      if (!oldPasswordOk) {
+        // 改密失败留痕（只记事实，不记口令内容）
+        await appendDbAuditLog(container.uow, request, {
+          action: 'AUTH_FAILED',
+          resourceType: 'employee_credential',
+          resourceId: emp.id,
+          status: 'REJECTED',
+          userId: emp.id,
+          userName: emp.name,
+          diffPatch: { reason: 'change-password: old password mismatch' },
+        });
+        throw new UnauthorizedError(INVALID_CREDENTIALS);
+      }
+      if (body.newPassword === body.oldPassword) {
+        throw new ValidationFailedError('新密码不得与旧密码相同');
+      }
+
+      await masterData.setEmployeePasswordHash(emp.id, hashPassword(body.newPassword));
+      await appendDbAuditLog(container.uow, request, {
+        action: 'UPDATE',
+        resourceType: 'employee_credential',
+        resourceId: emp.id,
+        status: 'SUCCESS',
+        userId: emp.id,
+        userName: emp.name,
+        diffPatch: { passwordChanged: true },
+      });
+
+      return reply.status(200).send({ ok: true });
     }
   );
 };

@@ -16,6 +16,7 @@ import {
 import {
   API_BASE,
   ApiError,
+  changePassword,
   fetchAuthUsers,
   loginAsDefault,
   loginUser,
@@ -84,6 +85,12 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // 强制改密步骤：登录成功但后端标记 mustChangePassword（该职员还在用共享初始口令）
+  const [pendingUser, setPendingUser] = useState<SessionUser | null>(null);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showNewPassword, setShowNewPassword] = useState(false);
+
   // 演示身份切换区（折叠，按需加载）
   const [showDemo, setShowDemo] = useState(false);
   const [users, setUsers] = useState<AuthUserOption[]>([]);
@@ -106,9 +113,14 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
     setSubmitting(true);
     setError(null);
     try {
-      const user = await loginWithPassword(name, password);
+      const result = await loginWithPassword(name, password);
       writeLastUsername(name);
-      onLoggedIn(user);
+      if (result.mustChangePassword) {
+        // 该职员尚未设置独立口令：暂存登录态，先强制设置个人密码再进入系统
+        setPendingUser(result.user);
+      } else {
+        onLoggedIn(result.user);
+      }
     } catch (err) {
       // 生产后端不注册 /auth/login（NODE_ENV=production 时整组路由跳过注册）：
       // 404 属于「环境未接入统一身份认证」，与口令错误是两类问题，文案必须区分开
@@ -175,6 +187,48 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
     setError(null);
   }
 
+  /** 强制改密提交：成功后用已签发的登录态进入系统 */
+  async function handleChangePassword(event?: React.FormEvent) {
+    event?.preventDefault();
+    if (pendingUser === null) return;
+    if (newPassword.length < 8) {
+      setError('新密码至少 8 位');
+      return;
+    }
+    if (newPassword === password) {
+      setError('新密码不得与当前密码相同');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setError('两次输入的新密码不一致');
+      return;
+    }
+
+    setSubmitting(true);
+    setError(null);
+    try {
+      await changePassword(userName.trim(), password, newPassword);
+      const user = pendingUser;
+      setPendingUser(null);
+      setNewPassword('');
+      setConfirmPassword('');
+      onLoggedIn(user);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  /** 放弃强制改密：回到登录表单，不进入系统 */
+  function handleCancelPasswordChange() {
+    setPendingUser(null);
+    setNewPassword('');
+    setConfirmPassword('');
+    setPassword('');
+    setError(null);
+  }
+
   return (
     <div className="h-screen w-screen flex items-center justify-center bg-[#1E293B] font-sans antialiased p-6">
       <div className="w-full max-w-[880px] flex rounded-xl overflow-hidden shadow-2xl bg-white">
@@ -221,8 +275,14 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
         <div className="flex-1 p-8 flex flex-col min-h-[520px]">
           <div className="flex items-start justify-between">
             <div>
-              <h1 className="text-lg font-bold text-slate-800">用户登录</h1>
-              <p className="text-xs text-slate-400 mt-1">请输入职员工号或姓名登录系统</p>
+              <h1 className="text-lg font-bold text-slate-800">
+                {pendingUser !== null ? '设置个人密码' : '用户登录'}
+              </h1>
+              <p className="text-xs text-slate-400 mt-1">
+                {pendingUser !== null
+                  ? '首次登录需将共享初始口令更换为您的个人密码'
+                  : '请输入职员工号或姓名登录系统'}
+              </p>
             </div>
             {showDemo && (
               <button
@@ -251,6 +311,90 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
             )}
           </div>
 
+          {pendingUser !== null ? (
+            /* 强制改密步骤：共享初始口令登录成功后，必须先设置个人密码 */
+            <form onSubmit={(e) => void handleChangePassword(e)} className="mt-5 space-y-4">
+              <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-relaxed text-amber-800">
+                您当前使用的是共享初始口令，按安全管理要求请设置专属个人密码（至少 8 位）。设置完成后即可进入系统。
+              </div>
+              <div>
+                <label htmlFor="login-new-password" className="block text-xs font-medium text-slate-600 mb-1.5">
+                  新密码
+                </label>
+                <div className="relative">
+                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+                  <input
+                    id="login-new-password"
+                    name="new-password"
+                    type={showNewPassword ? 'text' : 'password'}
+                    autoComplete="new-password"
+                    autoFocus
+                    value={newPassword}
+                    onChange={(e) => {
+                      setNewPassword(e.target.value);
+                      if (error !== null) setError(null);
+                    }}
+                    placeholder="至少 8 位"
+                    className="w-full h-10 pl-9 pr-10 rounded border border-slate-300 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPassword((v) => !v)}
+                    title={showNewPassword ? '隐藏密码' : '显示密码'}
+                    aria-label={showNewPassword ? '隐藏密码' : '显示密码'}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 flex items-center justify-center rounded text-slate-400 hover:text-slate-600 hover:bg-slate-50"
+                  >
+                    {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label htmlFor="login-confirm-password" className="block text-xs font-medium text-slate-600 mb-1.5">
+                  确认新密码
+                </label>
+                <div className="relative">
+                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+                  <input
+                    id="login-confirm-password"
+                    name="confirm-password"
+                    type={showNewPassword ? 'text' : 'password'}
+                    autoComplete="new-password"
+                    value={confirmPassword}
+                    onChange={(e) => {
+                      setConfirmPassword(e.target.value);
+                      if (error !== null) setError(null);
+                    }}
+                    placeholder="再次输入新密码"
+                    className="w-full h-10 pl-9 pr-3 rounded border border-slate-300 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition"
+                  />
+                </div>
+              </div>
+
+              {error && (
+                <div className="flex items-start gap-2 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>{error}</span>
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={submitting}
+                className="w-full flex items-center justify-center gap-2 py-2.5 rounded bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+              >
+                <LogIn className="w-4 h-4" />
+                {submitting ? '提交中...' : '设置密码并进入'}
+              </button>
+              <button
+                type="button"
+                onClick={handleCancelPasswordChange}
+                disabled={submitting}
+                className="w-full py-2 rounded border border-slate-200 text-xs text-slate-500 hover:bg-slate-50 disabled:opacity-50"
+              >
+                返回登录
+              </button>
+            </form>
+          ) : (
           <form onSubmit={(e) => void handleSubmit(e)} className="mt-5 space-y-4">
             {/* 用户名 */}
             <div>
@@ -324,9 +468,10 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
               {submitting ? '登录中...' : '登录'}
             </button>
           </form>
+          )}
 
           {/* 生产形态（桌面客户端）：显示实际生效的服务器地址 + 「服务器设置」入口 */}
-          {isProduction && (
+          {isProduction && pendingUser === null && (
             <div className="mt-4 pt-4 border-t border-slate-100 space-y-2.5">
               <div className="flex items-center gap-2 rounded border border-slate-200 bg-slate-50 px-3 py-2">
                 <Server className="w-3.5 h-3.5 text-slate-400 shrink-0" />
@@ -348,7 +493,7 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
             </div>
           )}
 
-          {!isProduction && (
+          {!isProduction && pendingUser === null && (
             <>
               <p className="mt-3 text-[11px] text-slate-400">
                 演示环境初始密码：<span className="font-mono text-slate-500">{DEFAULT_PASSWORD}</span>

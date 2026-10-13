@@ -126,6 +126,12 @@ export interface EmployeesTable {
   isActive: Generated<boolean>;
   createdAt: Generated<Date>;
   roleCode: ColumnType<string | null, string | null | undefined, string | null>;
+  /**
+   * scrypt 登录口令哈希（迁移 048）。
+   * NULL = 未设独立口令 → 登录回落共享初始口令且响应带 mustChangePassword；
+   * 敏感列：严禁映射进任何对外 DTO，只允许凭证读方法访问。
+   */
+  passwordHash: ColumnType<string | null, string | null | undefined, string | null>;
 }
 
 // ============================================================================
