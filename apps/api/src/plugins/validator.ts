@@ -10,36 +10,41 @@ import fp from 'fastify-plugin';
  */
 const zodValidatorPluginAsync: FastifyPluginAsync = async (fastify) => {
   fastify.setValidatorCompiler(({ schema }) => {
-    // 检查是否为 Zod Schema (具有 safeParse 方法)
-    if (schema && typeof (schema as { safeParse?: unknown }).safeParse === 'function') {
-      const zodSchema = schema as {
-        safeParse: (data: unknown) => { success: true; data: unknown } | { success: false; error: unknown };
-      };
-      return (data: unknown) => {
-        const result = zodSchema.safeParse(data);
-        if (!result.success) {
-          return { error: result.error as Error };
-        }
-        return { value: result.data };
-      };
+    if (schema === undefined || schema === null) {
+      return (data: unknown) => ({ value: data });
     }
-    return (data: unknown) => ({ value: data });
+    if (typeof (schema as { safeParse?: unknown }).safeParse !== 'function') {
+      throw new Error('API route schema must be a Zod schema from the contracts layer');
+    }
+    const zodSchema = schema as {
+      safeParse: (data: unknown) => { success: true; data: unknown } | { success: false; error: unknown };
+    };
+    return (data: unknown) => {
+      const result = zodSchema.safeParse(data);
+      if (!result.success) {
+        return { error: result.error as Error };
+      }
+      return { value: result.data };
+    };
   });
 
   fastify.setSerializerCompiler(({ schema }) => {
-    if (schema && typeof (schema as { safeParse?: unknown }).safeParse === 'function') {
-      const zodSchema = schema as {
-        safeParse: (data: unknown) => { success: true; data: unknown } | { success: false; error: { issues: unknown } };
-      };
-      return (data: unknown) => {
-        const result = zodSchema.safeParse(data);
-        if (!result.success) {
-          fastify.log.warn({ issues: result.error.issues }, 'Response serialization validation warning');
-        }
-        return JSON.stringify(result.success ? result.data : data);
-      };
+    if (schema === undefined || schema === null) {
+      return (data: unknown) => JSON.stringify(data);
     }
-    return (data: unknown) => JSON.stringify(data);
+    if (typeof (schema as { safeParse?: unknown }).safeParse !== 'function') {
+      throw new Error('API response schema must be a Zod schema from the contracts layer');
+    }
+    const zodSchema = schema as {
+      safeParse: (data: unknown) => { success: true; data: unknown } | { success: false; error: { issues: unknown } };
+    };
+    return (data: unknown) => {
+      const result = zodSchema.safeParse(data);
+      if (!result.success) {
+        fastify.log.warn({ issues: result.error.issues }, 'Response serialization validation warning');
+      }
+      return JSON.stringify(result.success ? result.data : data);
+    };
   });
 };
 

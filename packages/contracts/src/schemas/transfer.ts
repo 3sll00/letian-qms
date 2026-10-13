@@ -104,6 +104,23 @@ export const PaginatedTransferOverrideTicketsSchema = z
   })
   .openapi('PaginatedTransferOverrideTickets');
 
+/** 豁免申请单列表查询条件（GET /inspections/transfer-overrides/tickets） */
+export const ListTransferOverrideTicketsQuerySchema = z
+  .object({
+    batchNo: z.string().min(1).optional(),
+    status: TransferOverrideStatusEnum.optional(),
+    page: z.coerce.number().int().min(1).default(1),
+    pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  })
+  .openapi('ListTransferOverrideTicketsQuery');
+
+/** 豁免申请单路径参数 */
+export const TransferOverrideTicketParamsSchema = z
+  .object({
+    ticketNo: z.string().min(1, '豁免工单号不能为空'),
+  })
+  .openapi('TransferOverrideTicketParams');
+
 /** 各环节传递 KPI */
 export const StageTransferKpiSchema = z
   .object({
@@ -313,6 +330,8 @@ export type TransferOverrideTicket = z.infer<typeof TransferOverrideTicketSchema
 export type CreateTransferOverrideTicketRequest = z.infer<typeof CreateTransferOverrideTicketRequestSchema>;
 export type ReviewTransferOverrideTicketRequest = z.infer<typeof ReviewTransferOverrideTicketRequestSchema>;
 export type PaginatedTransferOverrideTickets = z.infer<typeof PaginatedTransferOverrideTicketsSchema>;
+export type ListTransferOverrideTicketsQuery = z.infer<typeof ListTransferOverrideTicketsQuerySchema>;
+export type TransferOverrideTicketParams = z.infer<typeof TransferOverrideTicketParamsSchema>;
 export type StageTransferKpi = z.infer<typeof StageTransferKpiSchema>;
 export type TransferKpis = z.infer<typeof TransferKpisSchema>;
 

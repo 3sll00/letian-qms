@@ -4,7 +4,7 @@ import {
   buildMaterialPermissionWhere,
   hasFullWildcard,
   isFullWildcardRule,
-} from '../repositories/pbac-sql-translator.js';
+} from '../repositories/security/pbac-sql-translator.js';
 import {
   DummyDriver,
   PostgresAdapter,
@@ -218,5 +218,31 @@ const multi = buildMaterialPermissionWhere([
 const compiledMulti = db.selectFrom('inspectionOrders').selectAll().where(multi).compile();
 console.log('Compiled multi-rule SQL:', compiledMulti.sql);
 assert(compiledMulti.sql.includes(' OR '), 'multiple rules should be OR-combined');
+
+const categoryFromPlan = buildMaterialPermissionWhere(
+  [rule({ materialCategories: ['CAT-RAW-WIRE'], supplierCodes: ['SUP-001'] })],
+  {
+    targetRef: 'inspection_plans',
+    hasSupplierColumn: false,
+    supplierDimension: 'NOT_APPLICABLE',
+    categoryCodeExpr: sql`coalesce(nullif(inspection_plans.category_code, ''),
+      (select category_code from materials where material_code = inspection_plans.material_code))`,
+  }
+);
+const compiledCategoryFromPlan = db.selectFrom('inspectionPlans').selectAll().where(categoryFromPlan).compile();
+assert(compiledCategoryFromPlan.sql.includes('inspection_plans.category_code'), 'plan category must be checked even without a material code');
+assert(compiledCategoryFromPlan.sql.includes('from materials'), 'legacy plans must fall back to material category');
+assert.deepStrictEqual(compiledCategoryFromPlan.parameters, ['CAT-RAW-WIRE']);
+
+const blankSupplier = buildMaterialPermissionWhere([rule({ supplierCodes: ['  '] })]);
+const compiledBlankSupplier = db.selectFrom('inspectionOrders').selectAll().where(blankSupplier).compile();
+assert(compiledBlankSupplier.sql.includes("btrim("), 'blank supplier context must not match a restricted rule');
+assert.deepStrictEqual(compiledBlankSupplier.parameters, ['  ']);
+
+const maliciousCode = "MAT-1') OR 1=1 --";
+const boundCode = db.selectFrom('inspectionOrders').selectAll()
+  .where(buildMaterialPermissionWhere([rule({ materialCodes: [maliciousCode] })])).compile();
+assert(!boundCode.sql.includes(maliciousCode), 'permission values must be parameterized');
+assert.deepStrictEqual(boundCode.parameters, [maliciousCode]);
 
 console.log('PBAC SQL translator tests passed successfully!');

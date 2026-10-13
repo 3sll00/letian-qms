@@ -7,6 +7,9 @@ import { requestTraceId } from '../lib/trace';
 const ReleaseGateParamsSchema = z.object({
   batchNo: z.string().min(1, '批次号不能为空'),
 });
+const ReleaseGateQuerySchema = z.object({
+  gateType: z.enum(['PROCESS_TRANSFER', 'OUTBOUND_SHIPMENT']).optional(),
+});
 
 /**
  * 成品检强制关卡放行校验控制器（MES 过站 / 出货前调用）
@@ -15,7 +18,7 @@ const ReleaseGateParamsSchema = z.object({
  * 1. **判定不在本文件**：规则唯一实现在 `@letian/domain` 的 `evaluateStageVerdict`，
  *    由 `CheckReleaseGateUseCase` 调用 —— 与「合格后传递」建单门禁同一份口径。
  *    本控制器只把判定结果翻译成 HTTP（200 / 409 problem+json），不写任何 if 判定上游是否合格。
- * 2. 纯读语义：除了审计日志与 Outbox 事件（阻断也要留痕，供「这批为什么放不了」追溯）
+ * 2. 不修改业务单据：除审计日志与 Outbox 事件（阻断也要留痕，供「这批为什么放不了」追溯）
  *    之外不写任何业务数据，不修改检验单状态。
  * 3. 409 阻断必须给出精确原因码（沿用既有取值，客户端零改动）：
  *    - GATE_NOT_INSPECTED（该批次无检验单）
@@ -35,15 +38,17 @@ export const releaseGatesController: FastifyPluginAsync<{ container: ApiContaine
     {
       schema: {
         params: ReleaseGateParamsSchema,
+        querystring: ReleaseGateQuerySchema,
       },
     },
     async (request, reply) => {
       const { batchNo } = request.params as z.infer<typeof ReleaseGateParamsSchema>;
+      const { gateType = 'OUTBOUND_SHIPMENT' } = request.query as z.infer<typeof ReleaseGateQuerySchema>;
       const operator = operatorOf(request);
 
       const result = await container.useCases.checkReleaseGate.execute({
         batchNo,
-        gateType: 'OUTBOUND_SHIPMENT',
+        gateType,
         operatorId: operator.userId,
         operatorName: operator.userName,
       });
@@ -77,7 +82,7 @@ export const releaseGatesController: FastifyPluginAsync<{ container: ApiContaine
           code,
           traceId: requestTraceId(request),
           batchNo,
-          requiredGate: 'OQC',
+          requiredGate: gateType === 'PROCESS_TRANSFER' ? 'IPQC_FN' : 'OQC',
           gateCode: result.gateCode,
           inspectionOrderNo: result.inspectionOrderNo ?? null,
           mrbNo: result.mrbNo ?? null,

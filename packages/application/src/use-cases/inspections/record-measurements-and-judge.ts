@@ -8,6 +8,7 @@ import type { ISecurityContext } from '../../security/security-context.js';
 import type { IUnitOfWork } from '../../tx/unit-of-work.js';
 import { collectPendingDefect } from '../mrb/collect-pending-defect.js';
 import { autoInitiateMrbReview } from '../mrb/auto-initiate-mrb-review.js';
+import { registerInspectionTraceNode } from '../traceability/register-inspection-trace-node.js';
 
 export interface RecordMeasurementsAndJudgeCommand
   extends Partial<BatchRecordInspectionItemsRequest> {
@@ -26,6 +27,9 @@ export interface RecordMeasurementsAndJudgeCommand
     /** 带出值是否被质检员手工修改过 */
     isManuallyModified?: boolean;
     modificationReason?: string;
+    /** 过程检验「不解检（EXEMPT）」标记：为 true 时该项跳过公差判定、不计入合格率分母 */
+    isExempt?: boolean;
+    exemptReason?: string;
   }>;
   overallRemark?: string;
   operatorId: string;
@@ -89,6 +93,17 @@ export class RecordMeasurementsAndJudgeUseCase {
         // 1. 编排批量录入实测值：逐个调用聚合根原子能力
         //    继承留痕字段（inheritedFrom / 带出原值 / 手工修改标记）随实测值同一事务落库（docs/47 §3.6）
         for (const item of cmd.items) {
+          // 不解检（EXEMPT）标记先于实测值写入：evaluate 时 isExempt 恒返回 EXEMPT，
+          // 顺序反过来会把免检项按「未录入」判成 PENDING，把整单拖向 FAILED。
+          if (item.isExempt !== undefined) {
+            order.markItemExempt({
+              itemCode: item.itemCode,
+              isExempt: item.isExempt,
+              ...(item.exemptReason !== undefined ? { exemptReason: item.exemptReason } : {}),
+            });
+          }
+          // 免检项无实测值可录：跳过 recordItemMeasurement，避免把实测字段清成 undefined
+          if (item.isExempt === true) continue;
           order.recordItemMeasurement({
             itemCode: item.itemCode,
             ...(item.measuredVal !== undefined ? { measuredVal: item.measuredVal } : {}),
@@ -124,6 +139,7 @@ export class RecordMeasurementsAndJudgeUseCase {
 
       const status = order.getStatus();
       const decision = order.getOverallDecision();
+      const traceNode = await registerInspectionTraceNode(ctx, updatedOrderDto, cmd.operatorName);
 
       // 4. 判定不合格 -> 汇入不合格台账（与工单状态同事务提交，见 docs/20 §5 D3）
       //    + 同事务自动创建 MRB 评审单（docs/43 §3：判定即入评审，无人工发起环节）。
@@ -188,6 +204,8 @@ export class RecordMeasurementsAndJudgeUseCase {
           decision,
           status,
           itemCount: cmd.items.length,
+          traceNodeBatchNo: traceNode.batchNo,
+          traceNodeStatus: traceNode.nodeStatus,
           // 自动发起留痕（docs/43）：让「判不合格却没有 MRB 单」在审计日志里一眼可判
           mrbAutoInitiated: mrbReviewNo !== undefined,
           ...(mrbReviewNo !== undefined ? { mrbReviewNo } : {}),

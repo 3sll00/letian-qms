@@ -1,13 +1,40 @@
-﻿import { syncErpMasterData, syncMesAll, testMesConnection, queryMes, assertSafeMesDatabase, STRICT_MES_TARGET_DB } from '@letian/infrastructure';
+﻿import {
+  createFixtureErpReads,
+  createMssqlErpReads,
+  fetchMesCheckReports,
+  fetchMesOqcSourceBundle,
+  fetchMesProcedures,
+  fetchMesProductionTasks,
+  getErpConnectionPool,
+  syncErpMasterData,
+  syncMesAll,
+  testMesConnection,
+} from '@letian/infrastructure';
 import { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import {
+  ErpSalesDispatchSyncRequestSchema,
+  ErpSourcePreviewQuerySchema,
+  ErpSourceSyncRequestSchema,
+  ErrorCode,
   IntegrationConfigSchema,
+  MesPagedQuerySchema,
+  OqcSourcesQuerySchema,
   SystemTypeEnum,
   type IntegrationConfig,
   type IntegrationSyncLog,
 } from '@letian/contracts';
-import { NotFoundError } from '@letian/application';
+import {
+  ApplicationError,
+  NotFoundError,
+  type IIncomingInspectionSource,
+  type SyncErpIncomingInspectionsInput,
+  type ISalesDispatchSource,
+  type SyncErpSalesDispatchInput,
+  type IOutsourceInspectionSource,
+  type SyncErpOutsourceInspectionsInput,
+  SyncErpOutsourceInspectionsUseCase,
+} from '@letian/application';
 import type { ApiContainer } from '../container';
 import { MES_EQUIPMENT_CATALOG, MES_INTERCEPTION_RULES } from '../data/mes-gateway';
 import { appendDbAuditLog } from '../lib/audit-log';
@@ -62,6 +89,19 @@ function intervalMinutesToCron(minutes: number): string {
 /** 历史 target 取值 → 外部系统类型 */
 function targetToSystemType(target: string | undefined): 'MES' | 'ERP' {
   return target === 'ERP_MASTER_DATA' ? 'ERP' : 'MES';
+}
+
+function externalServiceError(
+  systemType: 'MES' | 'ERP',
+  status: 500 | 503,
+  detail: string
+): ApplicationError {
+  return new ApplicationError({
+    code: systemType === 'ERP' ? ErrorCode.ERP_SYNC_FAILED : ErrorCode.MES_GATEWAY_TIMEOUT,
+    title: `${systemType} 数据服务异常`,
+    status,
+    detail,
+  });
 }
 
 export const integrationController: FastifyPluginAsync<{ container: ApiContainer }> = async (
@@ -311,12 +351,478 @@ export const integrationController: FastifyPluginAsync<{ container: ApiContainer
         message: 'ERP主数据同步完成',
         details: result,
       });
-    } catch (err: any) {
-      return reply.status(500).send({
-        success: false,
-        message: err?.message || '同步异常',
-      });
+    } catch (err) {
+      throw externalServiceError('ERP', 500, err instanceof Error ? err.message : '同步异常');
     }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // ERP 来料检验拉取并生成 QMS 来料检验单（第①段闭环：ERP 读取 -> QMS 建单）
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /** 构造来料检验数据源：useFixture 走本地样例（无 ERP 也能演示），否则直连 ERP（不可达返回 null） */
+  async function buildIncomingInspectionSource(
+    body: { useFixture?: boolean | undefined; rows?: unknown[] | undefined } | undefined
+  ): Promise<{ source: IIncomingInspectionSource; fixture: boolean } | null> {
+    if (body?.useFixture && Array.isArray(body.rows)) {
+      return {
+        source: createFixtureErpReads({ incomingInspections: body.rows as any }),
+        fixture: true,
+      };
+    }
+    const pool = await getErpConnectionPool();
+    if (!pool) return null;
+    return { source: createMssqlErpReads(pool), fixture: false };
+  }
+
+  /** 解析当前操作人（审计/建单归属）；未登录时回落系统账号 */
+  function resolveSyncOperator(request: any): { operatorId: string; operatorName: string } {
+    const actor = request?.user;
+    if (actor) {
+      return {
+        operatorId: actor.userId ?? actor.id ?? 'SYS-ERP-SYNC',
+        operatorName: actor.userName ?? actor.name ?? 'ERP同步服务',
+      };
+    }
+    return { operatorId: 'SYS-ERP-SYNC', operatorName: 'ERP同步服务' };
+  }
+
+  // GET /erp/incoming-inspections —— 只读预览：拉取 ERP 来料检验，不建单（供前端「从 ERP 拉单」前确认）
+  fastify.get(
+    '/erp/incoming-inspections',
+    { schema: { querystring: ErpSourcePreviewQuerySchema } },
+    async (request, reply) => {
+      const query = request.query as z.infer<typeof ErpSourcePreviewQuerySchema>;
+      const built = await buildIncomingInspectionSource(undefined);
+      if (!built) {
+        throw externalServiceError('ERP', 503, 'ERP 数据库连接不可用（ERP_DB_* 未配置或网络不可达），无法拉取来料检验');
+      }
+      try {
+        const rows = await built.source.fetchIncomingInspections(query.limit ?? 500);
+        return reply.status(200).send({
+          success: true,
+          source: built.fixture ? 'FIXTURE' : 'ERP',
+          total: rows.length,
+          items: rows,
+        });
+      } catch (err) {
+        throw externalServiceError('ERP', 500, err instanceof Error ? err.message : '拉取异常');
+      }
+    }
+  );
+
+  // POST /erp/incoming-inspections/sync —— 拉取 ERP 来料检验并生成 QMS 来料检验单（IQC）
+  //   - 真实环境：直连 ERP，逐行映射为 IQC 建单（方案快照/审计/Outbox 经 CreateInspectionOrderUseCase 生效）
+  //   - 本地演示：body.useFixture=true 且 body.rows 提供样例行，走 fixture 源
+  //   - ERP 不可达：返回 503，明确提示无法拉取（与 syncErpMasterData 口径一致）
+  fastify.post(
+    '/erp/incoming-inspections/sync',
+    {
+      schema: {
+        body: ErpSourceSyncRequestSchema,
+      },
+    },
+    async (request, reply) => {
+      const body = request.body as z.infer<typeof ErpSourceSyncRequestSchema>;
+      const built = await buildIncomingInspectionSource(body);
+      if (!built) {
+        throw externalServiceError('ERP', 503, 'ERP 数据库连接不可用（ERP_DB_* 未配置或网络不可达），无法拉取来料检验');
+      }
+
+      const operator = resolveSyncOperator(request);
+      // exactOptionalPropertyTypes：limit 仅在明确传入时赋值
+      const execInput: SyncErpIncomingInspectionsInput = { source: built.source, operator };
+      if (body.limit !== undefined) execInput.limit = body.limit;
+      try {
+        const result = await container.useCases.syncErpIncomingInspections.execute(execInput);
+
+        await appendDbAuditLog(container.uow, request, {
+          action: 'SYNC_TRIGGER',
+          resourceType: 'ERP_INCOMING_INSPECTION',
+          resourceId: 'ERP->QMS',
+          diffPatch: {
+            source: built.fixture ? 'FIXTURE' : 'ERP',
+            total: result.total,
+            created: result.created,
+            skipped: result.skipped,
+            failed: result.failed,
+            failures: result.failures,
+          },
+        });
+
+        return reply.status(200).send({
+          success: true,
+          message: `已从 ERP 拉取来料检验并生成 ${result.created} 张 QMS 来料检验单（跳过 ${result.skipped} 张已存在，失败 ${result.failed} 张）`,
+          ...result,
+        });
+      } catch (err) {
+        throw externalServiceError('ERP', 500, err instanceof Error ? err.message : '同步异常');
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // ERP 委外加工单拉取并生成 QMS 委外检验单（委外检验闭环：ERP 读取 -> QMS 建单 OQC_SF/MACH/HEAT）
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /** 构造委外加工单数据源：useFixture 走本地样例（无 ERP 也能演示），否则直连 ERP（不可达返回 null） */
+  async function buildOutsourceSource(
+    body: { useFixture?: boolean | undefined; rows?: unknown[] | undefined } | undefined
+  ): Promise<{ source: IOutsourceInspectionSource; fixture: boolean } | null> {
+    if (body?.useFixture && Array.isArray(body.rows)) {
+      return {
+        source: createFixtureErpReads({ outsourceInspections: body.rows as any }),
+        fixture: true,
+      };
+    }
+    const pool = await getErpConnectionPool();
+    if (!pool) return null;
+    return { source: createMssqlErpReads(pool), fixture: false };
+  }
+
+  // GET /erp/outsource-inspections —— 只读预览：拉取 ERP 委外加工单，不建单（供前端「从 ERP 拉单」前确认）
+  fastify.get(
+    '/erp/outsource-inspections',
+    { schema: { querystring: ErpSourcePreviewQuerySchema } },
+    async (request, reply) => {
+      const query = request.query as z.infer<typeof ErpSourcePreviewQuerySchema>;
+      const built = await buildOutsourceSource(undefined);
+      if (!built) {
+        throw externalServiceError('ERP', 503, 'ERP 数据库连接不可用（ERP_DB_* 未配置或网络不可达），无法拉取委外加工单');
+      }
+      try {
+        const rows = await built.source.fetchOutsourceInspections(query.limit ?? 500);
+        return reply.status(200).send({
+          success: true,
+          source: built.fixture ? 'FIXTURE' : 'ERP',
+          total: rows.length,
+          items: rows,
+        });
+      } catch (err) {
+        throw externalServiceError('ERP', 500, err instanceof Error ? err.message : '拉取异常');
+      }
+    }
+  );
+
+  // POST /erp/outsource-inspections/sync —— 拉取 ERP 委外加工单并生成 QMS 委外检验单
+  //   - 真实环境：直连 ERP，逐行按明细备注关键词分类（表面/机加/热处理，默认表面）后映射为 OQC 建单
+  //   - 本地演示：body.useFixture=true 且 body.rows 提供样例行，走 fixture 源
+  //   - ERP 不可达：返回 503
+  fastify.post(
+    '/erp/outsource-inspections/sync',
+    {
+      schema: {
+        body: ErpSourceSyncRequestSchema,
+      },
+    },
+    async (request, reply) => {
+      const body = request.body as z.infer<typeof ErpSourceSyncRequestSchema>;
+      const built = await buildOutsourceSource(body);
+      if (!built) {
+        throw externalServiceError('ERP', 503, 'ERP 数据库连接不可用（ERP_DB_* 未配置或网络不可达），无法拉取委外加工单');
+      }
+
+      const operator = resolveSyncOperator(request);
+      const execInput: SyncErpOutsourceInspectionsInput = { source: built.source, operator };
+      if (body.limit !== undefined) execInput.limit = body.limit;
+      try {
+        const result = await container.useCases.syncErpOutsourceInspections.execute(execInput);
+
+        await appendDbAuditLog(container.uow, request, {
+          action: 'SYNC_TRIGGER',
+          resourceType: 'ERP_OUTSOURCE_INSPECTION',
+          resourceId: 'ERP->QMS',
+          diffPatch: {
+            source: built.fixture ? 'FIXTURE' : 'ERP',
+            total: result.total,
+            created: result.created,
+            createdByType: result.createdByType,
+            skipped: result.skipped,
+            failed: result.failed,
+            failures: result.failures,
+          },
+        });
+
+        return reply.status(200).send({
+          success: true,
+          message: `已从 ERP 拉取委外加工单并生成 ${result.created} 张 QMS 委外检验单（表面处理 ${result.createdByType.OQC_SF ?? 0} / 机加工 ${result.createdByType.OQC_MACH ?? 0} / 热处理 ${result.createdByType.OQC_HEAT ?? 0}；跳过 ${result.skipped}，失败 ${result.failed}）`,
+          ...result,
+        });
+      } catch (err) {
+        throw externalServiceError('ERP', 500, err instanceof Error ? err.message : '同步异常');
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // ERP 销售出库拉取并生成 QMS 出货检验单（出货检验第①段闭环：ERP 读取 -> QMS 建单 OQC_SH）
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /** 构造销售出库数据源：useFixture 走本地样例（无 ERP 也能演示），否则直连 ERP（不可达返回 null） */
+  async function buildSalesDispatchSource(
+    body: { useFixture?: boolean | undefined; rows?: unknown[] | undefined } | undefined
+  ): Promise<{ source: ISalesDispatchSource; fixture: boolean } | null> {
+    if (body?.useFixture && Array.isArray(body.rows)) {
+      return {
+        source: createFixtureErpReads({ salesDispatches: body.rows as any }),
+        fixture: true,
+      };
+    }
+    const pool = await getErpConnectionPool();
+    if (!pool) return null;
+    return { source: createMssqlErpReads(pool), fixture: false };
+  }
+
+  // GET /erp/sales-dispatches —— 只读预览：拉取 ERP 销售出库，不建单（供前端「从 ERP 拉单」前确认）
+  fastify.get(
+    '/erp/sales-dispatches',
+    { schema: { querystring: ErpSourcePreviewQuerySchema } },
+    async (request, reply) => {
+      const query = request.query as z.infer<typeof ErpSourcePreviewQuerySchema>;
+      const built = await buildSalesDispatchSource(undefined);
+      if (!built) {
+        throw externalServiceError('ERP', 503, 'ERP 数据库连接不可用（ERP_DB_* 未配置或网络不可达），无法拉取销售出库');
+      }
+      try {
+        const rows = await built.source.fetchSalesDispatch(query.limit ?? 500);
+        return reply.status(200).send({
+          success: true,
+          source: built.fixture ? 'FIXTURE' : 'ERP',
+          total: rows.length,
+          items: rows,
+        });
+      } catch (err) {
+        throw externalServiceError('ERP', 500, err instanceof Error ? err.message : '拉取异常');
+      }
+    }
+  );
+
+  // POST /erp/sales-dispatches/sync —— 拉取 ERP 销售出库并生成 QMS 出货检验单（OQC_SH）
+  //   - 真实环境：直连 ERP，逐行映射为 OQC_SH 建单（方案快照/审计/Outbox 经 CreateInspectionOrderUseCase 生效）
+  //   - 本地演示：body.useFixture=true 且 body.rows 提供样例行，走 fixture 源
+  //   - ERP 不可达：返回 503，明确提示无法拉取（与 syncErpIncomingInspections 口径一致）
+  fastify.post(
+    '/erp/sales-dispatches/sync',
+    {
+      schema: {
+        body: ErpSalesDispatchSyncRequestSchema,
+      },
+    },
+    async (request, reply) => {
+      const body = request.body as z.infer<typeof ErpSalesDispatchSyncRequestSchema>;
+      const built = await buildSalesDispatchSource(body);
+      if (!built) {
+        throw externalServiceError('ERP', 503, 'ERP 数据库连接不可用（ERP_DB_* 未配置或网络不可达），无法拉取销售出库');
+      }
+
+      const operator = resolveSyncOperator(request);
+      const execInput: SyncErpSalesDispatchInput = { source: built.source, operator };
+      if (body.limit !== undefined) execInput.limit = body.limit;
+      if (body.offset !== undefined) execInput.offset = body.offset;
+      try {
+        const result = await container.useCases.syncErpSalesDispatch.execute(execInput);
+
+        await appendDbAuditLog(container.uow, request, {
+          action: 'SYNC_TRIGGER',
+          resourceType: 'ERP_SALES_DISPATCH',
+          resourceId: 'ERP->QMS',
+          diffPatch: {
+            source: built.fixture ? 'FIXTURE' : 'ERP',
+            total: result.total,
+            created: result.created,
+            skipped: result.skipped,
+            failed: result.failed,
+            failures: result.failures,
+          },
+        });
+
+        return reply.status(200).send({
+          success: true,
+          message: `已从 ERP 拉取销售出库并生成 ${result.created} 张 QMS 出货检验单（跳过 ${result.skipped} 张已存在，失败 ${result.failed} 张）`,
+          ...result,
+        });
+      } catch (err) {
+        throw externalServiceError('ERP', 500, err instanceof Error ? err.message : '同步异常');
+      }
+    }
+  );
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // 出货检验（OQC）数据聚合接口
+  //
+  // 按用户给定口径，把出货检验单所需的五路输入组装为一个统一视图：
+  //   ① 出货批次 / 销售订单  → ERP DlySale + DlyNdx（管家婆销售出库）
+  //   ② 成品追溯链            → MES t_production_task + 批次 + t_pro_task_serial_number
+  //   ③ 过程检验结果          → MES t_check_report + t_check_report_parameter
+  //   ④ 物料 / 客户信息       → ERP Ptype + Btype（已镜像到本地 PG materials / customers）
+  //   ⑤ 质检方案              → QMS 自建方案（items 软链 ERP TestItem）
+  //
+  // 判定与回写（用户明确口径）：
+  //   - 判定由 QMS 产生（合格数/不合格数/不合格原因），本接口在 judgment 段回显；
+  //   - 不回写 ERP：ERP 无对应的出货检验单表，写不进去，判定结果仅存 QMS 供出货放行。
+  //
+  // 容错：各外部源单独 try/catch，MES/ERP 不可达时仅标记 available=false 并留空，
+  //       不整接口 500（聚合接口的核心价值就是"能拿到的都拿到"）。
+  // ─────────────────────────────────────────────────────────────────────────
+  fastify.get(
+    '/oqc/sources',
+    { schema: { querystring: OqcSourcesQuerySchema } },
+    async (request, reply) => {
+      const query = request.query as z.infer<typeof OqcSourcesQuerySchema>;
+      const orderId = query.orderId;
+      const materialCode = query.materialCode;
+      const batchNo = query.batchNo;
+      const customerName = query.customerName;
+
+    // ① QMS 出货检验单（锚点）
+    let order: any = null;
+    if (orderId) {
+      try {
+        order = await container.repositories.orders.findById(orderId);
+      } catch {
+        order = null;
+      }
+      if (!order) {
+        throw new NotFoundError(`出货检验单不存在: ${orderId}`);
+      }
+    }
+
+    const matCode = materialCode ?? order?.materialCode;
+    const batNo = batchNo ?? order?.batchNo;
+    const custName = customerName ?? order?.customerName;
+    const soNo = order?.salesOrderNo;
+    const planId = order?.planId;
+
+    // ④ 物料 / 客户主数据（ERP Ptype + Btype 镜像，落本地 PG，可达）
+    let material: any = null;
+    let customer: any = null;
+    try {
+      if (matCode) material = await container.repositories.masterData.getMaterialByCode(matCode);
+      const customers = await container.repositories.masterData.getCustomers();
+      customer =
+        customers.find((c: any) => c.customerName === custName) ??
+        customers.find((c: any) => (c.customerName ?? '').includes(custName ?? '')) ??
+        null;
+    } catch {
+      // masterData 不可达：降级留空
+    }
+
+    // ⑤ 质检方案（QMS 自建 + ERP TestItem 软链）
+    let qualityPlan: any = null;
+    try {
+      if (planId) qualityPlan = await container.repositories.plans.findById(planId);
+    } catch {
+      // 方案不可达：降级留空
+    }
+
+    // ①' ERP 销售出库（最佳努力：直连可达则取实时，否则用 QMS 单上已落库的 ERP 字段）
+    let erpSalesDispatch: any = null;
+    let erpLive = false;
+    const pool = await getErpConnectionPool();
+    if (pool) {
+      try {
+        const erpRows = await createMssqlErpReads(pool).fetchSalesDispatch(500);
+        erpSalesDispatch =
+          erpRows.find((r: any) => (soNo && r.number === soNo) || (matCode && r.ptypeUserCode === matCode)) ??
+          null;
+        erpLive = true;
+      } catch {
+        erpLive = false;
+      }
+    }
+
+    // ②③ MES 追溯链 + 过程检验（最佳努力：MES 不可达则标记并留空）
+    let productionTrace: Record<string, unknown>[] = [];
+    let serials: Record<string, unknown>[] = [];
+    let processInspections: Record<string, unknown>[] = [];
+    let mesAvailable = false;
+    try {
+      const bundle = await fetchMesOqcSourceBundle({
+        ...(matCode !== undefined ? { materialCode: matCode } : {}),
+        ...(batNo !== undefined ? { batchNo: batNo } : {}),
+        ...(soNo !== undefined ? { salesOrderNo: soNo } : {}),
+      });
+      productionTrace = bundle.productionTrace;
+      serials = bundle.serials;
+      processInspections = bundle.processInspections;
+      mesAvailable = true;
+    } catch {
+      mesAvailable = false;
+    }
+
+    // ①' 出货批次 / 销售订单视图（ERP 实时优先，否则回退 QMS 单上已落库的 ERP 字段）
+    const salesDispatch = order
+      ? {
+          salesOrderNo: order.salesOrderNo ?? null,
+          customerName: order.customerName ?? null,
+          batchNo: order.batchNo ?? null,
+          dispatchDate: order.dispatchDate ?? null,
+          erpStatus: order.erpStatus ?? null,
+          salesOrderPoNo: order.salesOrderPoNo ?? null,
+          totalQty: order.totalQty ?? null,
+          source: erpLive && erpSalesDispatch ? 'ERP_LIVE' : 'QMS_MIRRORED',
+          erpRow: erpSalesDispatch,
+        }
+      : erpSalesDispatch
+        ? {
+            salesOrderNo: erpSalesDispatch.number,
+            customerName: erpSalesDispatch.customerName,
+            batchNo: erpSalesDispatch.blockNo,
+            dispatchDate: erpSalesDispatch.date,
+            erpStatus: null,
+            salesOrderPoNo: null,
+            totalQty: erpSalesDispatch.qty,
+            source: 'ERP_LIVE',
+            erpRow: erpSalesDispatch,
+          }
+        : null;
+
+    return reply.status(200).send({
+      success: true,
+      orderId: order?.id ?? null,
+      orderNo: order?.orderNo ?? null,
+      materialCode: matCode ?? null,
+      batchNo: batNo ?? null,
+      customerName: custName ?? null,
+      sources: {
+        salesDispatch: { available: !!salesDispatch, live: erpLive, data: salesDispatch },
+        productionTrace: {
+          available: mesAvailable && productionTrace.length > 0,
+          live: mesAvailable,
+          count: productionTrace.length,
+          data: productionTrace,
+          serials,
+        },
+        processInspections: {
+          available: mesAvailable && processInspections.length > 0,
+          live: mesAvailable,
+          count: processInspections.length,
+          data: processInspections,
+        },
+        materialAndCustomer: {
+          available: !!(material || customer),
+          data: { material, customer },
+        },
+        qualityPlan: { available: !!qualityPlan, data: qualityPlan },
+      },
+      // 判定：由 QMS 产生（合格数/不合格数/不合格原因）
+      judgment: {
+        source: 'QMS',
+        status: order?.status ?? null,
+        judgment: order?.judgment ?? null,
+        sampleQty: order?.sampleQty ?? null,
+        qualifiedQty: order?.passQty ?? null,
+        unqualifiedQty: order?.failQty ?? null,
+        inspectorName: order?.inspectorName ?? null,
+        inspectedDate: order?.inspectedDate ?? null,
+        notes: order?.inspectionNotes ?? null,
+      },
+      // 回写：不回写 ERP（ERP 无出货检验单表）
+      writeback: {
+        toErp: false,
+        reason: 'ERP 无对应的出货检验单表，判定结果仅存 QMS，供出货放行使用',
+      },
+    });
   });
 
   // MES车间生产与质检数据即时同步（直连 mes_letian_test，安全隔离）
@@ -328,11 +834,8 @@ export const integrationController: FastifyPluginAsync<{ container: ApiContainer
         message: result.success ? 'MES车间生产与质检数据同步完成' : 'MES数据同步异常',
         details: result,
       });
-    } catch (err: any) {
-      return reply.status(500).send({
-        success: false,
-        message: err?.message || 'MES同步异常',
-      });
+    } catch (err) {
+      throw externalServiceError('MES', 500, err instanceof Error ? err.message : 'MES同步异常');
     }
   });
 
@@ -344,113 +847,66 @@ export const integrationController: FastifyPluginAsync<{ container: ApiContainer
         success: status.connected,
         ...status,
       });
-    } catch (err: any) {
-      return reply.status(500).send({
-        success: false,
-        connected: false,
-        database: STRICT_MES_TARGET_DB,
-        error: err?.message || '连接异常',
-      });
+    } catch (err) {
+      throw externalServiceError('MES', 500, err instanceof Error ? err.message : '连接异常');
     }
   });
 
   // 查询 MES 实时生产任务单列表 (只读 mes_letian_test.t_production_task)
-  fastify.get('/mes/tasks', async (request, reply) => {
-    try {
-      assertSafeMesDatabase();
-      const query = request.query as { search?: string; page?: string; pageSize?: string };
-      const page = Math.max(1, parseInt(query.page || '1', 10));
-      const pageSize = Math.min(100, Math.max(1, parseInt(query.pageSize || '20', 10)));
-      const offset = (page - 1) * pageSize;
-
-      let sql = `
-        SELECT 
-          t.id, t.bill_no, t.heat_number, t.steel_mill, t.cutting_length, t.production_num, t.bill_date,
-          m.code as materiel_code, m.name as materiel_name, m.spec as materiel_spec
-        FROM t_production_task t
-        LEFT JOIN t_materiel m ON t.materiel_id = m.id
-      `;
-      const params: any[] = [];
-      if (query.search) {
-        sql += ` WHERE t.bill_no LIKE ? OR t.heat_number LIKE ? OR m.code LIKE ? OR m.name LIKE ?`;
-        const s = `%${query.search}%`;
-        params.push(s, s, s, s);
+  fastify.get(
+    '/mes/tasks',
+    { schema: { querystring: MesPagedQuerySchema } },
+    async (request, reply) => {
+      try {
+        const query = request.query as z.infer<typeof MesPagedQuerySchema>;
+        const rows = await fetchMesProductionTasks({
+          ...(query.search !== undefined ? { search: query.search } : {}),
+          page: query.page,
+          pageSize: query.pageSize,
+        });
+        return reply.status(200).send({
+          page: query.page,
+          pageSize: query.pageSize,
+          items: rows,
+        });
+      } catch (err) {
+        throw externalServiceError('MES', 500, err instanceof Error ? err.message : '查询MES任务单失败');
       }
-      sql += ` ORDER BY t.bill_date DESC LIMIT ? OFFSET ?`;
-      params.push(pageSize, offset);
-
-      const rows = await queryMes<any>(sql, params);
-      return reply.status(200).send({
-        page,
-        pageSize,
-        items: rows,
-      });
-    } catch (err: any) {
-      return reply.status(500).send({
-        error: err?.message || '查询MES任务单失败',
-      });
     }
-  });
+  );
 
   // 查询 MES 现场检验报告列表 (只读 mes_letian_test.t_check_report)
-  fastify.get('/mes/check-reports', async (request, reply) => {
-    try {
-      assertSafeMesDatabase();
-      const query = request.query as { search?: string; page?: string; pageSize?: string };
-      const page = Math.max(1, parseInt(query.page || '1', 10));
-      const pageSize = Math.min(100, Math.max(1, parseInt(query.pageSize || '20', 10)));
-      const offset = (page - 1) * pageSize;
-
-      let sql = `
-        SELECT 
-          r.id, r.bill_no, r.bill_date, r.check_date,
-          r.check_qty, r.qualified_qty, r.unqualified_qty, r.is_qualified, r.remarks,
-          t.bill_no as task_bill_no, t.heat_number, t.steel_mill,
-          m.code as materiel_code, m.name as materiel_name,
-          p.name as procedure_name,
-          u.realname as inspector_name
-        FROM t_check_report r
-        LEFT JOIN t_production_task t ON r.task_id = t.id
-        LEFT JOIN t_materiel m ON r.materiel_id = m.id
-        LEFT JOIN t_procedure p ON r.procedure_id = p.id
-        LEFT JOIN sys_user u ON r.create_user_id = u.id
-      `;
-      const params: any[] = [];
-      if (query.search) {
-        sql += ` WHERE r.bill_no LIKE ? OR t.bill_no LIKE ? OR t.heat_number LIKE ? OR m.name LIKE ?`;
-        const s = `%${query.search}%`;
-        params.push(s, s, s, s);
+  fastify.get(
+    '/mes/check-reports',
+    { schema: { querystring: MesPagedQuerySchema } },
+    async (request, reply) => {
+      try {
+        const query = request.query as z.infer<typeof MesPagedQuerySchema>;
+        const rows = await fetchMesCheckReports({
+          ...(query.search !== undefined ? { search: query.search } : {}),
+          page: query.page,
+          pageSize: query.pageSize,
+        });
+        return reply.status(200).send({
+          page: query.page,
+          pageSize: query.pageSize,
+          items: rows,
+        });
+      } catch (err) {
+        throw externalServiceError('MES', 500, err instanceof Error ? err.message : '查询MES检验单失败');
       }
-      sql += ` ORDER BY r.create_time DESC LIMIT ? OFFSET ?`;
-      params.push(pageSize, offset);
-
-      const rows = await queryMes<any>(sql, params);
-      return reply.status(200).send({
-        page,
-        pageSize,
-        items: rows,
-      });
-    } catch (err: any) {
-      return reply.status(500).send({
-        error: err?.message || '查询MES检验单失败',
-      });
     }
-  });
+  );
 
   // 查询 MES 工序字典清单 (只读 mes_letian_test.t_procedure)
   fastify.get('/mes/procedures', async (_request, reply) => {
     try {
-      assertSafeMesDatabase();
-      const rows = await queryMes<any>(
-        'SELECT id, code, name, remarks FROM t_procedure ORDER BY code ASC'
-      );
+      const rows = await fetchMesProcedures();
       return reply.status(200).send({
         items: rows,
       });
-    } catch (err: any) {
-      return reply.status(500).send({
-        error: err?.message || '查询MES工序列表失败',
-      });
+    } catch (err) {
+      throw externalServiceError('MES', 500, err instanceof Error ? err.message : '查询MES工序列表失败');
     }
   });
   // 7. 历史数据同步流水（取自 integration_sync_logs）

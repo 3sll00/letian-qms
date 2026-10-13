@@ -2,11 +2,14 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { RefreshCw, Search, RotateCcw, GitFork, X } from 'lucide-react';
 import { CertificatePrintModal } from '../../../components/certificate/CertificatePrintModal';
 import { DateInput } from '../../../components/common/DateInput';
-import { buildIqcCertificateData } from '../../../lib/certificateDataService';
+import { buildIqcCertificateData, buildManufacturingCertData } from '../../../lib/certificateDataService';
 import { loadCompanyProfile } from '../../../lib/companyProfile';
-import type { QualityCertificateData } from '../../../lib/inspectionTypes';
+import type {
+  CertTemplateKind,
+  ManufacturingCertData,
+  QualityCertificateData,
+} from '../../../lib/inspectionTypes';
 import { api } from '../../../lib/api';
-import { TransferGateBadge } from '../../../components/common/TransferGateBadge';
 import type { TransferStateFields } from '../../../lib/transferGateFormat';
 
 export interface IqcItem {
@@ -27,9 +30,15 @@ export interface IqcItem {
   judgment?: string | null;
   steelGrade?: string;
   furnaceNo?: string;
+  /** 终判备注（inspection_orders.inspection_notes）：质保书「备注 IN REMARK」栏的真实来源 */
+  inspectionNotes?: string;
   date?: string;
   /** 工单实测项（inspection_orders.items）：质量证书「化学成分 / 力学性能 / 尺寸」三段的唯一真实来源 */
   items?: InspectionItemRow[];
+  /** 证书模板（docs/51）：建单前选定的版式；历史单无值即按本模块缺省出证 */
+  certTemplate?: CertTemplateKind;
+  /** 证书专用补充字段袋（cert_fields） */
+  certFields?: Record<string, string>;
   /** 质量负责人签核人姓名（inspection_orders.approver_name，docs/35 §5）：未签核即空 */
   approverName?: string;
   /** 签核时间（inspection_orders.approved_at） */
@@ -76,10 +85,13 @@ interface InspectionOrderRow {
   status?: string;
   overallDecision?: string | null;
   inspectorName?: string | null;
+  inspectionNotes?: string | null;
   steelGrade?: string;
   furnaceHeatNo?: string;
   furnaceNo?: string;
   items?: InspectionItemRow[];
+  certTemplate?: CertTemplateKind;
+  certFields?: Record<string, string> | null;
   approverName?: string | null;
   approvedAt?: string | null;
   /** 「合格后传递」派生字段（docs/48 §4.6，服务端 `withTransferState` 回填）：只读，前端不推导 */
@@ -116,7 +128,9 @@ interface IqcFilters {
   material: string;
   supplier: string;
   status: string;
-  date: string;
+  /** 入库日期范围（YYYY-MM-DD，含起止当日）；'' = 不限 */
+  dateFrom: string;
+  dateTo: string;
 }
 
 /** 供应商下拉项（供应商主数据）：保证「供应商」维度的筛选口径与台账展示口径同源 */
@@ -125,13 +139,27 @@ interface SupplierOption {
   supplierName: string;
 }
 
-const EMPTY_IQC_FILTERS: IqcFilters = {
-  doc: '',
-  material: '',
-  supplier: '全部',
-  status: '全部',
-  date: '',
-};
+/**
+ * 默认筛选条件：入库日期范围 = 本月（月初 ~ 月末），与「默认显示本月」口径一致。
+ * 每次调用都重新计算，跨月长驻页面时「重置」也能回到当月。
+ */
+function defaultIqcFilters(): IqcFilters {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth(); // 0-based
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return {
+    doc: '',
+    material: '',
+    supplier: '全部',
+    status: '全部',
+    dateFrom: `${y}-${pad(m + 1)}-01`,
+    dateTo: `${y}-${pad(m + 1)}-${pad(new Date(y, m + 1, 0).getDate())}`,
+  };
+}
+
+/** 台账展示上限：命中超过 1 万条时只允许浏览前 1 万条（100 页 × 10 条），并提示缩小日期范围 */
+const MAX_DISPLAY_ROWS = 10000;
 
 /**
  * 界面「检验状态」中文口径 -> 后端 inspectionState 派生状态。
@@ -155,7 +183,9 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
   const [material, setMaterial] = useState('');
   const [supplier, setSupplier] = useState('全部');
   const [status, setStatus] = useState('全部');
-  const [date, setDate] = useState('');
+  // 入库日期范围：默认本月（月初 ~ 月末），见 defaultIqcFilters
+  const [dateFrom, setDateFrom] = useState(() => defaultIqcFilters().dateFrom);
+  const [dateTo, setDateTo] = useState(() => defaultIqcFilters().dateTo);
 
   /**
    * 供应商下拉选项：来自供应商主数据 (GET /master-data/suppliers)。
@@ -165,7 +195,7 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
   const [supplierOptions, setSupplierOptions] = useState<SupplierOption[]>([]);
 
   /** 已提交的筛选条件（点「查询」才生效）；loadOrders 只读这一份，保证「界面条件 == 接口条件」 */
-  const [appliedFilters, setAppliedFilters] = useState<IqcFilters>(EMPTY_IQC_FILTERS);
+  const [appliedFilters, setAppliedFilters] = useState<IqcFilters>(defaultIqcFilters);
 
   const [items, setItems] = useState<IqcItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -178,9 +208,11 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
   /** 后端返回的命中总条数（不是当前页条数，也不再是前端二次过滤后的长度） */
   const [rowTotal, setRowTotal] = useState(0);
 
-  // 质保书模态框
+  // 证书模态框（模板由本单 cert_template 决定，docs/51）
   const [printModalOpen, setPrintModalOpen] = useState(false);
+  const [certKind, setCertKind] = useState<CertTemplateKind>('QUALITY');
   const [currentCertData, setCurrentCertData] = useState<QualityCertificateData | undefined>(undefined);
+  const [currentMfgData, setCurrentMfgData] = useState<ManufacturingCertData | undefined>(undefined);
 
   // 批次追溯弹窗
   const [traceBatchItem, setTraceBatchItem] = useState<IqcItem | null>(null);
@@ -194,24 +226,36 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
   const handleOpenCert = (item: IqcItem) => {
     void (async () => {
       const companyProfile = await loadCompanyProfile();
-      const certData = buildIqcCertificateData({
-        // 证书编号读 orderNo：旧实现把单号写进 `id` 键，builder 读不到 -> 证书编号与弹窗标题恒空白
+      // 版式取本单建单时选定的 cert_template（docs/51）；历史单无值按本模块缺省 QUALITY 出证
+      const kind: CertTemplateKind = item.certTemplate ?? 'QUALITY';
+      const shared = {
         orderNo: item.docNo,
+        docNo: item.docNo,
         material: item.materialName,
+        materialName: item.materialName,
         spec: item.spec,
+        specification: item.spec,
         quantity: item.qty,
         supplier: item.supplier,
-        // 炉号只认库中真实列 furnace_heat_batch_no；旧实现 `|| item.batchNo` 回落，等于把批号当炉号打印
         furnaceNo: item.furnaceNo,
         batchNo: item.batchNo,
-        // 签发日期不取入库日期：`inspectDate` 会把入库日期打印成证书签发日期（2023 年的单看起来是 2023 年签发），
-        // 不传即由 certificateDataService.certIssueDate 取「今天」（生成本证书的动作真实发生在今天）
-        // 实测分区只认工单真实实测项；没有 items 即空数组，模板对应分区整体不渲染
         items: item.items,
-        ...(item.approverName !== undefined && item.approverName !== '' ? { approverName: item.approverName } : {}),
+        certFields: item.certFields,
+        // 终判备注：质保书「备注 IN REMARK」只打印检验单填写的真实内容
+        inspectionNotes: item.inspectionNotes,
+        ...(item.approverName !== undefined && item.approverName !== ''
+          ? { approverName: item.approverName }
+          : {}),
         ...(companyProfile !== null ? { companyProfile } : {}),
-      });
-      setCurrentCertData(certData);
+      };
+      if (kind === 'MANUFACTURING') {
+        setCurrentMfgData(buildManufacturingCertData(shared));
+        setCurrentCertData(undefined);
+      } else {
+        setCurrentCertData(buildIqcCertificateData(shared));
+        setCurrentMfgData(undefined);
+      }
+      setCertKind(kind);
       setPrintModalOpen(true);
     })();
   };
@@ -262,9 +306,8 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
         CN_TO_INSPECTION_STATE[appliedFilters.status] !== undefined
           ? { inspectionState: CN_TO_INSPECTION_STATE[appliedFilters.status] }
           : {}),
-        ...(appliedFilters.date !== ''
-          ? { dateFrom: appliedFilters.date, dateTo: appliedFilters.date }
-          : {}),
+        ...(appliedFilters.dateFrom !== '' ? { inboundDateFrom: appliedFilters.dateFrom } : {}),
+        ...(appliedFilters.dateTo !== '' ? { inboundDateTo: appliedFilters.dateTo } : {}),
       });
 
       // 真实后端信封为 { total, list, statusCounts }；离线 Mock（MSW）为 { items, total }
@@ -306,6 +349,10 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
           steelGrade: o.steelGrade,
           furnaceNo: o.furnaceHeatNo || o.furnaceNo,
           items: Array.isArray(o.items) ? o.items : undefined,
+          // 038 证书模板与字段袋：只取库中真实列，列为空即不输出该键（历史单按缺省版式出证）
+          certTemplate: o.certTemplate,
+          certFields: o.certFields ?? undefined,
+          inspectionNotes: o.inspectionNotes || '',
           approverName: o.approverName !== undefined && o.approverName !== null ? String(o.approverName) : '',
           approvedAt: o.approvedAt !== undefined && o.approvedAt !== null ? String(o.approvedAt) : '',
           // 传递派生字段原样透传，前端不做任何推导（docs/48 §2.1：规则在领域、执法在应用、其余只呈现）
@@ -333,32 +380,45 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
     loadOrders();
   }, [loadOrders]);
 
-  // 不再做前端二次过滤：单号 / 物料 / 供应商 / 检验状态 / 入库日期 已全部下沉到后端
+  // 不再做前端二次过滤：单号 / 物料 / 供应商 / 检验状态 / 入库日期范围 已全部下沉到后端
   // （见 loadOrders），服务端按 page + pageSize 分页返回，这里直接使用当前页数据；
   // 页脚条数取后端命中总数 rowTotal，而不是"前端过滤后的本地数组长度"。
   const pagedRows = items;
 
+  // 展示上限：命中超过 1 万条时只允许浏览前 1 万条（100 页 × 10 条/页），
+  // 计数显示「10,000+」并提示缩小日期范围——避免无界翻页拖垮后端。
+  const overCap = rowTotal > MAX_DISPLAY_ROWS;
+  const displayTotal = Math.min(rowTotal, MAX_DISPLAY_ROWS);
+  const maxPage = Math.max(1, Math.ceil(displayTotal / pageSize));
+
   /** 查询：把界面上的条件提交为 appliedFilters，并回到第 1 页 */
   const handleSearch = () => {
+    const from = dateFrom.trim();
+    const to = dateTo.trim();
+    // 起止选反时自动对调，避免「选反了查空」的困惑
+    const [safeFrom, safeTo] = from !== '' && to !== '' && from > to ? [to, from] : [from, to];
     setPage(1);
     setAppliedFilters({
       doc: doc.trim(),
       material: material.trim(),
       supplier,
       status,
-      date,
+      dateFrom: safeFrom,
+      dateTo: safeTo,
     });
   };
 
-  /** 重置：清空界面条件并同步清空已提交条件 */
+  /** 重置：清空界面条件并恢复默认筛选（入库日期回到本月） */
   const handleReset = () => {
+    const defaults = defaultIqcFilters();
     setDoc('');
     setMaterial('');
     setSupplier('全部');
     setStatus('全部');
-    setDate('');
+    setDateFrom(defaults.dateFrom);
+    setDateTo(defaults.dateTo);
     setPage(1);
-    setAppliedFilters(EMPTY_IQC_FILTERS);
+    setAppliedFilters(defaults);
   };
 
   const allSelected = pagedRows.length > 0 && pagedRows.every((r) => selectedIds.includes(r.id));
@@ -459,19 +519,36 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
 
           <div>
             <label className="block text-xs font-medium text-slate-500 mb-1">入库日期</label>
-            <DateInput
-              wrapClassName="w-full"
-              placeholder="选择入库日期"
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
-              className="px-3 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500"
-            />
+            <div className="flex items-center gap-1">
+              <DateInput
+                wrapClassName="flex-1 min-w-0"
+                placeholder="开始日期"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                className="px-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500"
+              />
+              <span className="text-slate-400 text-xs shrink-0">~</span>
+              <DateInput
+                wrapClassName="flex-1 min-w-0"
+                placeholder="结束日期"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                className="px-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-none focus:border-blue-500"
+              />
+            </div>
           </div>
         </div>
 
         <div className="flex justify-between items-center mt-3 pt-3 border-t border-slate-100">
           <div className="text-xs text-slate-500">
-            共查询到 <span className="font-semibold text-slate-700">{rowTotal}</span> 条来料检验记录
+            共查询到{' '}
+            <span className="font-semibold text-slate-700">
+              {overCap ? '10,000+' : rowTotal}
+            </span>{' '}
+            条来料检验记录
+            {overCap && (
+              <span className="ml-2 text-amber-600">（展示前 {MAX_DISPLAY_ROWS} 条，请缩小日期范围）</span>
+            )}
             {selectedIds.length > 0 && (
               <span className="ml-2 text-blue-600 font-medium">已选择 {selectedIds.length} 项</span>
             )}
@@ -529,7 +606,6 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
                 <th className="py-3 px-4 font-normal">供应商</th>
                 <th className="py-3 px-4 font-normal">批次号</th>
                 <th className="py-3 px-4 font-normal text-center">检验状态</th>
-                <th className="py-3 px-4 font-normal">传递</th>
                 <th className="py-3 px-4 font-normal">检验人</th>
                 <th className="py-3 px-4 font-normal text-right pr-6">操作</th>
               </tr>
@@ -537,7 +613,7 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
             <tbody className="divide-y divide-slate-100">
               {pagedRows.length === 0 && (
                 <tr>
-                  <td colSpan={14} className="py-10 text-center text-slate-400">
+                  <td colSpan={13} className="py-10 text-center text-slate-400">
                     {loading ? '数据加载中…' : '没有符合条件的来料检验记录'}
                   </td>
                 </tr>
@@ -599,15 +675,11 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
                   <td className="py-3 px-4 text-center">
                     {renderStatusBadge(item.status)}
                   </td>
-                  {/* 11. 传递（docs/48 §4.6）：本环节的上游是否已放行；文案与色板只翻译服务端判定码 */}
-                  <td className="py-3 px-4">
-                    <TransferGateBadge state={item} />
-                  </td>
-                  {/* 12. 检验人 */}
+                  {/* 11. 检验人 */}
                   <td className="py-3 px-4 text-slate-600">
                     {item.inspectorName}
                   </td>
-                  {/* 13. 操作 */}
+                  {/* 12. 操作 */}
                   <td className="py-3 px-4 text-right pr-6">
                     <div className="flex items-center justify-end gap-3 text-xs">
                       {item.status === '待检验' && (
@@ -661,7 +733,9 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
           <div>
             {rowTotal === 0
               ? '共 0 条'
-              : `显示第 ${(page - 1) * pageSize + 1} 至 ${Math.min(page * pageSize, rowTotal)} 条，共 ${rowTotal} 条`}
+              : `显示第 ${(page - 1) * pageSize + 1} 至 ${Math.min(page * pageSize, displayTotal)} 条，共 ${
+                  overCap ? `${MAX_DISPLAY_ROWS}+` : rowTotal
+                } 条`}
           </div>
           <div className="flex gap-1 items-center">
             <button
@@ -672,11 +746,11 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
               &lt;
             </button>
             <span className="px-2.5 py-1 bg-blue-600 text-white rounded font-medium">
-              {page} / {Math.max(1, Math.ceil(rowTotal / pageSize))}
+              {page} / {maxPage}
             </span>
             <button
               className="px-2 py-1 border border-slate-200 rounded disabled:text-slate-300 enabled:hover:bg-slate-50"
-              disabled={page >= Math.max(1, Math.ceil(rowTotal / pageSize))}
+              disabled={page >= maxPage}
               onClick={() => setPage((p) => Math.max(1, p + 1))}
             >
               &gt;
@@ -797,12 +871,13 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
         </div>
       )}
 
-      {/* 质保书导出与打印模态框 */}
+      {/* 证书导出与打印模态框（版式按本单 cert_template，docs/51） */}
       <CertificatePrintModal
         isOpen={printModalOpen}
         onClose={() => setPrintModalOpen(false)}
-        type="quality"
+        type={certKind === 'MANUFACTURING' ? 'manufacturing' : 'quality'}
         qualityData={currentCertData}
+        manufacturingData={currentMfgData}
       />
     </div>
   );

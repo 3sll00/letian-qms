@@ -664,14 +664,14 @@ export interface SeedPlan {
 export const seedCompanyProfile: CompanyProfileInsert[] = [
   {
     profileId: true,
-    legalName: '宁波乐天紧固件制造有限公司',
-    legalNameEn: 'NINGBO LETIAN FASTENERS MANUFACTURING CO., LTD.',
+    legalName: '江阴乐天紧固件制造有限公司',
+    legalNameEn: 'JIANGYIN LETIAN FASTENERS MANUFACTURING CO., LTD.',
     shortName: null,
     address: null,
     originPlace: null,
     phone: null,
     email: null,
-    qualityStamp: '宁波乐天质检',
+    qualityStamp: '江阴乐天质检',
     updatedBy: 'seed',
   },
 ];
@@ -748,10 +748,10 @@ export const seedPlans: SeedPlan[] = [
         ],
       },
       {
-        // 草案版本：用于演示 DRAFT -> ACTIVE 的版本切换
+        // 升级版本：随主版本一并启用（方案不再有「草稿 → 审批」链路，所有版本保存即启用）
         id: '21000000-0000-4000-8000-000000000002',
         versionNo: 'v2.5',
-        status: 'DRAFT',
+        status: 'ACTIVE',
         createdBy: EMPLOYEE_IDS.zhangQiang,
         items: [
           {
@@ -1793,12 +1793,14 @@ export const seedOrders: SeedOrderSpec[] = [
     inspectorId: EMPLOYEE_IDS.chenJing,
     totalQty: 5000,
     sampleQty: 50,
-    status: 'PENDING',
-    judgment: null,
+    // 该行是 MRB-20231013-03 的来源单：MRB 只可能由**终判不合格**的单据建单（docs/43），
+    // 其「不合格描述」写的也正是本行的检验发现（盘条表面划伤）—— 故必须是已终判的来料不合格单。
+    status: 'FAILED',
+    judgment: 'FAILED',
     isMandatoryGate: false,
-    inspectionNotes: '待检验：供应商新批次到货',
+    inspectionNotes: '来料盘条表面存在划伤，判不合格并转 MRB 评审',
     snapshotAt: '2023-10-13T08:00:00.000Z',
-    itemKind: 'PENDING',
+    itemKind: 'HAS_FAILED',
   },
   {
     id: '30000000-0000-4000-8000-000000000009',
@@ -1894,12 +1896,15 @@ export const seedOrders: SeedOrderSpec[] = [
     inspectorId: EMPLOYEE_IDS.zhouHaiBo,
     totalQty: 15000,
     sampleQty: 20,
-    status: 'PENDING',
-    judgment: null,
+    // 该行是 MRB-20231013-01（REJECTED + 供应商索赔）的来源单：MRB 只可能由**终判不合格**的单据建单
+    // （docs/43），且该 MRB 的「不合格描述」写的就是本行检验发现的脱碳层超标 —— 故此处必须是已终判的
+    // 委外不合格单，不能停在「待检验」（否则 MRB 的「不合格数量」没有任何口径可依）。
+    status: 'FAILED',
+    judgment: 'FAILED',
     isMandatoryGate: true,
-    inspectionNotes: '委外热处理回厂，待检验',
+    inspectionNotes: '委外热处理回厂，表面脱碳层超标判不合格，转 MRB 评审',
     snapshotAt: '2023-10-13T12:00:00.000Z',
-    itemKind: 'PENDING',
+    itemKind: 'HAS_FAILED',
   },
   {
     // 终判不合格但已归档：MRB-20231013-02（DISPOSED + CONCESSION）引用它，放行关卡可通过
@@ -2282,7 +2287,16 @@ export const seedReviewFlows: ReviewFlow[] = [
 // 7. MRB 评审单（覆盖 4 个状态；source_order_no 必须命中已播种工单号）
 // ============================================================================
 
-export const seedMrbReviews: MRBReview[] = [
+/**
+ * MRB 评审单种子。
+ *
+ * `defectQty`（不合格数量）**刻意不在此手写**：其唯一口径是「源检验单 `fail_qty`」（docs/21 §4.1），
+ * 与运行时 `trigger-mrb-review`（`cmd.defectQty ?? order.failQty`）同源，由 runner §2.7 按来源检验单派生。
+ * 手写即漂移 —— 此前手写的 15000 / 3000 / 10000 / 800 / 5000 / 1200 与各自源单的
+ * `fail_qty`（4 / 4 / 10 / 3 / 25 / 50）**全部不等**，用户即在 MRB-20231013-02 上实测到
+ * 「不合格数量 5000」与源单 OQC-SH-20231013-0002（抽样 200 / 不合格 25）对不上。
+ */
+export const seedMrbReviews: Omit<MRBReview, 'defectQty'>[] = [
   {
     // DISPOSED + CONCESSION：引用 FAILED 工单 INS-20231011-0001
     id: '40000000-0000-4000-8000-000000000001',
@@ -2294,7 +2308,6 @@ export const seedMrbReviews: MRBReview[] = [
     materialCode: 'MAT-35CRMO-08',
     materialName: '35CrMo 合金圆钢 Φ8.0mm',
     defectDescription: '表面存在沿轧制方向裂纹，深度达 0.35mm，存在断裂风险',
-    defectQty: 15000,
     status: 'DISPOSED',
     disposition: 'CONCESSION',
     dispositionNotes: '经工程评估降级用于非承载件，客户已签署特采让步接收协议',
@@ -2330,7 +2343,6 @@ export const seedMrbReviews: MRBReview[] = [
     materialCode: 'MAT-SCR-M6-25',
     materialName: '高强度螺柱 M6*25 (冷镦毛坯)',
     defectDescription: '切断毛刺高度 0.18mm（允许值 ≤0.05mm），下料长度 25.42mm 超差',
-    defectQty: 3000,
     status: 'UNDER_REVIEW',
     approvers: [
       {
@@ -2363,7 +2375,6 @@ export const seedMrbReviews: MRBReview[] = [
     materialCode: 'MAT-BLT-109-M10',
     materialName: '10.9级六角头螺栓 M10*45 (成品)',
     defectDescription: '螺栓螺纹中径偏大 0.042mm，可能影响装配拧入扭矩',
-    defectQty: 10000,
     status: 'PENDING_REVIEW',
     approvers: [
       {
@@ -2396,7 +2407,6 @@ export const seedMrbReviews: MRBReview[] = [
     materialCode: 'MAT-35CRMO-08',
     materialName: '35CrMo 合金圆钢 Φ8.0mm',
     defectDescription: '委外热处理后表面脱碳层深度 0.25mm，超出 0.10mm 上限',
-    defectQty: 800,
     status: 'REJECTED',
     dispositionNotes: '供方拒绝承担返工费用，评审被驳回并转供应商质量索赔流程',
     approvers: [
@@ -2431,7 +2441,6 @@ export const seedMrbReviews: MRBReview[] = [
     materialCode: 'MAT-BLT-109-M10',
     materialName: '10.9级六角头螺栓 M10*45 (成品)',
     defectDescription: '出货抽检发现螺纹通规不止，通规通过率 99.0%',
-    defectQty: 5000,
     status: 'DISPOSED',
     disposition: 'CONCESSION',
     dispositionNotes: '客户现场试装合格并签署让步接收协议，质保部会签放行',
@@ -2467,7 +2476,6 @@ export const seedMrbReviews: MRBReview[] = [
     materialCode: 'MAT-304SS-05',
     materialName: '不锈钢线材 Φ5.0mm',
     defectDescription: '来料盘条表面存在划伤，深度约 0.15mm，待评审确认是否让步',
-    defectQty: 1200,
     status: 'UNDER_REVIEW',
     approvers: [
       {

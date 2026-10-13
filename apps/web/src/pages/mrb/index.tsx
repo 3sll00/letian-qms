@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   BarChart3,
   CheckCircle2,
@@ -15,6 +15,7 @@ import {
 import type { MRBStatus, MrbReviewRecord } from '@letian/contracts';
 import { api, errorMessage } from '../../lib/api';
 import { StatusBadge } from '../../components/StatusBadge';
+import { DateInput } from '../../components/common/DateInput';
 import { ReviewDispositionDrawer } from './ReviewDispositionDrawer';
 import {
   MRB_DISPOSITION_OPTIONS,
@@ -105,6 +106,40 @@ function buildQuery(
   return query;
 }
 
+/** 筛选栏是否填了任一「非状态」条件（页签本身就是状态条件，不计入） */
+function hasActiveFilters(filters: MrbFilters): boolean {
+  return (
+    filters.mrbNo.trim() !== '' ||
+    filters.sourceOrderNo.trim() !== '' ||
+    filters.disposition !== '' ||
+    filters.dateFrom !== '' ||
+    filters.dateTo !== ''
+  );
+}
+
+/**
+ * 在同一次筛选条件下，按页签顺序找出第一个真正有数据的页签（都没有则返回 null）。
+ *
+ * 背景（docs/19 §7）：页签与筛选栏「评审状态」下拉同源，默认停在「待评审」。
+ * 只填单号 / 来源单 / 日期等条件时，命中的单据可能落在别的状态上；不做这一步的话，
+ * 用户看到的是「当前条件下暂无 MRB 处置记录」，只能逐个页签试探，误判成「查不到」。
+ * 命中数一律取接口 `total`（`pageSize=1`，只要计数不要数据），不由当页数据推算。
+ */
+async function findTabWithRecords(
+  filters: MrbFilters,
+  currentTab: MrbTabKey
+): Promise<MrbTabKey | null> {
+  const candidates = MRB_TABS.filter((item) => item.key !== 'ALL' && item.key !== currentTab);
+  for (const candidate of candidates) {
+    const res = await api.get<MrbListResponse>(
+      '/mrb/records',
+      buildQuery(candidate.statuses, filters, 1, 1)
+    );
+    if ((res.total ?? 0) > 0) return candidate.key;
+  }
+  return null;
+}
+
 /** 导出报表列定义（与表格十列 + 处置方式一致） */
 const EXPORT_COLUMNS: readonly {
   label: string;
@@ -151,13 +186,25 @@ function downloadCsv(filename: string, content: string): void {
   URL.revokeObjectURL(url);
 }
 
-export function MrbPage() {
+interface MrbPageProps {
+  /**
+   * 跳转「不合格待审核池」工作台入口（v2.6.0 未结模块：挂载至主菜单与 MRB 页面子标签）。
+   * 由 App 注入导航回调；未注入时页头不渲染该入口。
+   */
+  onOpenPendingPool?: () => void;
+}
+
+export function MrbPage({ onOpenPendingPool }: MrbPageProps = {}) {
   // 默认落在「待评审」页签，与 WPS图片(13) 的初始视图一致；
   // 跨状态检索由筛选栏「评审状态 = 全部」完成（同一 tab 状态的两个入口）
   const [tab, setTab] = useState<MrbTabKey>('PENDING_REVIEW');
   const [draftFilters, setDraftFilters] = useState<MrbFilters>(EMPTY_FILTERS);
   const [appliedFilters, setAppliedFilters] = useState<MrbFilters>(EMPTY_FILTERS);
   const [page, setPage] = useState(1);
+  /** 每点一次【查询】自增：筛选值一字未改时也要真的重查一次，同时充当自动跳转的触发标记 */
+  const [searchToken, setSearchToken] = useState(0);
+  /** 已被自动跳转消费掉的 searchToken（StrictMode 下 effect 会连跑两次，用 token 幂等去重） */
+  const autoJumpTokenRef = useRef(0);
 
   const [records, setRecords] = useState<MrbReviewRecord[]>([]);
   const [total, setTotal] = useState(0);
@@ -190,6 +237,22 @@ export function MrbPage() {
         monthlyReviewRate: res.monthlyReviewRate ?? 0,
       });
       setLoadError(null);
+
+      // 本次由【查询】触发、当前页签却查不到数据时，自动跳到同条件下真有数据的页签
+      // （docs/19 §7）。只有点【查询】才跳：手动点页签不跳，否则会与「我就想看这个页签」打架。
+      if (
+        searchToken > 0 &&
+        autoJumpTokenRef.current !== searchToken &&
+        (res.total ?? 0) === 0 &&
+        hasActiveFilters(appliedFilters)
+      ) {
+        autoJumpTokenRef.current = searchToken;
+        const fallback = await findTabWithRecords(appliedFilters, tab);
+        if (fallback !== null) {
+          setTab(fallback);
+          setPage(1);
+        }
+      }
     } catch (err) {
       setLoadError(errorMessage(err));
       setRecords([]);
@@ -197,7 +260,7 @@ export function MrbPage() {
     } finally {
       setLoading(false);
     }
-  }, [tabStatuses, appliedFilters, page]);
+  }, [tabStatuses, appliedFilters, page, tab, searchToken]);
 
   useEffect(() => {
     void loadRecords();
@@ -208,6 +271,9 @@ export function MrbPage() {
   const handleSearch = () => {
     setAppliedFilters(draftFilters);
     setPage(1);
+    // 同一份条件重复点【查询】时上面的两个 setState 都是同值，effect 不会重跑，
+    // 这里用自增 token 兜底，保证每次都真的查一次
+    setSearchToken((token) => token + 1);
   };
 
   const handleReset = () => {
@@ -319,6 +385,17 @@ export function MrbPage() {
           </p>
         </div>
         <div className="flex items-center gap-2.5">
+          {onOpenPendingPool !== undefined && (
+            <button
+              type="button"
+              onClick={onOpenPendingPool}
+              title="进入不合格待审核池工作台（v2.6.0 未结模块）"
+              className="px-3.5 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 shadow-sm flex items-center gap-1.5 transition-colors"
+            >
+              <ClipboardList className="w-3.5 h-3.5 text-amber-600" />
+              <span>待审核池</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={handleExport}
@@ -412,18 +489,20 @@ export function MrbPage() {
           <div className="block">
             <span className="block text-xs font-medium text-slate-600 mb-1.5">日期</span>
             <div className="flex items-center gap-2">
-              <input
-                type="date"
+              <DateInput
+                wrapClassName="flex-1"
+                placeholder="开始日期"
                 value={draftFilters.dateFrom}
                 onChange={(e) => setDraftFilters({ ...draftFilters, dateFrom: e.target.value })}
-                className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-700 focus:outline-none focus:border-blue-500"
+                className="bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-700 focus:outline-none focus:border-blue-500"
               />
               <span className="text-slate-400 text-xs shrink-0">~</span>
-              <input
-                type="date"
+              <DateInput
+                wrapClassName="flex-1"
+                placeholder="结束日期"
                 value={draftFilters.dateTo}
                 onChange={(e) => setDraftFilters({ ...draftFilters, dateTo: e.target.value })}
-                className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-700 focus:outline-none focus:border-blue-500"
+                className="bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-700 focus:outline-none focus:border-blue-500"
               />
             </div>
           </div>

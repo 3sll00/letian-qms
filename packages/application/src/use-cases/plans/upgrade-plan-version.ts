@@ -62,6 +62,8 @@ export class UpgradePlanVersionUseCase {
         materialCode: planDto.materialCode ?? undefined,
         materialCategory,
         inspectionType: planDto.inspectionType,
+        // 039：透传检验类型全集；不透传则 save 侧按 [主类型] 回落，多类型方案被静默坍缩
+        inspectionTypes: planDto.inspectionTypes,
         versions: planDto.versions ? [...planDto.versions] : [],
       });
 

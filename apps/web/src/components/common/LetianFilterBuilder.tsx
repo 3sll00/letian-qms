@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   Filter,
   Search,
@@ -10,7 +10,9 @@ import {
   X,
   Check,
   Sparkles,
+  Loader2,
 } from 'lucide-react';
+import { api, errorMessage } from '../../lib/api';
 
 export interface FilterOption {
   value: string;
@@ -36,10 +38,16 @@ export interface LetianFilterValues {
 }
 
 export interface LetianFilterBuilderProps {
+  /** 物料候选 {code,name}：缺省时组件自行拉取 GET /master-data/inventory（PBAC 过滤后的档案） */
   materials?: Array<{ code: string; name: string }>;
+  /** 供应商候选 {code,name}：缺省时自行拉取 GET /master-data/suppliers */
   suppliers?: Array<{ code: string; name: string }>;
   statuses?: FilterOption[];
   stages?: FilterOption[];
+  /** 「高级组合条件」行的可选字段：由各页面按其真实查询参数收敛（不支持的字段不展示） */
+  conditionFields?: Array<{ value: string; label: string }>;
+  /** 额外控件插槽：渲染在多选下拉与操作按钮之间（日期范围、检验人等页面自有维度） */
+  children?: React.ReactNode;
   initialValues?: Partial<LetianFilterValues>;
   onFilter: (values: LetianFilterValues) => void;
   onReset?: () => void;
@@ -62,11 +70,20 @@ const DEFAULT_STATUSES: FilterOption[] = [
   { value: 'COMPLETED', label: '已完成', color: 'blue' },
 ];
 
+/** 「高级组合条件」默认可选字段：仅为兜底，页面应按其真实查询参数传 conditionFields 收敛 */
+const DEFAULT_CONDITION_FIELDS: Array<{ value: string; label: string }> = [
+  { value: 'batchNo', label: '批次号 (batchNo)' },
+  { value: 'orderNo', label: '检验单号 (orderNo)' },
+  { value: 'inspectorName', label: '检验人 (inspectorName)' },
+];
+
 export const LetianFilterBuilder: React.FC<LetianFilterBuilderProps> = ({
   materials = [],
   suppliers = [],
   statuses = DEFAULT_STATUSES,
   stages = DEFAULT_STAGES,
+  conditionFields = DEFAULT_CONDITION_FIELDS,
+  children,
   initialValues,
   onFilter,
   onReset,
@@ -92,6 +109,67 @@ export const LetianFilterBuilder: React.FC<LetianFilterBuilderProps> = ({
   );
 
   const [openDropdown, setOpenDropdown] = useState<string | null>(null);
+
+  // 物料 / 供应商候选：调用方未提供时自行从主数据接口拉取（真实档案，绝不内置兜底数据）
+  const [fetchedMaterials, setFetchedMaterials] = useState<Array<{ code: string; name: string }>>([]);
+  const [fetchedSuppliers, setFetchedSuppliers] = useState<Array<{ code: string; name: string }>>([]);
+  const [optionsLoading, setOptionsLoading] = useState(false);
+  const [optionsError, setOptionsError] = useState('');
+  const optionsRequestedRef = useRef(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  const effectiveMaterials = materials.length > 0 ? materials : fetchedMaterials;
+  const effectiveSuppliers = suppliers.length > 0 ? suppliers : fetchedSuppliers;
+
+  useEffect(() => {
+    if (materials.length > 0 && suppliers.length > 0) return;
+    if (optionsRequestedRef.current) return;
+    optionsRequestedRef.current = true;
+    setOptionsLoading(true);
+    (async () => {
+      try {
+        const [inventory, supplierList] = await Promise.all([
+          materials.length === 0
+            ? api.get<Array<{ materialCode: string; materialName: string }>>(
+                '/master-data/inventory'
+              )
+            : Promise.resolve(null),
+          suppliers.length === 0
+            ? api.get<Array<{ supplierCode: string; supplierName: string }>>(
+                '/master-data/suppliers'
+              )
+            : Promise.resolve(null),
+        ]);
+        if (inventory !== null) {
+          setFetchedMaterials(
+            inventory.map((m) => ({ code: m.materialCode, name: m.materialName }))
+          );
+        }
+        if (supplierList !== null) {
+          setFetchedSuppliers(
+            supplierList.map((s) => ({ code: s.supplierCode, name: s.supplierName }))
+          );
+        }
+      } catch (err) {
+        setOptionsError(errorMessage(err));
+      } finally {
+        setOptionsLoading(false);
+      }
+    })();
+    // 候选由 props 决定且只在挂载时拉取一次（主数据档案，字典量级小）
+  }, []);
+
+  // 点击组件外部时收起展开中的下拉（此前只有再次点击按钮才能关闭）
+  useEffect(() => {
+    if (openDropdown === null) return;
+    const onDocClick = (event: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
+        setOpenDropdown(null);
+      }
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [openDropdown]);
 
   const toggleSelection = (
     list: string[],
@@ -141,7 +219,12 @@ export const LetianFilterBuilder: React.FC<LetianFilterBuilderProps> = ({
     const newId = `c_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     setConditions((prev) => [
       ...prev,
-      { id: newId, field: 'batchNo', operator: 'contains', value: '' },
+      {
+        id: newId,
+        field: conditionFields[0]?.value ?? 'batchNo',
+        operator: 'contains',
+        value: '',
+      },
     ]);
   };
 
@@ -178,6 +261,7 @@ export const LetianFilterBuilder: React.FC<LetianFilterBuilderProps> = ({
   ]);
   return (
     <div
+      ref={rootRef}
       className={`bg-white border border-slate-200 rounded-xl shadow-sm transition-all duration-200 ${className}`}
     >
       {/* 顶部主筛选栏 */}
@@ -274,16 +358,17 @@ export const LetianFilterBuilder: React.FC<LetianFilterBuilderProps> = ({
                 <div className="text-[11px] text-slate-400 px-2 py-1 font-semibold">
                   选择物料品类与编码
                 </div>
-                {(materials.length > 0
-                  ? materials
-                  : [
-                      { code: 'MAT-304-BAR', name: '304不锈钢圆钢' },
-                      { code: 'MAT-316L-PIPE', name: '316L无缝高压钢管' },
-                      { code: 'MAT-45-FORGING', name: '45#锻件毛坯' },
-                      { code: 'MAT-Q235B-PLATE', name: 'Q235B特厚钢板' },
-                      { code: 'MAT-40CR-ROD', name: '40Cr调质活塞杆' },
-                    ]
-                ).map((mat) => {
+                {optionsError !== '' && (
+                  <div className="px-2 py-1 text-rose-500">档案加载失败: {optionsError}</div>
+                )}
+                {optionsLoading && effectiveMaterials.length === 0 ? (
+                  <div className="px-2 py-2 text-slate-400 flex items-center gap-1.5">
+                    <Loader2 className="w-3 h-3 animate-spin" /> 加载物料档案…
+                  </div>
+                ) : effectiveMaterials.length === 0 ? (
+                  <div className="px-2 py-2 text-slate-400">暂无物料档案</div>
+                ) : (
+                  effectiveMaterials.map((mat) => {
                   const checked = selectedMaterials.includes(mat.code);
                   return (
                     <div
@@ -306,7 +391,8 @@ export const LetianFilterBuilder: React.FC<LetianFilterBuilderProps> = ({
                       {checked && <Check className="w-3.5 h-3.5 text-blue-600 shrink-0" />}
                     </div>
                   );
-                })}
+                  })
+                )}
               </div>
             )}
           </div>
@@ -337,15 +423,17 @@ export const LetianFilterBuilder: React.FC<LetianFilterBuilderProps> = ({
                 <div className="text-[11px] text-slate-400 px-2 py-1 font-semibold">
                   选择供应商
                 </div>
-                {(suppliers.length > 0
-                  ? suppliers
-                  : [
-                      { code: 'SUP-BAOGANG', name: '宝武特钢股份有限公司' },
-                      { code: 'SUP-TAIGANG', name: '太钢不锈钢材料总厂' },
-                      { code: 'SUP-XINGCHENG', name: '中信特钢兴澄特钢' },
-                      { code: 'SUP-YONGXING', name: '永兴材料科技股份' },
-                    ]
-                ).map((sup) => {
+                {optionsError !== '' && (
+                  <div className="px-2 py-1 text-rose-500">档案加载失败: {optionsError}</div>
+                )}
+                {optionsLoading && effectiveSuppliers.length === 0 ? (
+                  <div className="px-2 py-2 text-slate-400 flex items-center gap-1.5">
+                    <Loader2 className="w-3 h-3 animate-spin" /> 加载供应商档案…
+                  </div>
+                ) : effectiveSuppliers.length === 0 ? (
+                  <div className="px-2 py-2 text-slate-400">暂无供应商档案</div>
+                ) : (
+                  effectiveSuppliers.map((sup) => {
                   const checked = selectedSuppliers.includes(sup.code);
                   return (
                     <div
@@ -368,7 +456,8 @@ export const LetianFilterBuilder: React.FC<LetianFilterBuilderProps> = ({
                       {checked && <Check className="w-3.5 h-3.5 text-blue-600 shrink-0" />}
                     </div>
                   );
-                })}
+                  })
+                )}
               </div>
             )}
           </div>
@@ -423,6 +512,9 @@ export const LetianFilterBuilder: React.FC<LetianFilterBuilderProps> = ({
               </div>
             )}
           </div>
+
+          {/* 页面自有维度插槽（日期范围 / 检验人等，随「应用筛选」一同生效） */}
+          {children}
         </div>
 
         {/* 右侧操作按钮组 */}
@@ -502,11 +594,11 @@ export const LetianFilterBuilder: React.FC<LetianFilterBuilderProps> = ({
                     onChange={(e) => updateCondition(cond.id, 'field', e.target.value)}
                     className="border border-slate-200 rounded px-2.5 py-1 text-xs bg-white text-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500"
                   >
-                    <option value="batchNo">炉批号 (batchNo)</option>
-                    <option value="failReason">不合格原因 (failReason)</option>
-                    <option value="defectItemCode">超差项编码 (itemCode)</option>
-                    <option value="inspectorName">质检员 (inspector)</option>
-                    <option value="defectQty">不合格数量 (defectQty)</option>
+                    {conditionFields.map((f) => (
+                      <option key={f.value} value={f.value}>
+                        {f.label}
+                      </option>
+                    ))}
                   </select>
 
                   <select
@@ -580,7 +672,7 @@ export const LetianFilterBuilder: React.FC<LetianFilterBuilderProps> = ({
               key={`tag_mat_${mCode}`}
               className="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-800 rounded-md text-[11px]"
             >
-              物料: {materials.find((m) => m.code === mCode)?.name || mCode}
+              物料: {effectiveMaterials.find((m) => m.code === mCode)?.name || mCode}
               <X
                 className="w-3 h-3 cursor-pointer hover:text-indigo-950"
                 onClick={() =>
@@ -599,7 +691,7 @@ export const LetianFilterBuilder: React.FC<LetianFilterBuilderProps> = ({
               key={`tag_sup_${supCode}`}
               className="inline-flex items-center gap-1 px-2 py-0.5 bg-violet-100 text-violet-800 rounded-md text-[11px]"
             >
-              供应商: {suppliers.find((s) => s.code === supCode)?.name || supCode}
+              供应商: {effectiveSuppliers.find((s) => s.code === supCode)?.name || supCode}
               <X
                 className="w-3 h-3 cursor-pointer hover:text-violet-950"
                 onClick={() =>
@@ -639,7 +731,8 @@ export const LetianFilterBuilder: React.FC<LetianFilterBuilderProps> = ({
                 key={`tag_cond_${c.id}`}
                 className="inline-flex items-center gap-1 px-2 py-0.5 bg-amber-100 text-amber-900 rounded-md text-[11px]"
               >
-                {c.field} {c.operator} &quot;{c.value}&quot;
+                {conditionFields.find((f) => f.value === c.field)?.label ?? c.field} {c.operator}{' '}
+                &quot;{c.value}&quot;
                 <X
                   className="w-3 h-3 cursor-pointer hover:text-amber-950"
                   onClick={() => removeCondition(c.id)}

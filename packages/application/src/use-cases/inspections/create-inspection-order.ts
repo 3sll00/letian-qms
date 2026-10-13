@@ -75,6 +75,14 @@ export interface CreateInspectionOrderCommand extends Partial<CreateInspectionOr
   mandatoryGate?: boolean;
   planId?: string;
   planVersionNo?: string;
+  historicalResult?: {
+    source: 'MES';
+    occurredAt: Date;
+    passQty: number;
+    failQty: number;
+    judgment: 'PASSED' | 'FAILED';
+    notes: string;
+  };
   /** 007 过程检验工序追溯字段（见 IpqcProcessFields） */
   ipqcProcess?: IpqcProcessFields;
   operatorId: string;
@@ -100,6 +108,9 @@ export class CreateInspectionOrderUseCase {
     cmd: CreateInspectionOrderCommand,
     securityCtx?: ISecurityContext
   ): Promise<InspectionOrderDTO> {
+    if (cmd.historicalResult && (cmd.operatorId !== 'SYS-MES-SYNC' || securityCtx)) {
+      throw new ApplicationError(ErrorCode.VALIDATION_FAILED, '历史 MES 实绩仅允许系统同步服务导入', 403);
+    }
     return await this.uow.execute(async (ctx) => {
       // 1. 排他锁保护同一批次的检验单创建
       await ctx.locks.acquireXactLock(`LOCK_ORDER_${cmd.batchNo}`);
@@ -156,7 +167,7 @@ export class CreateInspectionOrderUseCase {
       });
       let isOverridden = false;
       let resolvedTicketId: string | null = null;
-      if (!transferDecision.allowed) {
+      if (!transferDecision.allowed && !cmd.historicalResult) {
         if (cmd.transferOverride) {
           if (!cmd.transferOverride.reason || cmd.transferOverride.reason.trim().length < 5) {
             throw new ApplicationError(
@@ -232,6 +243,7 @@ export class CreateInspectionOrderUseCase {
       // 3. 寻找适用的质检方案并获取激活版本
       let planVersionToBind: InspectionPlanVersion | undefined = undefined;
       let planCodeBound: string | undefined = undefined;
+      let planNameBound: string | undefined = undefined;
       // 方案来源：显式指定 (EXPLICIT) 优先；未指定时按「物料编码 + 检验类型」自动匹配。
       // 自动匹配分两级：物料专属方案 (AUTO_MATERIAL) 与存货分类通用方案兜底 (AUTO_MATERIAL_CATEGORY)。
       // 两条路径共用 inspectionPlans 仓储，匹配规则唯一；匹配不到一律明确报错，绝不猜测方案。
@@ -247,6 +259,7 @@ export class CreateInspectionOrderUseCase {
           );
         }
         planCodeBound = plan.planCode;
+        planNameBound = plan.planName;
         if (cmd.planVersionNo) {
           planVersionToBind = plan.versions?.find((v) => v.versionNo === cmd.planVersionNo);
           if (!planVersionToBind) {
@@ -277,6 +290,7 @@ export class CreateInspectionOrderUseCase {
           material?.categoryCode
         );
         planCodeBound = applicablePlan?.planCode;
+        planNameBound = applicablePlan?.planName;
         planVersionToBind = applicablePlan?.versions?.find((v) => v.status === 'ACTIVE');
         // 命中分类通用方案时如实记录兜底来源，便于追溯"为什么这一单用了这份方案"
         if (applicablePlan && applicablePlan.materialCode !== cmd.materialCode) {
@@ -380,7 +394,12 @@ export class CreateInspectionOrderUseCase {
         completedAt: cmd.ipqcProcess?.completedAt ?? cmd.completedAt,
         // 报检批量（物理列 total_qty，台账「数量」列）：契约显式传入才落库，缺省保持 undefined
         totalQty: cmd.totalQty,
+        // 038 证书模板与证书专用字段（docs/51）：操作员「填写检验内容前」选定后随建单一并落库；
+        // 缺省保持 undefined，历史单不受影响
+        certTemplate: cmd.certTemplate,
+        certFields: cmd.certFields,
         isMandatoryGate: cmd.mandatoryGate ?? true,
+        ...(cmd.historicalResult ? { createdAt: cmd.historicalResult.occurredAt.toISOString() } : {}),
       });
 
       // 5. 绑定方案快照深拷贝 (聚合根深拷贝防篡改)
@@ -394,13 +413,28 @@ export class CreateInspectionOrderUseCase {
           400
         );
       }
+      if (!planCodeBound || !planNameBound) {
+        throw new ApplicationError(ErrorCode.INSPECTION_PLAN_NOT_FOUND, '已命中方案缺少编码或名称', 400);
+      }
       order.bindPlanSnapshot(planVersionToBind, {
         planId: boundPlanId,
-        planCode: planCodeBound ?? 'UNKNOWN',
+        planCode: planCodeBound,
+        planName: planNameBound,
       });
 
       // 6. 持久化聚合根
       await ctx.inspectionOrders.save(order.toDTO());
+      if (cmd.historicalResult) {
+        const { occurredAt, passQty, failQty, judgment, notes } = cmd.historicalResult;
+        await ctx.inspectionOrders.updateStatsAndVerdict(order.getId(), {
+          passQty,
+          failQty,
+          judgment,
+          completedAt: occurredAt,
+          inspectionNotes: notes,
+        });
+        await ctx.inspectionOrders.updateStatus(order.getId(), judgment);
+      }
 
       // 6.1 建单传递留痕（docs/48 §4.1 / 迁移 035）：把**第 1 步那次门禁判定**原样落库。
       //
@@ -410,7 +444,7 @@ export class CreateInspectionOrderUseCase {
       //
       //     三条纪律：
       //       ① **只作留痕，不作判据**：留痕一旦被读成判据，就会出现「上游已撤销放行、下游仍按旧留痕放行」；
-      //       ② 取值直接取 `transferDecision`（第 1 步的产物），**绝不重新判定** —— 重算等于第二份口径；
+      //       ② 实时建单取 `transferDecision`，MES 历史实绩标记 HISTORICAL_IMPORT（不冒充当年的放行判定）；
       //       ③ 与建单**同一事务**：留痕失败即建单失败，不会留下「单在、留痕丢」的静默状态。
       await ctx.inspectionOrders.recordTransferTrace(order.getId(), {
         chainKey: transferDecision.chainKey,
@@ -418,7 +452,11 @@ export class CreateInspectionOrderUseCase {
         ...(transferDecision.predecessorOrderNo !== undefined
           ? { upstreamOrderNo: transferDecision.predecessorOrderNo }
           : {}),
-        upstreamGateCode: isOverridden ? 'UPSTREAM_OVERRIDDEN' : transferDecision.code,
+        upstreamGateCode: cmd.historicalResult
+          ? 'HISTORICAL_IMPORT'
+          : isOverridden
+            ? 'UPSTREAM_OVERRIDDEN'
+            : transferDecision.code,
       });
 
       if (isOverridden && cmd.transferOverride) {
@@ -511,10 +549,16 @@ export class CreateInspectionOrderUseCase {
           inspectionType: order.getInspectionType(),
           planMatchSource,
           itemsCount: order.getItems().length,
+          ...(cmd.historicalResult ? { historicalSource: cmd.historicalResult.source } : {}),
         },
         createdAt: new Date().toISOString(),
       });
 
+      if (cmd.historicalResult) {
+        const persisted = await ctx.inspectionOrders.findById(order.getId());
+        if (!persisted) throw new Error(`MES_IMPORT_ORDER_NOT_FOUND: ${order.getId()}`);
+        return persisted;
+      }
       return order.toDTO();
     });
   }

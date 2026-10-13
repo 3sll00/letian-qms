@@ -36,18 +36,16 @@ export class CustomerSignOffUseCase {
       if (securityCtx) {
         // 从物料主数据解析真实分类；查不到时 UNKNOWN 不命中任何白名单（fail-closed）
         const material = await ctx.materials.getMaterialByCode(review.materialCode);
+        const sourceOrder = await ctx.inspectionOrders.findByOrderNo(review.sourceOrderNo);
         securityCtx.assertAccess({
           targetCategory: material?.categoryCode ?? 'UNKNOWN',
           targetMaterialCode: review.materialCode,
+          ...(sourceOrder?.supplierCode !== undefined ? { targetSupplierCode: sourceOrder.supplierCode } : {}),
         });
       }
 
-      if (review.disposition !== 'CONCESSION') {
-        throw new ApplicationError(
-          'INVALID_DISPOSITION_FOR_SIGNOFF',
-          `只有特采/让步接收 (CONCESSION) 处置才需要客户签核，当前处置方式为 [${review.disposition}]`,
-          400
-        );
+      if (cmd.agreed && !cmd.signOffDocumentUrl?.trim()) {
+        throw new ApplicationError('CONCESSION_DOCUMENT_REQUIRED', '客户同意特采必须提交书面签核凭证', 400);
       }
 
       if (review.status === 'DISPOSED' || review.status === 'REJECTED') {

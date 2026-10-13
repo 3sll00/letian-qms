@@ -4,7 +4,7 @@ import type {
 import { InspectionOrder } from '@letian/domain';
 import { ApplicationError } from '../../errors/application-error.js';
 import type { ISecurityContext } from '../../security/security-context.js';
-import type { IUnitOfWork } from '../../tx/unit-of-work.js';
+import type { IUnitOfWork, IUnitOfWorkContext } from '../../tx/unit-of-work.js';
 
 export interface CreateReinspectionCommand {
   parentOrderId: string;
@@ -28,7 +28,14 @@ export class CreateReinspectionUseCase {
     cmd: CreateReinspectionCommand,
     securityCtx?: ISecurityContext
   ): Promise<InspectionOrderDTO> {
-    return await this.uow.execute(async (ctx) => {
+    return await this.uow.execute((ctx) => this.runInTransaction(ctx, cmd, securityCtx));
+  }
+
+  public async runInTransaction(
+    ctx: IUnitOfWorkContext,
+    cmd: CreateReinspectionCommand,
+    securityCtx?: ISecurityContext
+  ): Promise<InspectionOrderDTO> {
       // 1. 获取原工单
       const targetOrderId = cmd.parentOrderId || cmd.originalOrderId;
       if (!targetOrderId) {
@@ -206,6 +213,5 @@ export class CreateReinspectionUseCase {
       });
 
       return reinspectionOrder.toDTO();
-    });
   }
 }

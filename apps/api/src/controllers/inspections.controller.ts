@@ -9,12 +9,15 @@ import {
   InspectionStatusEnum,
   ApproveInspectionOrderRequestSchema,
   FinalizeInspectionStatusRequestSchema,
+  FurnaceHeatTraceQuerySchema,
   FurnaceHeatTraceResponseSchema,
   UpdateInspectionHeaderRequestSchema,
   TransferPermitBatchRequestSchema,
   TransferPermitBatchResponseSchema,
   CreateTransferOverrideTicketRequestSchema,
   ReviewTransferOverrideTicketRequestSchema,
+  ListTransferOverrideTicketsQuerySchema,
+  TransferOverrideTicketParamsSchema,
   BatchFreezeTerminatedChainsRequestSchema,
   BatchFreezeTerminatedChainsResponseSchema,
   type InspectionOrder,
@@ -56,6 +59,38 @@ function commaList<T extends z.ZodTypeAny>(item: T) {
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
+/**
+ * 宽松日期字符串 schema：接受 `YYYY-MM-DD` / `YYYY/MM/DD` / `YYYY.MM.DD`
+ * （分隔符 `-` `/` `.` 均可），一律归一化为 `YYYY-MM-DD` 再向下传递，
+ * 避免接口因分隔符差异被拒（例如脚本/外部系统误用斜杠、点号）。
+ * 同时校验真实日历日期，拒绝 `2026-13-01`、`2026-02-30` 之类，
+ * 避免非法日期以字符串形式落入 SQL 比较产生静默错误结果。
+ */
+const isoDateString = (label: string) =>
+  z
+    .string()
+    .transform((s) => s.trim().replace(/[./]/g, '-'))
+    .pipe(
+      z.string().superRefine((val, ctx) => {
+        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(val);
+        if (!m) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `${label} 必须是 YYYY-MM-DD 格式（分隔符支持 - / .）`,
+          });
+          return;
+        }
+        const y = Number(m[1]);
+        const mo = Number(m[2]);
+        const d = Number(m[3]);
+        const dt = new Date(y, mo - 1, d);
+        if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label} 不是合法日期` });
+        }
+      })
+    )
+    .optional();
+
 const InspectionQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
@@ -73,13 +108,30 @@ const InspectionQuerySchema = z.object({
    * 因此由仓储层统一翻译，保证筛选结果与台账列显示一致（见 docs 16 §5.1）。
    */
   inspectionState: z.enum(['PENDING', 'INSPECTING', 'PASSED', 'FAILED']).optional(),
+  /**
+   * 「检验状态」派生列语义的多选版本（逗号分隔）：检验进度明细页的多状态组合筛选。
+   * 仓储层把每个取值翻译成对应的 status + judgment 谓词后 OR 叠加（多值间为 OR）。
+   */
+  inspectionStates: commaList(z.enum(['PENDING', 'INSPECTING', 'PASSED', 'FAILED'])).optional(),
   /** 「检验人」多选：逗号分隔的员工 UUID，后端以 inspector_id IN (...) 查询，多值间为 OR */
   inspectors: commaList(z.string().uuid()).optional(),
   /** 「供应商」多选：逗号分隔的供应商编码，后端以 supplier_code IN (...) 查询，多值间为 OR */
   supplierCodes: commaList(z.string().min(1)).optional(),
+  /** 「物料」多选：逗号分隔的物料编码，后端以 material_code IN (...) 精确匹配，多值间为 OR */
+  materialCodes: commaList(z.string().min(1)).optional(),
   /** 检验日期范围（YYYY-MM-DD，按 createdAt 过滤，含起止当日） */
-  dateFrom: z.string().regex(DATE_PATTERN, 'dateFrom 必须是 YYYY-MM-DD 格式').optional(),
-  dateTo: z.string().regex(DATE_PATTERN, 'dateTo 必须是 YYYY-MM-DD 格式').optional(),
+  dateFrom: isoDateString('dateFrom'),
+  dateTo: isoDateString('dateTo'),
+  /** 入库日期范围（YYYY-MM-DD，按 inbound_date 过滤，含起止当日）。来料检验台账「入库日期」筛选的统一口径 */
+  inboundDateFrom: isoDateString('inboundDateFrom'),
+  inboundDateTo: isoDateString('inboundDateTo'),
+  /**
+   * 回厂日期范围（YYYY-MM-DD，按 return_date 过滤，含起止当日）。
+   * 委外检验台账「回厂日期」筛选的统一口径：委外件关注的业务时点是「回厂」而非建单，
+   * 因此与 dateFrom/To（created_at 建单时间）、inboundDateFrom/To（来料入库日期）三套口径刻意区分。
+   */
+  returnDateFrom: isoDateString('returnDateFrom'),
+  returnDateTo: isoDateString('returnDateTo'),
   batchNo: z.string().optional(),
   /** 炉批号模糊匹配（出货检验台账「炉批号」筛选框，docs/47 §4.2⑤ / P2） */
   furnaceHeatNo: z.string().optional(),
@@ -113,6 +165,10 @@ const InspectionQuerySchema = z.object({
   salesOrderPoNo: z.string().optional(),
   /** 出库日期精确匹配（YYYY-MM-DD，出货检验台账专用） */
   dispatchDate: z.string().optional(),
+  /** 出库日期区间起点（YYYY-MM-DD，出货检验台账「单据日期」区间筛选，含当日） */
+  dispatchDateFrom: isoDateString('dispatchDateFrom'),
+  /** 出库日期区间终点（YYYY-MM-DD，出货检验台账「单据日期」区间筛选，含当日） */
+  dispatchDateTo: isoDateString('dispatchDateTo'),
   erpStatus: z.string().optional(),
   /**
    * 是否回填「合格后传递」派生字段（canTransfer / transferCode / blockedBy / predecessorOrderNo，docs/48 §4.6）。
@@ -123,6 +179,13 @@ const InspectionQuerySchema = z.object({
 
 const InspectionParamsSchema = z.object({
   id: z.string().uuid('检验单ID必须为有效的UUID'),
+});
+
+const CreateReinspectionRequestSchema = z.object({
+  reworkRecordNo: z.string().min(1).optional(),
+  reworkReason: z.string().min(1).optional(),
+  inspectorId: z.string().uuid().optional(),
+  inspectorName: z.string().min(1).optional(),
 });
 
 /** 需要强制放行关卡的成品检类型 */
@@ -283,26 +346,14 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
     '/heat-batch-trace',
     {
       schema: {
-        querystring: z.object({
-          heatBatchNo: z.string().min(1, '炉批号不能为空'),
-          materialCode: z.string().optional(),
-          /**
-           * 正在编辑的本单 id：从「上游异常提示」（TBD-01）候选里**排除自己**。
-           *
-           * 本单自身通常处于 `INSPECTING`（正在录入），若不排除，任何一次查询都会把
-           * 自己判成「上游存在尚未终判的检验记录」，在同一炉号上给出假提示
-           * （组③ 这类"上游两处均无"的演示单会凭空冒出 Banner，直接违背 AC-04 的静默空态）。
-           */
-          excludeOrderId: z.string().optional(),
-        }),
+        // 正在编辑的本单 id：从「上游异常提示」（TBD-01）候选里**排除自己**。
+        // 本单自身通常处于 INSPECTING（正在录入），若不排除，任何一次查询都会把
+        // 自己判成「上游存在尚未终判的检验记录」，在同一炉号上给出假提示。
+        querystring: FurnaceHeatTraceQuerySchema,
       },
     },
     async (request, reply) => {
-      const query = request.query as {
-        heatBatchNo: string;
-        materialCode?: string;
-        excludeOrderId?: string;
-      };
+      const query = request.query as z.infer<typeof FurnaceHeatTraceQuerySchema>;
       const materialCode =
         query.materialCode !== undefined && query.materialCode.trim() !== ''
           ? query.materialCode
@@ -371,6 +422,15 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
             ? { status: query.status }
             : {};
 
+      // 是否出货检验（OQC 系列）查询：决定本列表是否施加「万条呈现上限」。
+      // 解析出的检验类型集合全部以 OQC 开头即视为出货检验（覆盖 OQC / OQC_SH / OQC_SF 及委外 OQC_*）；
+      // 来料/过程/成品等其它台账不加封顶，保持原行为（尤其 IQC 全量同步后可达数万行）。
+      const resolvedTypes: readonly string[] =
+        typeFilter.inspectionTypes ??
+        (typeFilter.inspectionType !== undefined ? [typeFilter.inspectionType] : []);
+      const isOqcQuery =
+        resolvedTypes.length > 0 && resolvedTypes.every((t) => t.startsWith('OQC'));
+
       const result = await orders.listOrders({
         page: query.page,
         pageSize: query.pageSize,
@@ -383,8 +443,16 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
         ...(query.supplierCodes !== undefined && query.supplierCodes.length > 0
           ? { supplierCodes: query.supplierCodes }
           : {}),
+        ...(query.materialCodes !== undefined && query.materialCodes.length > 0
+          ? { materialCodes: query.materialCodes }
+          : {}),
         ...(query.dateFrom !== undefined ? { dateFrom: query.dateFrom } : {}),
         ...(query.dateTo !== undefined ? { dateTo: query.dateTo } : {}),
+        ...(query.inboundDateFrom !== undefined ? { inboundDateFrom: query.inboundDateFrom } : {}),
+        ...(query.inboundDateTo !== undefined ? { inboundDateTo: query.inboundDateTo } : {}),
+        // 委外检验台账「回厂日期」区间：与建单时间 / 入库日期是三套互不干扰的口径
+        ...(query.returnDateFrom !== undefined ? { returnDateFrom: query.returnDateFrom } : {}),
+        ...(query.returnDateTo !== undefined ? { returnDateTo: query.returnDateTo } : {}),
         ...(query.partner !== undefined ? { partnerKeyword: query.partner } : {}),
         ...(query.batchNo !== undefined ? { batchNo: query.batchNo } : {}),
         ...(query.furnaceHeatNo !== undefined ? { furnaceHeatNo: query.furnaceHeatNo } : {}),
@@ -406,8 +474,16 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
         ...(query.customerName !== undefined ? { customerName: query.customerName } : {}),
         ...(query.salesOrderPoNo !== undefined ? { salesOrderPoNo: query.salesOrderPoNo } : {}),
         ...(query.dispatchDate !== undefined ? { dispatchDate: query.dispatchDate } : {}),
+        // 出货检验台账「单据日期」区间筛选：与精确匹配互斥，区间优先
+        ...(query.dispatchDateFrom !== undefined ? { dispatchDateFrom: query.dispatchDateFrom } : {}),
+        ...(query.dispatchDateTo !== undefined ? { dispatchDateTo: query.dispatchDateTo } : {}),
+        // 出货检验强制万条呈现上限（见需求「最大呈现上限万条数据」）；其它台账不封顶
+        ...(isOqcQuery ? { maxTotal: 10000 } : {}),
         ...(query.erpStatus !== undefined ? { erpStatus: query.erpStatus } : {}),
         ...(query.inspectionState !== undefined ? { inspectionState: query.inspectionState } : {}),
+        ...(query.inspectionStates !== undefined && query.inspectionStates.length > 0
+          ? { inspectionStates: query.inspectionStates }
+          : {}),
       });
 
       // 「合格后传递」派生字段（docs/48 §4.6）：默认回填；withTransfer=false 时整页跳过判定
@@ -422,6 +498,8 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
         // 兼容别名：早期契约消费方使用 list，与 items 指向同一份当页数据
         list: items,
         statusCounts: result.statusCounts,
+        // 命中数超过万条上限时为 true，前端据以提示「结果已截断，请缩小筛选范围」
+        capped: result.capped ?? false,
       });
     }
   );
@@ -503,6 +581,10 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
           ...(body.materialGrade !== undefined ? { materialGrade: body.materialGrade } : {}),
           ...(body.techStandard !== undefined ? { techStandard: body.techStandard } : {}),
           ...(body.inspectedDate !== undefined ? { inspectedDate: body.inspectedDate } : {}),
+          // 038 证书模板与证书专用字段袋（docs/51）：操作员「填写检验内容前」选定，随建单落库；
+          // 与 006/008/030 同型 —— 不透传则前端选好的模板被静默丢弃
+          ...(body.certTemplate !== undefined ? { certTemplate: body.certTemplate } : {}),
+          ...(body.certFields !== undefined ? { certFields: body.certFields } : {}),
           // 炉批号（Heat No，docs/47 §3.1 / §4.6）：契约早已声明 CreateInspectionOrderRequest.furnaceHeatNo，
           // 建单即落 inspection_orders.furnace_heat_batch_no —— 与 006/008/030 同型，
           // 控制器不透传则「界面上填了炉号、提交后库里仍然为空」（D1/D2）。
@@ -597,8 +679,13 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
   // 2.6 特批豁免工单：提报申请（docs/48 §4.4、TBD-09）
   fastify.post(
     '/transfer-overrides/tickets',
+    {
+      schema: {
+        body: CreateTransferOverrideTicketRequestSchema,
+      },
+    },
     async (request, reply) => {
-      const body = CreateTransferOverrideTicketRequestSchema.parse(request.body);
+      const body = request.body as z.infer<typeof CreateTransferOverrideTicketRequestSchema>;
       const operator = operatorOf(request);
       const securityCtx = await buildRequestSecurityContext(request, container);
       const ticket = await container.useCases.createTransferOverrideTicket.execute(
@@ -616,13 +703,18 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
   // 2.7 特批豁免工单：列表查询
   fastify.get(
     '/transfer-overrides/tickets',
+    {
+      schema: {
+        querystring: ListTransferOverrideTicketsQuerySchema,
+      },
+    },
     async (request, reply) => {
-      const query = request.query as any;
+      const query = request.query as z.infer<typeof ListTransferOverrideTicketsQuerySchema>;
       const result = await container.useCases.listTransferOverrideTickets.execute({
-        batchNo: query?.batchNo,
-        status: query?.status,
-        page: query?.page ? Number(query.page) : 1,
-        pageSize: query?.pageSize ? Number(query.pageSize) : 20,
+        ...(query.batchNo !== undefined ? { batchNo: query.batchNo } : {}),
+        ...(query.status !== undefined ? { status: query.status } : {}),
+        page: query.page,
+        pageSize: query.pageSize,
       });
       return reply.status(200).send(result);
     }
@@ -631,9 +723,15 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
   // 2.8 特批豁免工单：审批流（APPROVED / REJECTED）
   fastify.post(
     '/transfer-overrides/tickets/:ticketNo/review',
+    {
+      schema: {
+        params: TransferOverrideTicketParamsSchema,
+        body: ReviewTransferOverrideTicketRequestSchema,
+      },
+    },
     async (request, reply) => {
-      const { ticketNo } = request.params as { ticketNo: string };
-      const body = ReviewTransferOverrideTicketRequestSchema.parse(request.body);
+      const { ticketNo } = request.params as z.infer<typeof TransferOverrideTicketParamsSchema>;
+      const body = request.body as z.infer<typeof ReviewTransferOverrideTicketRequestSchema>;
       const operator = operatorOf(request);
       const securityCtx = await buildRequestSecurityContext(request, container);
       assertQualityApprover(operator);
@@ -705,6 +803,89 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
     }
   );
 
+  const submitMeasurements = async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as z.infer<typeof InspectionParamsSchema>;
+    const body = request.body as z.infer<typeof SubmitMeasurementsRequestSchema>;
+    const operator = operatorOf(request);
+    const securityCtx = await buildRequestSecurityContext(request, container);
+
+    const order = await orders.findById(id);
+    if (!order) {
+      throw new NotFoundError(`检验单不存在: ${id}`);
+    }
+
+    // 指标编码必须属于本工单的方案快照，否则给出 400 校验明细（而不是领域层笼统的判定失败）
+    const knownCodes = new Set((order.items ?? []).map((item) => item.itemCode));
+    const unknownItemCodes = body.items
+      .map((item) => item.itemCode)
+      .filter((itemCode) => !knownCodes.has(itemCode));
+
+    if (unknownItemCodes.length > 0) {
+      throw new ValidationFailedError(
+        `以下指标编码不属于当前检验单的质检方案: ${unknownItemCodes.join(', ')}`,
+        unknownItemCodes.map((itemCode) => ({
+          name: itemCode,
+          reason: '该指标编码不在本检验单的 planSnapshot.items 中',
+        }))
+      );
+    }
+
+    const command = {
+      orderId: id,
+      // 逐个字段条件展开：契约解析结果是 `T | undefined`，而命令行类型开启
+      // exactOptionalPropertyTypes，必须省略 undefined 才能通过类型检查
+      items: body.items.map((item) => {
+        // 炉批号继承留痕（docs/47 §3.6 / D10）：契约接受三个等价别名的「带出原值」，
+        // 与两个别名的「修改原因」—— 在这里归一到领域参数（inheritedHeatValue / modificationReason），
+        // 下游用例与聚合根只认一份口径。此前整段被丢弃，带出项落库后来源不可考。
+        const inheritedHeatValue =
+          item.originalInheritedValue ?? item.inheritedHeatValue ?? item.inheritedValue;
+        const modificationReason = item.modificationReason ?? item.modifiedReason;
+        return {
+          itemCode: item.itemCode,
+          ...(item.measuredVal !== undefined ? { measuredVal: item.measuredVal } : {}),
+          ...(item.measuredText !== undefined ? { measuredText: item.measuredText } : {}),
+          ...(item.defectReason !== undefined ? { defectReason: item.defectReason } : {}),
+          ...(item.remark !== undefined ? { remark: item.remark } : {}),
+          ...(item.inheritedFrom !== undefined ? { inheritedFrom: item.inheritedFrom } : {}),
+          ...(inheritedHeatValue !== undefined ? { inheritedHeatValue } : {}),
+          ...(item.isManuallyModified !== undefined
+            ? { isManuallyModified: item.isManuallyModified }
+            : {}),
+          ...(modificationReason !== undefined ? { modificationReason } : {}),
+          // 不解检（EXEMPT）：契约早收这两栏，此前被丢弃导致免检标记全链路落不下去
+          ...(item.isExempt !== undefined ? { isExempt: item.isExempt } : {}),
+          ...(item.exemptReason !== undefined ? { exemptReason: item.exemptReason } : {}),
+        };
+      }),
+      // 检验员填写的合格 / 不合格数量随判定一并落库（docs/21 §14）。契约里本就有这两栏，
+      // 此前控制器没往下透传，于是「判定即建单」的 MRB 只能取到领域派生兜底值 ——
+      // 首次判定时该值恒等于整批抽样数，页面上看起来就是「不合格数量 = 检测数」。
+      ...(body.passQty !== undefined ? { passQty: body.passQty } : {}),
+      ...(body.failQty !== undefined ? { failQty: body.failQty } : {}),
+      operatorId: operator.userId,
+      operatorName: operator.userName,
+    };
+
+    // 草稿：仅落库实测值，不做整单终判；正式提交：由领域聚合执行综合判定
+    const updated: InspectionOrder = body.isDraft
+      ? await container.useCases.saveInspectionDraft.execute(command, securityCtx)
+      : await container.useCases.recordMeasurementsAndJudge.execute(command, securityCtx);
+
+    return reply.status(200).send(updated);
+  };
+
+  fastify.post(
+    '/:id/results',
+    {
+      schema: {
+        params: InspectionParamsSchema,
+        body: SubmitMeasurementsRequestSchema,
+      },
+    },
+    submitMeasurements
+  );
+
   // 4. 录入检验指标实测值与自动判定 (submit-measurements)
   fastify.post(
     '/:id/submit-measurements',
@@ -714,73 +895,37 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
         body: SubmitMeasurementsRequestSchema,
       },
     },
+    submitMeasurements
+  );
+
+  fastify.post(
+    '/:id/re-inspection',
+    {
+      schema: {
+        params: InspectionParamsSchema,
+        body: CreateReinspectionRequestSchema,
+      },
+    },
     async (request, reply) => {
       const { id } = request.params as z.infer<typeof InspectionParamsSchema>;
-      const body = request.body as z.infer<typeof SubmitMeasurementsRequestSchema>;
+      const body = (request.body ?? {}) as z.infer<typeof CreateReinspectionRequestSchema>;
       const operator = operatorOf(request);
       const securityCtx = await buildRequestSecurityContext(request, container);
 
-      const order = await orders.findById(id);
-      if (!order) {
-        throw new NotFoundError(`检验单不存在: ${id}`);
-      }
+      const order = await container.useCases.createReinspection.execute(
+        {
+          parentOrderId: id,
+          ...(body.reworkRecordNo !== undefined ? { reworkRecordNo: body.reworkRecordNo } : {}),
+          ...(body.reworkReason !== undefined ? { reworkReason: body.reworkReason } : {}),
+          ...(body.inspectorId !== undefined ? { inspectorId: body.inspectorId } : {}),
+          ...(body.inspectorName !== undefined ? { inspectorName: body.inspectorName } : {}),
+          operatorId: operator.userId,
+          operatorName: operator.userName,
+        },
+        securityCtx
+      );
 
-      // 指标编码必须属于本工单的方案快照，否则给出 400 校验明细（而不是领域层笼统的判定失败）
-      const knownCodes = new Set((order.items ?? []).map((item) => item.itemCode));
-      const unknownItemCodes = body.items
-        .map((item) => item.itemCode)
-        .filter((itemCode) => !knownCodes.has(itemCode));
-
-      if (unknownItemCodes.length > 0) {
-        throw new ValidationFailedError(
-          `以下指标编码不属于当前检验单的质检方案: ${unknownItemCodes.join(', ')}`,
-          unknownItemCodes.map((itemCode) => ({
-            name: itemCode,
-            reason: '该指标编码不在本检验单的 planSnapshot.items 中',
-          }))
-        );
-      }
-
-      const command = {
-        orderId: id,
-        // 逐个字段条件展开：契约解析结果是 `T | undefined`，而命令行类型开启
-        // exactOptionalPropertyTypes，必须省略 undefined 才能通过类型检查
-        items: body.items.map((item) => {
-          // 炉批号继承留痕（docs/47 §3.6 / D10）：契约接受三个等价别名的「带出原值」，
-          // 与两个别名的「修改原因」—— 在这里归一到领域参数（inheritedHeatValue / modificationReason），
-          // 下游用例与聚合根只认一份口径。此前整段被丢弃，带出项落库后来源不可考。
-          const inheritedHeatValue =
-            item.originalInheritedValue ?? item.inheritedHeatValue ?? item.inheritedValue;
-          const modificationReason = item.modificationReason ?? item.modifiedReason;
-          return {
-            itemCode: item.itemCode,
-            ...(item.measuredVal !== undefined ? { measuredVal: item.measuredVal } : {}),
-            ...(item.measuredText !== undefined ? { measuredText: item.measuredText } : {}),
-            ...(item.defectReason !== undefined ? { defectReason: item.defectReason } : {}),
-            ...(item.remark !== undefined ? { remark: item.remark } : {}),
-            ...(item.inheritedFrom !== undefined ? { inheritedFrom: item.inheritedFrom } : {}),
-            ...(inheritedHeatValue !== undefined ? { inheritedHeatValue } : {}),
-            ...(item.isManuallyModified !== undefined
-              ? { isManuallyModified: item.isManuallyModified }
-              : {}),
-            ...(modificationReason !== undefined ? { modificationReason } : {}),
-          };
-        }),
-        // 检验员填写的合格 / 不合格数量随判定一并落库（docs/21 §14）。契约里本就有这两栏，
-        // 此前控制器没往下透传，于是「判定即建单」的 MRB 只能取到领域派生兜底值 ——
-        // 首次判定时该值恒等于整批抽样数，页面上看起来就是「不合格数量 = 检测数」。
-        ...(body.passQty !== undefined ? { passQty: body.passQty } : {}),
-        ...(body.failQty !== undefined ? { failQty: body.failQty } : {}),
-        operatorId: operator.userId,
-        operatorName: operator.userName,
-      };
-
-      // 草稿：仅落库实测值，不做整单终判；正式提交：由领域聚合执行综合判定
-      const updated: InspectionOrder = body.isDraft
-        ? await container.useCases.saveInspectionDraft.execute(command, securityCtx)
-        : await container.useCases.recordMeasurementsAndJudge.execute(command, securityCtx);
-
-      return reply.status(200).send(updated);
+      return reply.status(201).send(order);
     }
   );
 
@@ -830,6 +975,9 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
           ...(body.materialGrade !== undefined ? { materialGrade: body.materialGrade } : {}),
           ...(body.techStandard !== undefined ? { techStandard: body.techStandard } : {}),
           ...(body.inspectedDate !== undefined ? { inspectedDate: body.inspectedDate } : {}),
+          // 038 证书模板与证书专用字段袋（docs/51）：与其它表头字段同一「显式传入才写」口径
+          ...(body.certTemplate !== undefined ? { certTemplate: body.certTemplate } : {}),
+          ...(body.certFields !== undefined ? { certFields: body.certFields } : {}),
           operatorId: operator.userId,
           operatorName: operator.userName,
         },

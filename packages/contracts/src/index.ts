@@ -111,6 +111,10 @@ export {
   PlanVersionStatusActionEnum,
   TogglePlanVersionStatusRequestSchema,
   UpgradePlanVersionRequestSchema,
+  ImportPlanCreatedSchema,
+  ImportPlanSkippedSchema,
+  ImportPlanFailedSchema,
+  ImportPlansResultSchema,
   InspectionItemSchema,
   InspectionPlanSnapshotSchema,
   PlanSnapshotSchema,
@@ -139,6 +143,7 @@ export * from './schemas/integration';
 export {
   MaterialSchema,
   InventoryCategorySchema,
+  TestItemSchema,
   SupplierSchema,
   CustomerSchema,
   WorkshopSchema,

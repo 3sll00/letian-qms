@@ -42,6 +42,17 @@ export const OverallDecisionEnum = z.enum([
   'CONCESSION', // 让步接收 (特采放行)
 ]).openapi('OverallDecision');
 
+/**
+ * 证书打印模板枚举（docs/51）：操作员在「填写检验内容前」为本单选定的打印版式。
+ *   QUALITY       = 《质量保证书 CERTIFICATE OF INSPECTION》（纵向 A4：三列字段网格 + 尺寸/机械/化学三段）
+ *   MANUFACTURING = 《MANUFACTURING CERTIFICATE》（横向 A4：14 列产品检验表 + EN 10204 声明页脚）
+ * 缺省（未选择）时界面按模块缺省渲染：IQC / IPQC / OQC -> QUALITY，委外 -> MANUFACTURING。
+ */
+export const CertTemplateEnum = z.enum(['QUALITY', 'MANUFACTURING']).openapi('CertTemplate');
+
+/** 证书专用补充字段袋：键为字段名、值为文本；只服务于证书打印，不进任何业务判定 */
+export const CertFieldsSchema = z.record(z.string(), z.string()).openapi('CertFields');
+
 // ============================================================================
 // 2. 检验指标类型与判定枚举
 // ============================================================================
@@ -94,6 +105,15 @@ export const InspectionPlanItemSchema = z.object({
   measurementTool: z.string().optional(),
   isMandatory: z.boolean().default(true),
   remark: z.string().optional(),
+  // —— ERP 检验方案明细口径（T_Inf_PtypeCheckingSchemeDly）——
+  // 字段映射：TITypeId -> testItemCode、StandardValue -> standardText、Dif -> dif、
+  //          CheckWay -> checkWay、CheckDevice -> measurementTool（既有）、Summary -> remark（既有）
+  /** 检验项目字典回链：ERP `TestItem.TypeID`（如 '00001'），对应 TestItemSchema.testItemCode */
+  testItemCode: z.string().optional().openapi({ description: 'ERP 检验项目字典编码（TITypeId）' }),
+  /** 公差/偏差文本（ERP `Dif` nvarchar(50)，如 '±0.1'）；数值判定仍走 upper/lowerTolerance，本字段承载 ERP 原文 */
+  dif: z.string().optional().openapi({ description: '公差/偏差（ERP Dif 原文）' }),
+  /** 检验方式（ERP `CheckWay`，如 '抽检'/'全检'/'目视'） */
+  checkWay: z.string().optional().openapi({ description: '检验方式（ERP CheckWay）' }),
 }).openapi('InspectionPlanItem');
 
 export const PlanVersionStatusEnum = z.enum(['DRAFT', 'ACTIVE', 'INACTIVE']).openapi('PlanVersionStatus');
@@ -125,7 +145,13 @@ export const InspectionPlanSchema = z.object({
   id: z.string().uuid().optional(),
   planCode: z.string().min(1, '方案编码不能为空'),
   planName: z.string().min(1, '方案名称不能为空'),
-  inspectionType: InspectionTypeEnum,
+  inspectionType: InspectionTypeEnum.openapi({
+    description: '主检验类型（多选时取第一个；匹配/展示的主口径，向后兼容单列 inspection_stage）',
+  }),
+  inspectionTypes: z.array(InspectionTypeEnum).min(1).optional().openapi({
+    description:
+      '方案适用的检验类型全集（含主类型；ERP GxTypeId 口径的扩展——一个方案可服务多个工序/检验环节）。缺省 = [inspectionType]',
+  }),
   materialCode: z.string().optional().nullable().openapi({ description: '专属物料编码 (为空时表示全分类通用方案)' }),
   categoryCode: z.string().optional().nullable().openapi({
     description: '方案归属的存货分类编码；materialCode 为空时表示“该分类的通用方案”，作为分类级兜底匹配依据',
@@ -284,6 +310,9 @@ export const MatchedInspectionPlanSchema = z.object({
   planVersionId: z.string().uuid().openapi({ description: '命中的方案版本行 UUID (建单时原样回传)' }),
   versionNo: z.string().openapi({ description: '版本号' }),
   inspectionType: InspectionTypeEnum,
+  inspectionTypes: z.array(InspectionTypeEnum).optional().openapi({
+    description: '命中方案适用的检验类型全集（含本次匹配用类型）',
+  }),
   materialCode: z.string().openapi({ description: '命中的物料编码' }),
   samplingScheme: z.string().openapi({ description: '抽样方案类型 (GB_T_2828 等)' }),
   aqlLevel: z.string().openapi({ description: 'AQL 检查水平' }),
@@ -291,6 +320,48 @@ export const MatchedInspectionPlanSchema = z.object({
   items: z.array(InspectionPlanItemSchema).openapi({ description: '待检指标清单' }),
   matchedAt: z.string().openapi({ description: '匹配时间戳' }),
 }).openapi('MatchedInspectionPlan');
+
+/**
+ * Excel 方案导入结果（POST /api/v1/plans/import 响应体）。
+ *
+ * 导入按「方案组」聚合：同一份 Excel 中 方案名称 + 物料编码 + 产品分类编码 相同的行
+ * 合并为一个方案，每行 = 一个检验指标项。逐组独立落库——某组校验失败不影响其它组，
+ * 三组明细（新建 / 跳过-判重 / 失败）都在本响应里如实回显。
+ */
+export const ImportPlanCreatedSchema = z.object({
+  planCode: z.string().openapi({ description: '服务端实际落库的方案编码（QP-{YYYYMMDD}-{NNN} 取号）' }),
+  planName: z.string(),
+  versionNo: z.string().openapi({ description: '首个草稿版本号（默认 V1.0，导入一律 DRAFT）' }),
+  itemCount: z.number().int().min(1).openapi({ description: '导入的检验指标项数' }),
+  rows: z.array(z.number().int().min(1)).openapi({
+    description: '该方案占用的 Excel 数据行号清单（工作表真实行号，表头为第 1 行）',
+  }),
+}).openapi('ImportPlanCreated');
+
+export const ImportPlanSkippedSchema = z.object({
+  planName: z.string(),
+  rows: z.array(z.number().int().min(1)),
+  existingPlanCode: z.string().openapi({
+    description: '方案库中已存在的同名同物料同主类型方案编码（重复导入保护）',
+  }),
+}).openapi('ImportPlanSkipped');
+
+export const ImportPlanFailedSchema = z.object({
+  planName: z.string().openapi({ description: '失败归属方案名；行级错误时为该行填写的方案名' }),
+  rows: z.array(z.number().int().min(1)).openapi({ description: '关联的 Excel 数据行号' }),
+  reason: z.string().openapi({ description: '失败原因（行级校验/组内一致性/落库异常逐条列出）' }),
+}).openapi('ImportPlanFailed');
+
+export const ImportPlansResultSchema = z.object({
+  fileName: z.string().openapi({ description: '上传文件名回显' }),
+  totalRows: z.number().int().min(0).openapi({ description: '解析到的有效数据行数（不含表头与空行）' }),
+  planCount: z.number().int().min(0).openapi({
+    description: '聚合出的方案组数（= created.length + skipped.length + failed.length）',
+  }),
+  created: z.array(ImportPlanCreatedSchema),
+  skipped: z.array(ImportPlanSkippedSchema),
+  failed: z.array(ImportPlanFailedSchema),
+}).openapi('ImportPlansResult');
 
 /**
  * 按分类批量创建质检方案请求 Schema
@@ -550,6 +621,15 @@ export const InspectionOrderSchema = z.object({
   overallDecision: OverallDecisionEnum.optional(),
   inspectorId: z.string().uuid().optional(),
   inspectionNotes: z.string().optional(),
+  // 038 证书模板与证书专用字段（docs/51）：由操作员在「填写检验内容前」选定并随单保存；
+  // 只读展示字段，客户端可经 PATCH /inspections/{id}/header 或建单 POST 写入。
+  certTemplate: CertTemplateEnum.optional().openapi({
+    description: '本单选用的证书打印模板；缺省 = 未选择（界面按模块缺省渲染）',
+  }),
+  certFields: CertFieldsSchema.optional().openapi({
+    description:
+      '证书专用补充字段袋（制造证书 doRef/jobcardNo/deliveryPoint/coating/colour/customerPoNo，质保书 marking/samplePlan/samplingDate 等）；只服务于证书打印',
+  }),
   planVersionId: z.string().uuid(),
   planSnapshot: PlanSnapshotSchema,
   items: z.array(InspectionItemSchema).default([]),
@@ -659,6 +739,12 @@ export const CreateInspectionOrderRequestSchema = z.object({
     example: '11111111-1111-1111-1111-111111111111',
   }),
   isMandatoryGate: z.boolean().optional(),
+  certTemplate: CertTemplateEnum.optional().openapi({
+    description: '本单选用的证书打印模板（docs/51：操作员填写前选定，随单保存）',
+  }),
+  certFields: CertFieldsSchema.optional().openapi({
+    description: '证书专用补充字段袋（只服务于证书打印，不进判定）',
+  }),
   transferOverride: TransferOverrideInputSchema.optional().openapi({
     description: '质量负责人传递门禁特批豁免凭据（TBD-09，允许绕过上游阻断）',
   }),
@@ -729,8 +815,9 @@ export const FinalizeInspectionStatusRequestSchema = z
       description: '终判目标状态：判定不合格用 FAILED（合格 PASSED，委外返工 RE_INSPECTING，归档 COMPLETED）',
       example: 'FAILED',
     }),
-    judgment: InspectionStatusEnum.optional().openapi({
-      description: '综合判定结论（与 status 同源）；让步接收 / 特采申请场景可省略，仅以 status = FAILED 表示不合格',
+    judgment: OverallDecisionEnum.optional().openapi({
+      description:
+        '综合判定结论：PASSED / FAILED / CONCESSION（让步接收）。与 `status` 是两个字段、取值域不同 —— 原先误用 InspectionStatusEnum，导致合法的 CONCESSION 被接口拒绝、而非法的 PENDING 等状态值反被放行到用例层',
     }),
     passQty: z.number().min(0).optional().openapi({ description: '合格数量（落 inspection_orders.pass_qty）' }),
     failQty: z
@@ -800,6 +887,15 @@ export const MandatoryGateCheckResponseSchema = z.object({
  * 完全不是一套 —— 前端只能靠口头约定对齐。本轮收敛为**按真实返回体定义**的这一份，
  * 旧 Schema 下线（禁止再出现两套字段口径）。
  */
+/** 炉批号历史追溯查询条件（GET /inspections/heat-batch-trace） */
+export const FurnaceHeatTraceQuerySchema = z
+  .object({
+    heatBatchNo: z.string().min(1, '炉批号不能为空'),
+    materialCode: z.string().optional(),
+    excludeOrderId: z.string().optional(),
+  })
+  .openapi('FurnaceHeatTraceQuery');
+
 export const FurnaceHeatTraceResponseSchema = z
   .object({
     heatBatchNo: z.string().openapi({
@@ -878,5 +974,11 @@ export const UpdateInspectionHeaderRequestSchema = z.object({
   inspectedDate: z.string().max(32).optional().openapi({
     description: '检验日期 YYYY-MM-DD',
     example: '2026-09-23',
+  }),
+  certTemplate: CertTemplateEnum.optional().openapi({
+    description: '证书打印模板（docs/51：操作员填写前选定，随单保存）',
+  }),
+  certFields: CertFieldsSchema.optional().openapi({
+    description: '证书专用补充字段袋（整体覆盖写入；只服务于证书打印）',
   }),
 }).openapi('UpdateInspectionHeaderRequest');

@@ -276,6 +276,12 @@ interface RequestOptions {
   path: string;
   query?: Record<string, string | number | undefined>;
   body?: unknown;
+  /**
+   * multipart 表单上传体（FormData）。与 body 互斥：
+   * 不手动设置 Content-Type，由浏览器自动带 boundary 分隔符，
+   * 否则后端 busboy 解析不到边界直接拒绝。
+   */
+  formData?: FormData;
   /** 需要原始文本（如 CSV 导出）时置 true */
   rawText?: boolean;
   /** 需要二进制 Blob（如 PDF/Excel 导出）时置 true */
@@ -293,7 +299,9 @@ async function request<T>(options: RequestOptions): Promise<T> {
 
   const headers: Record<string, string> = { Authorization: `Bearer ${session.token}` };
   const init: RequestInit = { method: options.method, headers };
-  if (options.body !== undefined) {
+  if (options.formData !== undefined) {
+    init.body = options.formData;
+  } else if (options.body !== undefined) {
     headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(options.body);
   }
@@ -349,6 +357,19 @@ export const api = {
   del: <T>(path: string) => request<T>({ method: 'DELETE', path }),
   postBlob: (path: string, body?: unknown) =>
     request<Blob>({ method: 'POST', path, rawBlob: true, ...(body !== undefined ? { body } : {}) }),
+
+  /** 二进制下载（Excel 导入模板 / PDF 报告等）：GET → Blob */
+  getBlob: (path: string, query?: Record<string, string | number | undefined>) =>
+    request<Blob>({
+      method: 'GET',
+      path,
+      rawBlob: true,
+      ...(query !== undefined ? { query } : {}),
+    }),
+
+  /** multipart 文件上传（如 POST /plans/import 的 .xlsx 方案导入） */
+  postFormData: <T>(path: string, formData: FormData) =>
+    request<T>({ method: 'POST', path, formData }),
 };
 
 /** 统一把未知异常转成可展示文案（ApiError 直接给出后端 detail） */

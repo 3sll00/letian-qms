@@ -1,14 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import { AppLayout, NavItemKey } from './components/AppLayout';
 import { DashboardPage } from './pages/dashboard';
+import { ProgressOverviewPage } from './pages/progress-overview';
 import { InspectionHistoryPage } from './pages/dashboard/history';
 import { TraceabilityPage } from './pages/traceability';
 import { InspectionsPage } from './pages/inspections';
 import { PlansPage } from './pages/plans';
 import { MrbPage } from './pages/mrb';
+import { PendingMRBPoolPage } from './pages/mrb/PendingMRBPoolPage';
 import { ReviewWorkflowView } from './pages/mrb/ReviewWorkflowView';
 import { MaterialCategoriesPage } from './pages/master-data/categories';
-import { MasterDataPage } from './pages/master-data';
 import { IntegrationPage } from './pages/integration';
 import { LoginPage } from './pages/login';
 import {
@@ -70,6 +71,8 @@ export function App() {
 
   const renderContent = () => {
     switch (currentNav) {
+      case 'progress-overview':
+        return <ProgressOverviewPage key={pageKey('progress-overview')} />;
       case 'dashboard':
         return <DashboardPage key={pageKey('dashboard')} />;
       case 'history':
@@ -86,9 +89,14 @@ export function App() {
         return <InspectionsPage key={pageKey('oqc')} initialStage="oqc" />;
       case 'plans':
         return <PlansPage key={pageKey('plans')} />;
+      case 'pending-pool':
+        // 不合格待审核池工作台（v2.6.0 未结模块）：各环节滞留条目的发起评审入口
+        return <PendingMRBPoolPage key={pageKey('pending-pool')} />;
       case 'mrb':
         // MRB 不合格品处置整合单页：待审核池（阶段 1）与评审处置（阶段 2）都在页内抽屉完成
-        return <MrbPage key={pageKey('mrb')} />;
+        return (
+          <MrbPage key={pageKey('mrb')} onOpenPendingPool={() => handleSelectNav('pending-pool')} />
+        );
       case 'review-workflow':
         return <ReviewWorkflowView key={pageKey('review-workflow')} />;
       case 'permissions':
@@ -97,12 +105,6 @@ export function App() {
         return <MaterialCategoriesPage key={pageKey('categories')} />;
       case 'logs':
         return <IntegrationPage key={pageKey('logs')} initialTab="logs" />;
-      case 'erp-inventory':
-        return <MasterDataPage key={pageKey('erp-inventory')} initialTab="inventory" />;
-      case 'erp-supplier':
-        return <MasterDataPage key={pageKey('erp-supplier')} initialTab="supplier" />;
-      case 'erp-customer':
-        return <MasterDataPage key={pageKey('erp-customer')} initialTab="customer" />;
       default:
         return <DashboardPage key={pageKey('dashboard')} />;
     }

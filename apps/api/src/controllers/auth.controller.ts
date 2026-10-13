@@ -33,17 +33,24 @@ function defaultLoginPassword(): string {
 const INVALID_CREDENTIALS = '用户名或密码错误';
 
 /**
- * 开发环境登录入口（独立登录页 / 用户切换演示用）
+ * 登录入口（独立登录页 / 用户切换演示用）
  *
  * ⚠️ 安全边界：按职员档案 UUID 直接签发 JWT，等价于"任何人可自称任意员工"，
  * 因此**仅在非生产环境注册**（NODE_ENV === 'production' 时整组路由直接跳过注册）。
  * 生产环境必须替换为企业统一身份认证（SSO / OAuth2 / LDAP）后再开放登录能力。
+ *
+ * 过渡方案：生产环境显式设置 ENABLE_LOCAL_AUTH=true 时只注册 POST /login 的
+ * 「用户名 + 口令」通道——/users 名单、userId 直签、缺省演示身份一律不放开；
+ * 口令仍须由 DEFAULT_LOGIN_PASSWORD 换成高强度独立口令。此为接入 SSO 前的
+ * 内网部署过渡措施，不应在公网环境使用。
  */
 export const authController: FastifyPluginAsync<{ container: ApiContainer }> = async (
   fastify,
   options
 ) => {
-  if (process.env.NODE_ENV === 'production') {
+  const isProduction = process.env.NODE_ENV === 'production';
+  const localAuthEnabled = !isProduction || process.env.ENABLE_LOCAL_AUTH === 'true';
+  if (!localAuthEnabled) {
     return;
   }
 
@@ -53,9 +60,10 @@ export const authController: FastifyPluginAsync<{ container: ApiContainer }> = a
   const permissionsRepo = container.repositories.materialPermissions;
 
   /**
-   * 1. 登录页用户列表
-   * 供独立登录页拉取在职员工列表及其主角色信息
+   * 1. 登录页用户列表（演示身份切换专用）
+   * 生产环境不注册：在职员工名单属敏感信息，正式登录页也不需要它
    */
+  if (!isProduction)
   fastify.get(
     '/users',
     {
@@ -117,6 +125,11 @@ export const authController: FastifyPluginAsync<{ container: ApiContainer }> = a
 
       // 传了 password 就走口令校验分支；口令不对一律用统一文案，不泄露用户是否存在
       const passwordProvided = typeof body.password === 'string' && body.password !== '';
+      // 生产环境只保留「用户名 + 口令」通道：userId 直签与缺省演示身份是演示专用，
+      // ENABLE_LOCAL_AUTH 放开登录时不得一并放开（否则任何人可自称任意员工）
+      if (isProduction && (!passwordProvided || body.userId !== undefined)) {
+        throw new UnauthorizedError(INVALID_CREDENTIALS);
+      }
       if (passwordProvided && body.password !== defaultLoginPassword()) {
         throw new UnauthorizedError(INVALID_CREDENTIALS);
       }

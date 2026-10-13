@@ -45,8 +45,11 @@ export interface ReleaseGateCheckResult {
   releaseScope?: 'STANDARD' | 'CONCESSION';
 }
 
-/** 参与放行关卡的成品检类型（与控制器 / 前端页签口径一致） */
-const OQC_GATE_TYPES: readonly string[] = ['OQC_SF', 'OQC_SH'];
+/** 关卡类型与唯一可作为该关卡判据的检验类型 */
+const RELEASE_GATE_STAGE = {
+  PROCESS_TRANSFER: 'IPQC_FN',
+  OUTBOUND_SHIPMENT: 'OQC_SH',
+} as const;
 
 /**
  * 成品 / 出货放行关卡校验（Mandatory Release Gate）。
@@ -54,7 +57,7 @@ const OQC_GATE_TYPES: readonly string[] = ['OQC_SF', 'OQC_SH'];
  * **与传递门禁同规则**（docs/48 §2.3 场景 4、§8 硬约束 4）：判定单张检验单是否已放行这件事
  * 只有一份实现 —— `@letian/domain` 的 `evaluateStageVerdict`。本用例只做三件**不涉及规则**的事：
  *   ① 挑出本批次的成品检单（多张时按 §2.4「最近一次终判 + 复检轮次最高」取权威，不用 `orders[0]`）；
- *   ② 取该单的 MRB 结论（先按来源单号，再按批次兜底）；
+ *   ② 按来源检验单号取该单的 MRB 结论，不借用同批次其它环节的 MRB；
  *   ③ 落审计与 Outbox（放行 `RELEASE_GATE_PASSED`，阻断 `RELEASE_GATE_BLOCKED`，终止 `CHAIN_TERMINATED`）。
  *
  * 与旧实现的两个实质差异（均来自 TBD-02 与 docs/48 §8）：
@@ -70,10 +73,11 @@ export class CheckReleaseGateUseCase {
   ): Promise<ReleaseGateCheckResult> {
     return await this.uow.execute(async (ctx) => {
       // 与建单门禁共用同一把批次锁：避免「关卡校验」与「同批次建单」交错读到中间态
-      await ctx.locks.acquireXactLock(`RELEASE_GATE_${cmd.batchNo}`);
+      await ctx.locks.acquireXactLock(`LOCK_ORDER_${cmd.batchNo}`);
 
       const traceId = securityCtx?.traceId ?? crypto.randomUUID();
       const gateType = cmd.gateType ?? 'OUTBOUND_SHIPMENT';
+      const requiredStage = RELEASE_GATE_STAGE[gateType];
       const orders = await ctx.inspectionOrders.findByBatchNo(cmd.batchNo);
 
       const record = async (result: ReleaseGateCheckResult): Promise<ReleaseGateCheckResult> => {
@@ -146,7 +150,7 @@ export class CheckReleaseGateUseCase {
           allowed: false,
           code: ErrorCode.GATE_NOT_INSPECTED,
           gateCode: 'UPSTREAM_MISSING',
-          reason: `批次 [${cmd.batchNo}] 尚未进行成品出厂检验(OQC)，禁止放行入库或发货`,
+          reason: `批次 [${cmd.batchNo}] 尚未进行关卡检验(${requiredStage})，禁止放行`,
           mandatoryGate: true,
           terminateChain: false,
         });
@@ -165,19 +169,17 @@ export class CheckReleaseGateUseCase {
         });
       }
 
-      // 3. 挑权威成品检单：本关卡是「成品出厂检验」关卡，只认 OQC 类型。
-      //    该批次存在检验单但没有任何成品检单 -> 等同「未受检」，必须阻断。
-      //    （旧实现回落 orders[0]，等于允许拿 IPQC / IQC 单当成品检放行，且取哪张取决于物理行序，不可复现）
-      const oqcCandidates = orders.filter((order) =>
-        OQC_GATE_TYPES.includes(order.inspectionType)
-      );
-      if (oqcCandidates.length === 0) {
+      // 3. 挑权威关卡检验单：过程放行只认 IPQC_FN，出货放行只认 OQC_SH。
+      //    该批次只有其它环节的检验单 -> 等同「本关卡未受检」，必须阻断。
+      //    不允许拿 OQC_SF 替代 OQC_SH，或拿其他 IPQC 环节替代成品检。
+      const gateCandidates = orders.filter((order) => order.inspectionType === requiredStage);
+      if (gateCandidates.length === 0) {
         return await record({
           batchNo: cmd.batchNo,
           allowed: false,
           code: ErrorCode.GATE_NOT_INSPECTED,
           gateCode: 'UPSTREAM_MISSING',
-          reason: `批次 [${cmd.batchNo}] 无成品出厂检验(OQC)单，禁止放行入库或发货`,
+          reason: `批次 [${cmd.batchNo}] 无关卡检验(${requiredStage})单，禁止放行`,
           mandatoryGate: true,
           terminateChain: false,
         });
@@ -185,13 +187,11 @@ export class CheckReleaseGateUseCase {
 
       // 同类型多张按 §2.4（复检轮次最高 -> 最近一次终判）
       const inspection = pickAuthoritativeUpstream(
-        oqcCandidates.map((order) => ({ order }))
+        gateCandidates.map((order) => ({ order }))
       )!.order as InspectionOrderDTO;
 
-      // 4. 取该单的 MRB 结论：先按来源单号（精确），再按批次兜底（历史数据的既有口径）
-      const mrb =
-        (await ctx.mrbReviews.findByOrderNo(inspection.orderNo)) ??
-        (await ctx.mrbReviews.findByBatchNo(inspection.batchNo));
+      // 4. 只认与权威检验单关联的 MRB，不借用同批次其它环节的放行结论。
+      const mrb = await ctx.mrbReviews.findByOrderNo(inspection.orderNo);
 
       // 5. 判定：与传递门禁**同一份**领域纯函数
       const verdict = evaluateStageVerdict(inspection, mrb ?? undefined);

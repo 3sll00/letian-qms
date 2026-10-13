@@ -10,8 +10,12 @@ import {
   TraceEdge,
   TraceNodeStatus,
 } from '@letian/contracts';
-import type { InspectionType } from '@letian/contracts';
-import type { ChainAnchor, UpstreamCandidate } from '../services/transfer-gate-service';
+import type { InspectionType, OverallDecision } from '@letian/contracts';
+import type {
+  ChainAnchor,
+  ChainAnchorKind,
+  UpstreamCandidate,
+} from '../services/transfer-gate-service';
 
 /**
  * 质检方案仓储端口
@@ -66,7 +70,9 @@ export interface InspectionOrderRepository {
     data: {
       passQty?: number;
       failQty?: number;
-      judgment?: string;
+      // 与契约 OverallDecisionEnum 同一取值域（PASSED / FAILED / CONCESSION）。
+      // 原先写 string：任意拼写都能一路写进 judgment 列，契约 zod 在这一层形同虚设。
+      judgment?: OverallDecision;
       completedAt?: Date;
       inspectionNotes?: string;
     }
@@ -169,10 +175,20 @@ export interface InspectionOrderRepository {
       inspectionTypes?: readonly InspectionType[];
       /** 物料编码；省略表示不限物料（跨物料提示计数用，门禁判定必须传） */
       materialCode?: string;
+      /**
+       * **允许跨物料命中**的锚点类型（默认 `[]` = 一律要求同物料）。
+       *
+       * 口径（2026-10-08 客户定稿，取代原 TBD-03「跨物料只提示不阻断」）：
+       * 传递门禁必须传 `['HEAT']` —— 同一炉批号下的跨物料上游**参与门禁判定**。
+       * 理由：紧固件工艺链上物料编码必然随工序变化（盘条 → 毛坯 → 搓丝半成品 → 成品），
+       * 若只认同物料，炉批号链路会在最需要它的跨工序场景静默失效。
+       * 批次（BATCH）与工单（WORK_ORDER）锚点仍要求同物料：同批次即同一物理批，跨物料属异常合批。
+       */
+      crossMaterialAnchorKinds?: readonly ChainAnchorKind[];
     }
   ): Promise<readonly UpstreamCandidate[]>;
   /**
-   * 同锚点、同上游环节，但**物料编码不同**的候选单数量（TBD-03：跨物料只提示、不阻断）。
+   * 同锚点、同上游环节，但**物料编码不同**的候选单数量（兜底提示用）。
    *
    * 单独成方法而非在调用方二次过滤：跨物料命中口径必须与 `findChainCandidates` 完全同源，
    * 否则会出现「提示说有跨物料单、实际又没取回来」这类自相矛盾。

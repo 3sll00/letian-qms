@@ -1,275 +1,194 @@
 import React from 'react';
-import type { ManufacturingCertData } from '../../lib/inspectionTypes';
+import type { ManufacturingCertData, ManufacturingCertRow } from '../../lib/inspectionTypes';
 
 interface ManufacturingCertTemplateProps {
   data: ManufacturingCertData;
 }
 
+/** 14 列主表的列定义：表头为「中文行 + 英文行」两行结构（与扫描件一致） */
+const PRODUCT_COLUMNS: readonly {
+  key: keyof ManufacturingCertRow;
+  cn: string;
+  en: string;
+  width: string;
+}[] = [
+  { key: 'customerProcessNo', cn: '客户工序编号', en: 'Cus. Item NO.', width: '7%' },
+  { key: 'type', cn: '类型', en: 'Type', width: '7%' },
+  { key: 'materialGrade', cn: '材料级别', en: 'Grade', width: '6%' },
+  { key: 'specification', cn: '规格尺寸', en: 'Size', width: '9%' },
+  { key: 'quantity', cn: '数量Qty.', en: '(pcs)', width: '5.5%' },
+  { key: 'coating', cn: '涂层', en: 'Coating', width: '8%' },
+  { key: 'colour', cn: '颜色', en: 'Colour', width: '6%' },
+  { key: 'appearance', cn: '外观', en: 'Surface', width: '7.5%' },
+  { key: 'cureTest', cn: '固化测试', en: 'Cure test', width: '8%' },
+  { key: 'zincThickness', cn: '镀锌厚度', en: 'Micron', width: '7%' },
+  { key: 'dft', cn: '干膜厚度DFT', en: 'Micron', width: '7%' },
+  { key: 'hardness', cn: '硬度检验 Hardness', en: 'Test  D3363 - 05', width: '7%' },
+  { key: 'adhesion', cn: '附着力测试 Adhesion', en: 'Test  D3359 - 09', width: '7%' },
+  { key: 'saltSpray', cn: '盐雾测试 Salt Spray Test', en: '720 Hours', width: '8%' },
+];
+
+/** 页尾补空白行数：扫描件把主表撑满整页，数据行不足时以空行补齐（含原标准副行腾出的高度） */
+const FILLER_ROW_COUNT = 24;
+const FILLER_ROW_HEIGHT = 15;
+
+/** 客户字段默认值：未录入客户名时兜底显示（业务约定） */
+const DEFAULT_CUSTOMER_NAME = '江阴市乐天紧固件有限公司';
+
 /**
- * 模板二：《MANUFACTURING CERT》
- * 1:1 还原中英文对照版委外加工制造证明书 (Inspection Certificate according to EN 10204 3.1)
- * 适用场景：委外检验 (Outsource)
+ * 模板A：《MANUFACTURING CERTIFICATE》横向制造证书（docs/51）
+ *
+ * 1:1 复刻扫描件版式：公司抬头 → 带框「MANUFACTURING CERTIFICATE」标题栏 + 三列字段区
+ * （客户/交货订单参考DO ref./证书编号/客户PO号/工单编号/日期/交货点，列间无竖线分隔）→
+ * 14 列产品检验主表（数据从表头下第一行开始，空行补页）→ Remarks + EN10204 符合性声明 →
+ * DIN 50049 脚注 + MANUFACTURING BY / APPROVED BY 签字区 + 页码。
+ *
+ * 所有内容格一律「有真实值才打印」：未录入的字段渲染空白单元格，绝不放演示值。
  */
 export const ManufacturingCertTemplate: React.FC<ManufacturingCertTemplateProps> = ({ data }) => {
-  const testResults = data.testResults || {};
+  const profile = data.companyProfile;
+  const rows: ManufacturingCertRow[] = data.rows ?? [];
+  const fillerCount = Math.max(0, FILLER_ROW_COUNT - rows.length);
 
-  /**
-   * 单项判定单元格（docs/34 §5.2）：只打印表单写入的结论（Pass / Fail），未判定即空白。
-   * 模板绝不自行打印 `PASS` —— 那等于替检验员下一个他从未做过的结论。
-   */
-  const decisionCell = (decision: string | undefined) => (
-    <td
-      className={`p-1.5 text-center font-bold ${
-        decision === 'Fail' ? 'text-red-600' : 'text-green-700'
-      }`}
-    >
-      {decision ?? ''}
-    </td>
-  );
-
+  const cellCls = 'border border-black px-0.5 text-center align-middle leading-tight';
+  const labelCell = 'text-left pl-1 break-words';
 
   return (
-    <div className="bg-white text-black p-8 font-sans w-full max-w-[800px] mx-auto text-xs leading-tight print:p-0 print:max-w-none print:w-full print:text-[11px] select-text">
-      {/* 头部企业与证书名称 */}
-      <div className="border-b-2 border-black pb-3 mb-3 text-center relative">
-        <div className="text-[10px] tracking-widest text-gray-500 uppercase font-mono">
-          LETIAN QUALITY MANAGEMENT SYSTEM &bull; SUBCONTRACTING DIVISION
-        </div>
-        <h1 className="text-xl font-bold tracking-wider mt-1">{data.companyProfile?.legalNameEn ?? ''}</h1>
-        <h2 className="text-sm font-semibold text-gray-800">{data.companyProfile?.legalName ?? ''}</h2>
-        <div className="mt-2 inline-block border border-black px-4 py-1 font-bold text-sm bg-gray-100 tracking-wider">
-          MANUFACTURING &amp; OUTSOURCE INSPECTION CERTIFICATE (EN 10204 3.1)
-        </div>
-        <div className="absolute right-0 top-0 text-right text-[11px] text-gray-600 space-y-0.5">
-          <div><span className="font-semibold text-black">Cert. No:</span> <span className="font-mono">{data.certNo}</span></div>
-          <div><span className="font-semibold text-black">Issue Date:</span> <span className="font-mono">{data.dateOfIssue}</span></div>
-        </div>
+    <div
+      className="bg-white text-black mx-auto font-sans select-text w-full"
+      style={{ fontSize: '10.5px', lineHeight: 1.35 }}
+    >
+      {/* 公司抬头（企业档案主数据；未维护即留白，docs/35 §6） */}
+      <div className="font-bold" style={{ fontSize: '12.5px' }}>
+        <span>{profile?.legalName ?? ''} </span>
+        <span>{profile?.legalNameEn ?? ''}</span>
       </div>
-
-      {/* 第一部分：订单与外协信息 */}
-      <div className="border border-black mb-3">
-        <div className="bg-gray-800 text-white font-bold px-2 py-1 text-[11px] tracking-wide">
-          1. GENERAL ORDER &amp; SUBCONTRACT INFORMATION (订单与委外信息)
+      {profile?.address !== undefined && profile.address !== '' && (
+        <div className="font-bold" style={{ fontSize: '12px' }}>
+          地址：{profile.address}
         </div>
-        <table className="w-full border-collapse text-[11px]">
-          <tbody>
-            <tr className="border-b border-black">
-              <td className="w-36 bg-gray-50 p-1.5 font-semibold border-r border-black">Customer (客户名称)</td>
-              <td className="p-1.5 border-r border-black">{data.customerName}</td>
-              <td className="w-36 bg-gray-50 p-1.5 font-semibold border-r border-black">Purchase Order (采购单号)</td>
-              <td className="p-1.5 font-mono">{data.purchaseOrderNo}</td>
-            </tr>
-            <tr className="border-b border-black">
-              <td className="bg-gray-50 p-1.5 font-semibold border-r border-black">Subcontractor (委外加工商)</td>
-              <td className="p-1.5 border-r border-black font-medium text-blue-900">{data.subcontractor}</td>
-              <td className="bg-gray-50 p-1.5 font-semibold border-r border-black">Subcontract No. (外协单号)</td>
-              <td className="p-1.5 font-mono">{data.subcontractNo}</td>
-            </tr>
-            <tr className="border-b border-black">
-              <td className="bg-gray-50 p-1.5 font-semibold border-r border-black">Process Name (委外工序)</td>
-              <td className="p-1.5 border-r border-black font-semibold">{data.processName}</td>
-              <td className="bg-gray-50 p-1.5 font-semibold border-r border-black">Specification (执行规范)</td>
-              <td className="p-1.5 font-mono">{data.standardsApplied}</td>
-            </tr>
-            <tr className="border-b border-black">
-              <td className="bg-gray-50 p-1.5 font-semibold border-r border-black">Item Description (物料描述)</td>
-              <td className="p-1.5 border-r border-black font-semibold">{data.productDescription}</td>
-              <td className="bg-gray-50 p-1.5 font-semibold border-r border-black">Size / Dimension (规格尺寸)</td>
-              <td className="p-1.5 font-mono font-bold">{data.dimension}</td>
-            </tr>
-            <tr>
-              <td className="bg-gray-50 p-1.5 font-semibold border-r border-black">Heat / Batch No. (炉号/批号)</td>
-              <td className="p-1.5 border-r border-black font-mono">{data.heatNo} / {data.batchNo}</td>
-              <td className="bg-gray-50 p-1.5 font-semibold border-r border-black">Quantity &amp; Weight (数量与重量)</td>
-              <td className="p-1.5 font-mono">{data.quantityPcs} PCS / {data.weightKg} KG</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      {/* 第二部分：委外关键理化与工艺特性检验 (表面处理 / 热处理 / 机械特性) */}
-      <div className="border border-black mb-3">
-        <div className="bg-gray-800 text-white font-bold px-2 py-1 text-[11px] flex justify-between items-center">
-          <span>2. OUTSOURCE TECHNICAL INSPECTION &amp; TEST RESULTS (委外技术检验结果)</span>
-          <span className="text-[10px] font-normal text-gray-300">Coating &bull; Heat Treatment &bull; Mechanical</span>
+      )}
+      {(profile as { addressEn?: string } | undefined)?.addressEn && (
+        <div className="font-bold" style={{ fontSize: '12px' }}>
+          {(profile as { addressEn?: string }).addressEn}
         </div>
-        <table className="w-full border-collapse text-[11px]">
-          <thead>
-            <tr className="bg-gray-100 text-center border-b border-black">
-              <th className="border-r border-black p-1.5 w-1/4">Inspection Item (检验项目)</th>
-              <th className="border-r border-black p-1.5 w-1/3">Specified Requirement (规范标准要求)</th>
-              <th className="border-r border-black p-1.5 w-1/4">Actual Test Result (实测检验结果)</th>
-              <th className="p-1.5 w-16">Decision</th>
-            </tr>
-          </thead>
-          <tbody>
-            {testResults.coatingThickness && (
-              <tr className="border-b border-black">
-                <td className="border-r border-black p-1.5 font-medium bg-gray-50">
-                  Coating Thickness (镀层/涂层厚度)
-                </td>
-                <td className="border-r border-black p-1.5 font-mono">{testResults.coatingThickness.standard}</td>
-                <td className="border-r border-black p-1.5 font-mono font-bold text-blue-900">
-                  {testResults.coatingThickness.actual}
-                  {testResults.coatingThickness.points && (
-                    <div className="text-[10px] text-gray-500 font-normal mt-0.5">
-                      Points: {testResults.coatingThickness.points.join(', ')} μm
-                    </div>
-                  )}
-                </td>
-                {decisionCell(testResults.coatingThickness.decision)}
-              </tr>
-            )}
+      )}
 
-            {testResults.saltSprayHours && (
-              <tr className="border-b border-black">
-                <td className="border-r border-black p-1.5 font-medium bg-gray-50">
-                  Salt Spray Test (中性盐雾 NSS)
-                </td>
-                <td className="border-r border-black p-1.5 font-mono">{testResults.saltSprayHours.standard}</td>
-                <td className="border-r border-black p-1.5 font-mono font-bold text-blue-900">
-                  {testResults.saltSprayHours.actual}
-                </td>
-                {decisionCell(testResults.saltSprayHours.decision)}
-              </tr>
-            )}
-
-            {testResults.adhesion && (
-              <tr className="border-b border-black">
-                <td className="border-r border-black p-1.5 font-medium bg-gray-50">
-                  Coating Adhesion (涂层附着力)
-                </td>
-                <td className="border-r border-black p-1.5 font-mono">{testResults.adhesion.standard}</td>
-                <td className="border-r border-black p-1.5 font-mono font-bold text-blue-900">
-                  {testResults.adhesion.actual}
-                </td>
-                {decisionCell(testResults.adhesion.decision)}
-              </tr>
-            )}
-
-            {testResults.deEmbrittlement && (
-              <tr className="border-b border-black">
-                <td className="border-r border-black p-1.5 font-medium bg-gray-50">
-                  De-embrittlement (去氢脆烘烤处理)
-                </td>
-                <td className="border-r border-black p-1.5 font-mono">{testResults.deEmbrittlement.standard}</td>
-                <td className="border-r border-black p-1.5 font-mono font-bold text-blue-900">
-                  {testResults.deEmbrittlement.actual}
-                </td>
-                {decisionCell(testResults.deEmbrittlement.decision)}
-              </tr>
-            )}
-
-            {testResults.surfaceHardness && (
-              <tr className="border-b border-black">
-                <td className="border-r border-black p-1.5 font-medium bg-gray-50">
-                  Surface Hardness (表面硬度)
-                </td>
-                <td className="border-r border-black p-1.5 font-mono">{testResults.surfaceHardness.standard}</td>
-                <td className="border-r border-black p-1.5 font-mono font-bold text-blue-900">
-                  {testResults.surfaceHardness.actual}
-                </td>
-                {decisionCell(testResults.surfaceHardness.decision)}
-              </tr>
-            )}
-
-            {testResults.coreHardness && (
-              <tr className="border-b border-black">
-                <td className="border-r border-black p-1.5 font-medium bg-gray-50">
-                  Core Hardness (心部硬度)
-                </td>
-                <td className="border-r border-black p-1.5 font-mono">{testResults.coreHardness.standard}</td>
-                <td className="border-r border-black p-1.5 font-mono font-bold text-blue-900">
-                  {testResults.coreHardness.actual}
-                </td>
-                {decisionCell(testResults.coreHardness.decision)}
-              </tr>
-            )}
-
-            {testResults.caseDepth && (
-              <tr className="border-b border-black">
-                <td className="border-r border-black p-1.5 font-medium bg-gray-50">
-                  Effective Case Depth (有效硬化层深度)
-                </td>
-                <td className="border-r border-black p-1.5 font-mono">{testResults.caseDepth.standard}</td>
-                <td className="border-r border-black p-1.5 font-mono font-bold text-blue-900">
-                  {testResults.caseDepth.actual}
-                </td>
-                {decisionCell(testResults.caseDepth.decision)}
-              </tr>
-            )}
-
-            {testResults.torqueStrength && (
-              <tr className="border-b border-black">
-                <td className="border-r border-black p-1.5 font-medium bg-gray-50">
-                  Torque Strength (破坏扭矩试验)
-                </td>
-                <td className="border-r border-black p-1.5 font-mono">{testResults.torqueStrength.standard}</td>
-                <td className="border-r border-black p-1.5 font-mono font-bold text-blue-900">
-                  {testResults.torqueStrength.actual}
-                </td>
-                {decisionCell(testResults.torqueStrength.decision)}
-              </tr>
-            )}
-
-            <tr>
-              <td className="border-r border-black p-1.5 font-medium bg-gray-50">
-                Visual &amp; Workmanship (外观与做工)
-              </td>
-              <td className="border-r border-black p-1.5 font-mono">{data.visualStandard}</td>
-              <td className="border-r border-black p-1.5 font-mono font-bold text-blue-900">{data.visualActual}</td>
-              <td className="p-1.5 text-center font-bold text-green-700">{data.visualInspection}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      {/* 第三部分：合规性声明与印章 */}
-      <div className="border border-black p-3 bg-gray-50 mb-3 relative">
-        <div className="w-2/3 space-y-1.5">
-          <div className="font-bold text-xs uppercase tracking-wider text-gray-900">
-            3. CERTIFICATION &amp; COMPLIANCE STATEMENT (合格声明)
-          </div>
-          <p className="text-[10px] text-gray-700 leading-normal text-justify">
-            {data.complianceStatement}
-          </p>
-          {data.remarks && (
-            <div className="text-[10px] text-gray-600 mt-1">
-              <span className="font-semibold">Remarks (外协备注):</span> {data.remarks}
+      {/* 标题框 + 三列字段区（外框包裹，内部横线分隔） */}
+      <div className="border border-black mt-2">
+        <div
+          className="text-center font-bold border-b border-black py-1 tracking-wide"
+          style={{ fontSize: '15px' }}
+        >
+          MANUFACTURING CERTIFICATE
+        </div>
+        <div className="grid" style={{ gridTemplateColumns: '42% 26% 32%' }}>
+          {/* 左列：客户 / 客户PO号 / 交货点 */}
+          <div className="p-1">
+            <div className={labelCell}>
+              <span className="font-semibold">客户Customer :</span>{' '}
+              {data.customerName && data.customerName.trim() !== ''
+                ? data.customerName
+                : DEFAULT_CUSTOMER_NAME}
             </div>
-          )}
-        </div>
-
-        {/* 委外检验印章 */}
-        <div className="border-2 border-blue-800 rounded-full w-24 h-24 flex flex-col items-center justify-center text-blue-800 font-bold text-[8.5px] leading-tight rotate-[-8deg] opacity-80 select-none pointer-events-none absolute right-6 -top-2">
-          <div className="text-[9px] border-b border-blue-700 pb-0.5 uppercase tracking-wide">LETIAN QA</div>
-          <div>SUBCONTRACT</div>
-          <div className="text-[8px] font-mono mt-0.5">{data.dateOfIssue}</div>
-          {data.overallDecision !== undefined && data.overallDecision !== '' && (
-            <div className="text-[8px] font-bold text-green-700">{data.overallDecision}</div>
-          )}
+            <div className={labelCell}>
+              <span className="font-semibold">客户采购订单编号Your PO No. :</span>{' '}
+              {data.purchaseOrderNo ?? ''}
+            </div>
+            <div className={labelCell}>
+              <span className="font-semibold">交货点DELIVERY POINT :</span> {data.deliveryPoint ?? ''}
+            </div>
+          </div>
+          {/* 中列：交货订单参考 / 工单编号 */}
+          <div className="p-1">
+            <div className={labelCell}>
+              <span className="font-semibold">交货订单参考DO ref. :</span> {data.deliveryNoteNo ?? ''}
+            </div>
+            <div className={labelCell}>
+              <span className="font-semibold">工单编号Jobcard No. :</span> {data.jobcardNo ?? ''}
+            </div>
+          </div>
+          {/* 右列：证书编号 / 日期 */}
+          <div className="p-1">
+            <div className={labelCell}>
+              <span className="font-semibold">证书编号Certificate No.</span> {data.certNo ?? ''}
+            </div>
+            <div className={labelCell}>
+              <span className="font-semibold">日期Date:</span> {data.dateOfIssue ?? ''}
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* 第四部分：签发与签字人 */}
-      <div className="grid grid-cols-2 gap-4 border border-black p-3 text-[11px]">
+      {/* 14 列产品检验主表 */}
+      <table className="w-full border-collapse mt-0" style={{ tableLayout: 'fixed' }}>
+        <thead>
+          <tr>
+            {PRODUCT_COLUMNS.map((col) => (
+              <th
+                key={col.key}
+                className="border border-black font-bold text-center align-middle px-0.5"
+                style={{ width: col.width, fontSize: '10.5px', lineHeight: 1.25 }}
+              >
+                <div>{col.cn}</div>
+                <div>{col.en}</div>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {/* 数据行：紧跟表头从第一行开始，不留空行 */}
+          {rows.map((row, idx) => (
+            <tr key={idx} style={{ height: '20px' }}>
+              {PRODUCT_COLUMNS.map((col) => (
+                <td key={col.key} className={cellCls} style={{ fontSize: '10.5px' }}>
+                  {row[col.key] ?? ''}
+                </td>
+              ))}
+            </tr>
+          ))}
+          {/* 空白补齐行（扫描件主表撑满整页） */}
+          {Array.from({ length: fillerCount }).map((_, idx) => (
+            <tr key={`filler-${idx}`} style={{ height: `${FILLER_ROW_HEIGHT}px` }}>
+              {PRODUCT_COLUMNS.map((col) => (
+                <td key={col.key} className={cellCls} />
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {/* Remarks + 符合性声明 */}
+      <div className="mt-2 px-2">
         <div>
-          <span className="text-gray-500 block text-[10px]">Inspected by Subcontract Inspector (委外检验员):</span>
-          <div className="font-semibold text-black mt-2 font-mono">{data.inspectorName}</div>
-          <div className="text-[9px] text-gray-400 mt-0.5">Signature &amp; Date: ____________________</div>
+          <span className="font-semibold">Remarks :</span> {data.remarks ?? ''}
         </div>
-        <div>
-          <span className="text-gray-500 block text-[10px]">Verified by QA Manager (质量经理审批):</span>
-          <div className="font-semibold text-black mt-2 font-mono">{data.qaManagerName}</div>
-          <div className="text-[9px] text-gray-400 mt-0.5">Signature &amp; Date: ____________________</div>
+        <div className="font-bold text-center mt-0.5" style={{ fontSize: '10px' }}>
+          THE PRODUCT SUPPLIED ARE IN COMPLIANCE WITH THE REQUIREMENTS OF ASTM AND THE ORDER USING
+          ELECTRIC ARC FURNACE AND VACUUM CONTROL DEGASSING PROCESS.
         </div>
       </div>
 
-      <div className="text-center text-[9px] text-gray-400 mt-2">
-        {data.companyProfile?.legalNameEn
-          ? data.companyProfile.legalNameEn + ' · Quality Department'
-          : 'Quality Department'}{' '}
-        &bull; EN 10204 Type 3.1 Certified Document
+      {/* 页脚：DIN 引用 + 制造方 / 批准签字 */}
+      <div className="border-t border-black mt-2 pt-1 flex justify-between items-start">
+        <div>
+          <div>DIN 50049 / BS EN 10204 : 1991 3.1B (EN 10204 : 2004 3.1)</div>
+          <div className="mt-6 font-semibold" style={{ fontSize: '10px' }}>
+            Default hardness in HB unit
+          </div>
+        </div>
+        <div className="text-left">
+          <div className="font-bold">MANUFACTURING BY :</div>
+          <div>{profile?.legalNameEn ?? profile?.legalName ?? ''}</div>
+          <div className="border-b border-black mt-6" style={{ width: '230px', height: '18px' }}>
+            <span className="font-semibold">{data.qaManagerName ?? ''}</span>
+          </div>
+          <div className="font-bold">APPROVED BY : QA / QC</div>
+        </div>
+      </div>
+
+      <div className="text-center mt-3" style={{ fontSize: '10.5px' }}>
+        第 1 页，共 1 页
       </div>
     </div>
   );

@@ -19,6 +19,7 @@ import {
   QualityReportData,
 } from '@letian/contracts';
 import { getErpConnectionPool } from './erp-pool.js';
+import { renderReportFile } from './report-renderer.js';
 export * from './erp-pool.js';
 
 export class GuanjiaPoSqlServerAdapter implements IErpPort {
@@ -318,29 +319,11 @@ export class TemplateEngineAdapter implements IReportTemplatePort {
 
   async getTemplateById(id: string): Promise<QualityReportTemplate | null> {
     const list = await this.listTemplates();
-    return list.find((t) => t.id === id) || list[0] || null;
+    return list.find((t) => t.id === id) ?? null;
   }
 
-  async renderReport(templateId: string, reportData: QualityReportData, format: 'PDF' | 'EXCEL'): Promise<RenderedReportFile> {
-    const title = '江阴市乐天精工紧固件有限公司 - 质量检验报告书 (' + format + ')';
-    const lines = [
-      '=============================================================',
-      '  ' + title,
-      '=============================================================',
-      '报告单号: ' + reportData.reportNo,
-      '检验单号: ' + reportData.orderNo,
-      '物料编号: ' + reportData.materialCode + ' (' + reportData.materialName + ')',
-      '检验结论: ' + reportData.overallDecision,
-      '检验人员: ' + (reportData.inspectorName || '质量工程师'),
-      '检验日期: ' + reportData.inspectionDate,
-      '=============================================================',
-    ];
-    const text = lines.join('\n');
-    return {
-      fileName: 'COA-' + reportData.reportNo + '.' + (format === 'PDF' ? 'pdf' : 'xlsx'),
-      mimeType: format === 'PDF' ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      buffer: new TextEncoder().encode(text),
-    };
+  async renderReport(_templateId: string, reportData: QualityReportData, format: 'PDF' | 'EXCEL'): Promise<RenderedReportFile> {
+    return renderReportFile(reportData, format);
   }
 }
 export { TemplateEngineAdapter as StandardReportEngine };

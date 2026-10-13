@@ -1,5 +1,6 @@
 import Fastify, { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
+import multipart from '@fastify/multipart';
 import { zodValidatorPlugin, errorHandlerPlugin, authPlugin } from './plugins';
 import { createApiContainer, type ApiContainer } from './container';
 import {
@@ -43,12 +44,18 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   });
 
+  // 1.1 multipart 表单解析（方案 Excel 导入 POST /api/v1/plans/import 使用）：
+  //     单文件、上限 10MB；超限的文件流被截断并由路由侧明确拒绝，不静默入库
+  await app.register(multipart, {
+    limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+  });
+
   // 2. 注册 Zod 契约校验与 RFC 7807 统一错误响应插件
   await app.register(zodValidatorPlugin);
   await app.register(errorHandlerPlugin);
 
   // 3. 注册 JWT 身份认证插件（按路由进行策略鉴权）
-  await app.register(authPlugin);
+  await app.register(authPlugin, { container });
 
   // 4. 根健康检查（免鉴权，供探针使用）
   app.get('/health', async () => {

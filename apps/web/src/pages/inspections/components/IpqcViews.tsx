@@ -19,10 +19,17 @@ import {
 } from 'lucide-react';
 import { CertificatePrintModal } from '../../../components/certificate/CertificatePrintModal';
 import { PlanMatchBanner } from '../../../components/common/PlanMatchBanner';
-import { TransferGateBadge } from '../../../components/common/TransferGateBadge';
-import { buildIpqcCertificateData } from '../../../lib/certificateDataService';
-import type { QualityCertificateData } from '../../../lib/inspectionTypes';
+import {
+  buildIpqcCertificateData,
+  buildManufacturingCertData,
+} from '../../../lib/certificateDataService';
+import type {
+  CertTemplateKind,
+  ManufacturingCertData,
+  QualityCertificateData,
+} from '../../../lib/inspectionTypes';
 import { api, errorMessage } from '../../../lib/api';
+import { DateInput } from '../../../components/common/DateInput';
 import { loadCompanyProfile } from '../../../lib/companyProfile';
 import { StatusBadge, BadgeTone } from '../../../components/StatusBadge';
 import { useMatchedPlan } from '../../../hooks/useMatchedPlan';
@@ -43,6 +50,20 @@ import type { InspectionType } from '@letian/contracts';
  * 终审时由 MRB 处置决策覆盖（docs/44-过程委外出货不合格自动进MRB口径补齐设计.md §1/§4.3）。
  * 合格 / 检验中不下发 —— 合格单不该带处置意图。
  */
+/** 台账展示上限：命中超过 1 万条时只允许浏览前 1 万条（与来料检验台账口径一致），并提示缩小日期范围 */
+const MAX_DISPLAY_ROWS = 10000;
+
+/**
+ * 默认检验日期范围 = **不限**（空串 = 不下发日期条件，命中全部历史）。
+ *
+ * 2026-10-12 决策：真实 MES 数据集中在 2022 年（下料/滚丝最晚只到 2025-05），
+ * 默认「本月」乃至「近一年」都会查空、看着像没接上数据，故默认放开，
+ * 由用户按需收窄日期（配合 MAX_DISPLAY_ROWS 展示上限兜底）。
+ */
+function defaultIpqcDateRange(): { from: string; to: string } {
+  return { from: '', to: '' };
+}
+
 const IPQC_PRELIMINARY_DISPOSITIONS = [
   { value: 'REWORK', label: '返工返修' },
   { value: 'CONCESSION', label: '让步接收' },
@@ -111,6 +132,10 @@ interface InspectionItemData {
   completedAt?: string;
   inspectionNotes?: string;
   isMandatoryGate?: boolean;
+  /** 证书模板（docs/51）：建单前选定的版式；历史单无值即按缺省 QUALITY 出证 */
+  certTemplate?: CertTemplateKind;
+  /** 证书专用补充字段袋（cert_fields） */
+  certFields?: Record<string, string>;
   processStep?: string;
   blankingLength?: number;
   threadSpec?: string;
@@ -341,13 +366,6 @@ function buildIpqcLedgerColumns(sub: IpQcLedgerSub, handlers: IpQcLedgerHandlers
         const statusInfo = formatIpqcStatus(row.status);
         return <StatusBadge status={statusInfo.label} tone={statusInfo.tone} />;
       },
-    },
-    {
-      // 传递（docs/48 §4.6）：本环节的上游是否已放行 —— 徽标只翻译服务端判定码，前端不判定
-      key: 'transfer',
-      title: '传递',
-      tdClass: 'whitespace-nowrap',
-      render: (row) => <TransferGateBadge state={row} />,
     }
   );
 
@@ -416,9 +434,14 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
   const [filterWorkOrderNo, setFilterWorkOrderNo] = useState('');
   const [filterMaterial, setFilterMaterial] = useState('');
   const [filterStatus, setFilterStatus] = useState('全部');
+  // 检验日期范围：默认不限（空=不下发条件），按建单时间（createdAt）口径，对应后端 dateFrom/dateTo
+  const [filterDateFrom, setFilterDateFrom] = useState(() => defaultIpqcDateRange().from);
+  const [filterDateTo, setFilterDateTo] = useState(() => defaultIpqcDateRange().to);
 
   const [printModalOpen, setPrintModalOpen] = useState(false);
+  const [certKind, setCertKind] = useState<CertTemplateKind>('QUALITY');
   const [certData, setCertData] = useState<QualityCertificateData | undefined>(undefined);
+  const [mfgData, setMfgData] = useState<ManufacturingCertData | undefined>(undefined);
   const [detailModalOpen, setDetailModalOpen] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState<InspectionItemData | null>(null);
   const [inspectModalOpen, setInspectModalOpen] = useState(false);
@@ -527,6 +550,14 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
         else if (filterStatus === '不合格') queryParams.status = 'FAILED';
       }
 
+      // 检验日期范围（YYYY-MM-DD，含起止当日）：起止选反时自动对调，避免「选反了查空」的困惑
+      const rawFrom = filterDateFrom.trim();
+      const rawTo = filterDateTo.trim();
+      const [safeFrom, safeTo] =
+        rawFrom !== '' && rawTo !== '' && rawFrom > rawTo ? [rawTo, rawFrom] : [rawFrom, rawTo];
+      if (safeFrom !== '') queryParams.dateFrom = safeFrom;
+      if (safeTo !== '') queryParams.dateTo = safeTo;
+
       const res = await api.get<{
         items: InspectionItemData[];
         total: number;
@@ -541,7 +572,7 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
     } finally {
       setTableLoading(false);
     }
-  }, [activeType, sub, page, pageSize, filterOrderNo, filterWorkOrderNo, filterMaterial, filterStatus]);
+  }, [activeType, sub, page, pageSize, filterOrderNo, filterWorkOrderNo, filterMaterial, filterStatus, filterDateFrom, filterDateTo]);
 
   useEffect(() => {
     if (sub === 'overview') {
@@ -578,9 +609,18 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
     setFilterWorkOrderNo('');
     setFilterMaterial('');
     setFilterStatus('全部');
+    // 检验日期重置为「不限」
+    const dr = defaultIpqcDateRange();
+    setFilterDateFrom(dr.from);
+    setFilterDateTo(dr.to);
     setPage(1);
     setSelectedIds([]);
   };
+
+  // 展示上限：命中超过 1 万条时只允许浏览前 1 万条（100 页 × 10 条/页），
+  // 计数显示「10,000+」并提示缩小日期范围——避免无界翻页拖垮后端。
+  const overCap = total > MAX_DISPLAY_ROWS;
+  const displayTotal = Math.min(total, MAX_DISPLAY_ROWS);
 
   /**
    * 行级证书（docs/35 §10 M9）：所有行可点，未录入的项留白。
@@ -589,6 +629,33 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
   const handleOpenCert = (item: InspectionItemData) => {
     void (async () => {
       const companyProfile = await loadCompanyProfile();
+      // 版式取本单建单时选定的 cert_template（docs/51）；历史单无值按缺省 QUALITY 出证
+      const kind: CertTemplateKind = item.certTemplate ?? 'QUALITY';
+      if (kind === 'MANUFACTURING') {
+        setMfgData(
+          buildManufacturingCertData({
+            docNo: item.orderNo,
+            orderNo: item.orderNo,
+            materialName: item.materialName,
+            productName: item.materialName,
+            specification: item.specification,
+            batchNo: item.batchNo,
+            quantity: item.totalQty === undefined ? '' : `${item.totalQty} ${item.unit ?? ''}`.trim(),
+            inspector: item.inspectorName,
+            workOrderNo: item.workOrderNo,
+            items: item.items,
+            certFields: item.certFields,
+            ...(item.approverName !== undefined && item.approverName !== ''
+              ? { approverName: item.approverName }
+              : {}),
+            ...(companyProfile !== null ? { companyProfile } : {}),
+          })
+        );
+        setCertData(undefined);
+        setCertKind(kind);
+        setPrintModalOpen(true);
+        return;
+      }
       const data = buildIpqcCertificateData({
       // 证书编号读 orderNo：旧实现把单号写进 `id` 键，builder 读不到 -> 证书编号与弹窗标题恒空白
       orderNo: item.orderNo,
@@ -607,10 +674,13 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
       // 实测分区由证书服务从**原始工单实测项**里按 metricCategory 取真实数据（docs/34 §5.1）：
       // 这里不再预拼「符合」「OK」之类的展示文案 —— 那会把未录入的项说成已检合格。
         items: item.items,
+        certFields: item.certFields,
         ...(item.approverName !== undefined && item.approverName !== '' ? { approverName: item.approverName } : {}),
         ...(companyProfile !== null ? { companyProfile } : {}),
       });
       setCertData(data);
+      setMfgData(undefined);
+      setCertKind(kind);
       setPrintModalOpen(true);
     })();
   };
@@ -620,6 +690,10 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
     setDetailModalOpen(true);
   };
 
+  /**
+   * 进入检视（docs/51 收窄）：IPQC 过程检验只出质保书（QUALITY），不再弹模板选择框；
+   * 本单若已存 cert_template 仍按其版式出证（历史单兼容），但不再要求操作员现选。
+   */
   const handleOpenInspect = (item: InspectionItemData) => {
     setInspectingOrder(item);
     setInspectVerdict(item.status === 'FAILED' ? 'FAILED' : 'PASSED');
@@ -637,10 +711,11 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
     setInspectSubmitting(true);
     try {
       // 先落库方案指标实测值：只提交属于本单方案快照的指标编码，避免服务端 400 校验失败。
-      // 未录入任何实测值时跳过，保持"快速终判"轻量流程不变。
+      // 不解检（EXEMPT）行也要随下发——服务端据此把该项判成 EXEMPT 并剔除出合格率分母；
+      // 此前整条被过滤，库里永远停在 PENDING（v2.6.0 未结模块）。
       const knownCodes = new Set((inspectingOrder.items ?? []).map((item) => item.itemCode));
       const measured = inspectPlanRows.filter(
-        (row) => !row.isExempt && row.actual.trim() !== '' && knownCodes.has(row.itemCode)
+        (row) => (row.isExempt || row.actual.trim() !== '') && knownCodes.has(row.itemCode)
       );
       if (measured.length > 0) {
         await api.post(`/inspections/${inspectingOrder.id}/submit-measurements`, {
@@ -650,9 +725,13 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
           passQty: inspectPassQty,
           failQty: inspectFailQty,
           items: measured.map((row) => {
+            if (row.isExempt) {
+              return { itemCode: row.itemCode, isExempt: true };
+            }
             const numeric = row.planItem.dataType === 'NUMERIC' ? parseMeasuredNumber(row.actual) : undefined;
             return {
               itemCode: row.itemCode,
+              isExempt: false,
               ...(numeric !== undefined ? { measuredVal: numeric } : {}),
               measuredText: row.actual,
             };
@@ -1228,6 +1307,24 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
             <option value="不合格">不合格</option>
           </select>
         </div>
+        <div className="flex items-center gap-2">
+          <span className="text-slate-600 font-medium">检验日期</span>
+          <DateInput
+            placeholder="开始日期"
+            value={filterDateFrom}
+            onChange={(e) => setFilterDateFrom(e.target.value)}
+            wrapClassName="w-32"
+            className="border border-slate-200 rounded px-2.5 py-1.5 text-slate-700 focus:outline-none focus:border-blue-500"
+          />
+          <span className="text-slate-400 shrink-0">~</span>
+          <DateInput
+            placeholder="结束日期"
+            value={filterDateTo}
+            onChange={(e) => setFilterDateTo(e.target.value)}
+            wrapClassName="w-32"
+            className="border border-slate-200 rounded px-2.5 py-1.5 text-slate-700 focus:outline-none focus:border-blue-500"
+          />
+        </div>
 
         <div className="ml-auto flex items-center gap-2">
           <button
@@ -1390,11 +1487,14 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
         {/* Pagination Bar */}
         <div className="p-3 bg-slate-50/70 border-t border-slate-200 flex items-center justify-between text-xs text-slate-500">
           <div>
-            共 <span className="font-semibold text-slate-700">{total}</span> 条记录
+            共 <span className="font-semibold text-slate-700">{overCap ? '10,000+' : total}</span> 条记录
             {total > 0 && (
               <span className="ml-2">
-                (当前第 {(page - 1) * pageSize + 1} - {Math.min(page * pageSize, total)} 条)
+                (当前第 {(page - 1) * pageSize + 1} - {Math.min(page * pageSize, displayTotal)} 条)
               </span>
+            )}
+            {overCap && (
+              <span className="ml-2 text-amber-600">（展示前 {MAX_DISPLAY_ROWS} 条，请收窄日期范围）</span>
             )}
           </div>
           <div className="flex items-center gap-2">
@@ -1406,11 +1506,11 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
               <ChevronLeft className="w-3.5 h-3.5" /> 上一页
             </button>
             <span className="font-medium text-slate-700">
-              {page} / {Math.max(1, Math.ceil(total / pageSize))}
+              {page} / {Math.max(1, Math.ceil(displayTotal / pageSize))}
             </span>
             <button
-              onClick={() => setPage((p) => (p * pageSize < total ? p + 1 : p))}
-              disabled={page * pageSize >= total}
+              onClick={() => setPage((p) => (p * pageSize < displayTotal ? p + 1 : p))}
+              disabled={page * pageSize >= displayTotal}
               className="px-2.5 py-1 rounded border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
             >
               下一页 <ChevronRight className="w-3.5 h-3.5" />
@@ -2043,12 +2143,13 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
         </div>
       )}
 
-      {/* CERTIFICATE PRINT MODAL */}
+      {/* CERTIFICATE PRINT MODAL（版式按本单 cert_template，docs/51） */}
       <CertificatePrintModal
         isOpen={printModalOpen}
         onClose={() => setPrintModalOpen(false)}
-        type="quality"
+        type={certKind === 'MANUFACTURING' ? 'manufacturing' : 'quality'}
         qualityData={certData}
+        manufacturingData={mfgData}
       />
     </div>
   );

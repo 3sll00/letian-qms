@@ -103,7 +103,7 @@ async function runReinspectionResumeTests() {
   ) =>
     app.inject({
       method: 'POST',
-      url: `/api/v1/inspections/${orderId}/submit-measurements`,
+      url: `/api/v1/inspections/${orderId}/results`,
       headers: authHeader,
       payload,
     });
@@ -239,6 +239,38 @@ async function runReinspectionResumeTests() {
     );
     console.log(`✔ 复检单 ${directOrder.orderNo}：未经草稿的一次性提交 200 -> PASSED`);
 
+    const routeBatchNo = 'VERIFY-REINSPECT-ROUTE';
+    const routeOrder = await createOrder(routeBatchNo);
+    const failedRes = await app.inject({
+      method: 'POST',
+      url: `/api/v1/inspections/${routeOrder.id}/status`,
+      headers: authHeader,
+      payload: { status: 'FAILED', judgment: 'FAILED', failQty: 10 },
+    });
+    assert.equal(failedRes.statusCode, 200, `建复检单前置终判必须成功：${failedRes.body}`);
+    const reinspectionRes = await app.inject({
+      method: 'POST',
+      url: `/api/v1/inspections/${routeOrder.id}/re-inspection`,
+      headers: authHeader,
+      payload: { inspectorName: '张强', reworkReason: '接口直接发起返工复检' },
+    });
+    assert.equal(reinspectionRes.statusCode, 201, `返工复检路由必须返回 201：${reinspectionRes.body}`);
+    const reinspectionOrder = JSON.parse(reinspectionRes.body) as {
+      id: string;
+      orderNo: string;
+      batchNo: string;
+      status: string;
+      inspectorName?: string;
+    };
+    createdOrderIds.push(reinspectionOrder.id);
+    createdOrderNos.push(reinspectionOrder.orderNo);
+    assert.equal(reinspectionOrder.orderNo, `${routeOrder.orderNo}-R2`);
+    assert.equal(reinspectionOrder.batchNo, routeBatchNo);
+    assert.equal(reinspectionOrder.status, 'PENDING');
+    assert.equal(reinspectionOrder.inspectorName, '张强');
+    assert.equal(await readStatus(routeOrder.id), 'RE_INSPECTING', '源单必须同事务转复检中');
+    console.log(`✔ /re-inspection 路由：${routeOrder.orderNo} -> ${reinspectionOrder.orderNo}`);
+
     // ==== 4. 回归：未开检的 PENDING 单行为不变 ====
     const pendingOrder = await createOrder('VERIFY-REINSPECT-C');
     const pendingDetail = await loadItems(pendingOrder.id);
@@ -294,6 +326,14 @@ async function runReinspectionResumeTests() {
         .deleteFrom('batchTraceNodes')
         .where('batchNo', 'in', touchedBatches)
         .executeTakeFirst();
+      const deletedEdgesBySource = await db
+        .deleteFrom('batchTraceRelations')
+        .where('parentBatch', 'in', createdOrderNos.map((orderNo) => `${orderNo}:FAIL`))
+        .executeTakeFirst();
+      const deletedEdgesByTarget = await db
+        .deleteFrom('batchTraceRelations')
+        .where('childBatch', 'in', createdOrderNos)
+        .executeTakeFirst();
       const deleted = await db
         .deleteFrom('inspectionOrders')
         .where('id', 'in', createdOrderIds)
@@ -302,7 +342,9 @@ async function runReinspectionResumeTests() {
         `清理：删除本次新建的检验单 ${String(deleted.numDeletedRows)} / ${createdOrderIds.length} 条` +
           `（关联 MRB 单 ${String(deletedMrb.numDeletedRows)} 条 / 台账条目 ${String(
             deletedPool.numDeletedRows
-          )} 条 / 追溯节点 ${String(deletedNodes.numDeletedRows)} 条）`
+          )} 条 / 追溯节点 ${String(deletedNodes.numDeletedRows)} 条 / 血缘边 ${String(
+            (deletedEdgesBySource.numDeletedRows ?? 0n) + (deletedEdgesByTarget.numDeletedRows ?? 0n)
+          )} 条）`
       );
     }
     await app.close();

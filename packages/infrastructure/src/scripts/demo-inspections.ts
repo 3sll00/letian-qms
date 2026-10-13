@@ -48,12 +48,7 @@ import { HeatBatchTraceService } from '@letian/domain';
 import { db } from '../database/connection.js';
 import { KyselyInspectionOrderRepository } from '../repositories/inspection-order-repository.js';
 import { KyselyInspectionPlanRepository } from '../repositories/inspection-plan-repository.js';
-import {
-  buildOrderItems,
-  buildSnapshot,
-  deriveQty,
-  itemResultKindOf,
-} from '../seeds/order-builders.js';
+import { buildInspectionOrderFields, itemResultKindOf } from '../seeds/order-builders.js';
 
 const DEFAULT_DEMO_BATCH_PREFIXES = ['TEST2609-'] as const;
 
@@ -281,7 +276,6 @@ async function repairOrder(
   if (versionId === undefined) return { kind: 'no-active-version', planCode: plan.planCode };
 
   const itemKind = itemResultKindOf(order.overallDecision);
-  const { passQty, failQty } = deriveQty(order.sampleQty, itemKind);
 
   const next: InspectionOrder = {
     ...order,
@@ -293,10 +287,12 @@ async function repairOrder(
           unit: realigned.unit,
         }
       : {}),
-    planVersionId: versionId,
-    planSnapshot: buildSnapshot(
-      { planCode: plan.planCode, planName: plan.planName },
-      {
+    // 快照、指标行与数量由统一 builder 重算；旧行里即使已有这些字段，也会被同一口径覆盖。
+    ...buildInspectionOrderFields({
+      sampleQty: order.sampleQty,
+      itemKind,
+      plan: { planCode: plan.planCode, planName: plan.planName },
+      version: {
         id: versionId,
         versionNo: version.versionNo,
         items: version.items,
@@ -305,11 +301,8 @@ async function repairOrder(
         ...(version.strictness !== undefined ? { strictness: version.strictness } : {}),
       },
       // 快照时间取该单的建单时间：快照本就是"建单当时固化"的产物，不用"现在"冒充历史时间
-      order.createdAt ?? new Date().toISOString()
-    ),
-    items: buildOrderItems(version.items, itemKind),
-    passQty,
-    failQty,
+      snapshotAt: order.createdAt ?? new Date().toISOString(),
+    }),
   };
 
   // 写库前先用同一份契约校验：修完仍不合规就宁可不写（fail-closed）
@@ -647,7 +640,6 @@ async function seedHeatTraceDemo(ctx: {
     }
 
     const itemKind = itemResultKindOf(spec.overallDecision);
-    const { passQty, failQty } = deriveQty(spec.sampleQty, itemKind);
     const decidedMs = Date.parse(spec.decidedAt);
     const createdAt = new Date(decidedMs - 3_600_000);
 
@@ -664,16 +656,15 @@ async function seedHeatTraceDemo(ctx: {
       unit: binding.material.unit,
       sampleQty: spec.sampleQty,
       totalQty: spec.totalQty,
-      passQty,
-      failQty,
       isMandatoryGate: spec.inspectionType === 'OQC_SH',
       status: spec.status,
       ...(spec.overallDecision !== null ? { overallDecision: spec.overallDecision } : {}),
       inspectedDate: spec.inspectedDate,
-      planVersionId: versionId,
-      planSnapshot: buildSnapshot(
-        { planCode: binding.plan.planCode, planName: binding.plan.planName },
-        {
+      ...buildInspectionOrderFields({
+        sampleQty: spec.sampleQty,
+        itemKind,
+        plan: { planCode: binding.plan.planCode, planName: binding.plan.planName },
+        version: {
           id: versionId,
           versionNo: binding.version.versionNo,
           items: binding.version.items,
@@ -685,9 +676,8 @@ async function seedHeatTraceDemo(ctx: {
             ? { strictness: binding.version.strictness }
             : {}),
         },
-        createdAt.toISOString()
-      ),
-      items: buildOrderItems(binding.version.items, itemKind),
+        snapshotAt: createdAt.toISOString(),
+      }),
       createdAt: createdAt.toISOString(),
       updatedAt: new Date(decidedMs).toISOString(),
     };

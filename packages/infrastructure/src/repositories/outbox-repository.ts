@@ -1,26 +1,38 @@
-import { Kysely } from 'kysely';
+import { Kysely, sql, Transaction } from 'kysely';
 import type { IOutboxRepository, OutboxEventRecord } from '@letian/application';
 import type { Database, OutboxEventInsert, OutboxEventRow } from '../database/schema.js';
 
-/** 应用层 OutboxEventRecord 只承载 3 态；DEAD_LETTER 行不会被读取出来 */
-type PendingEventStatus = 'PENDING' | 'PUBLISHED' | 'FAILED';
+type OutboxStatus = 'PENDING' | 'PUBLISHED' | 'FAILED' | 'DEAD_LETTER';
 
-function toRecordStatus(status: OutboxEventRow['status']): PendingEventStatus {
-  // SQL 已过滤掉 DEAD_LETTER，这里仅做类型收窄，保持与 OutboxEventRecord 的 3 值域一致
-  if (status === 'PUBLISHED' || status === 'FAILED') {
-    return status;
-  }
-  return 'PENDING';
+function toRecordStatus(status: OutboxEventRow['status']): OutboxStatus {
+  return status;
+}
+
+function toRecord(row: OutboxEventRow): OutboxEventRecord {
+  return {
+    id: row.id,
+    aggregateType: row.aggregateType,
+    aggregateId: row.aggregateId,
+    eventType: row.eventType,
+    payload: row.payload,
+    traceId: row.traceId ?? '',
+    occurredAt: row.createdAt,
+    status: toRecordStatus(row.status),
+    retryCount: row.retryCount,
+    nextRetryAt: row.nextRetryAt,
+    errorReason: row.errorReason,
+    deadLetterAlertedAt: row.deadLetterAlertedAt,
+  };
 }
 
 /**
  * 事务外发件箱仓储 (Kysely + PostgreSQL)
  *
- * append / appendBatch 都是幂等写入：主键 id 冲突时 DO NOTHING，
- * 因此同一条事件被重复投递（重试、重复提交）不会产生重复行。
+ * append / appendBatch 都是幂等写入：主键 id 冲突时 DO NOTHING；
+ * 派发进程之间用事件级 advisory lock 去重，同一事件不会并发投递。
  */
 export class KyselyOutboxRepository implements IOutboxRepository {
-  constructor(private readonly db: Kysely<Database>) {}
+  constructor(private readonly db: Kysely<Database> | Transaction<Database>) {}
 
   public async append(event: OutboxEventRecord): Promise<void> {
     await this.db
@@ -42,27 +54,40 @@ export class KyselyOutboxRepository implements IOutboxRepository {
       .execute();
   }
 
-  public async findPendingEvents(limit: number): Promise<OutboxEventRecord[]> {
+  /**
+   * 取当前可投递事件：新建 PENDING + 已到重试时间的 FAILED。
+   * DEAD_LETTER 留在库中由人工介入，绝不能再次投递。
+   */
+  public async findPendingEvents(limit: number, now = new Date()): Promise<OutboxEventRecord[]> {
     const rows = await this.db
       .selectFrom('outboxEvents')
       .selectAll()
-      // 只取 PENDING；DEAD_LETTER 必须留在库中由人工介入，绝不能再次投递
-      .where('status', '=', 'PENDING')
+      .where('status', 'in', ['PENDING', 'FAILED'])
+      .where((eb) =>
+        eb.or([
+          eb('nextRetryAt', 'is', null),
+          eb('nextRetryAt', '<=', now),
+        ])
+      )
       .orderBy('createdAt', 'asc')
       .limit(limit)
       .execute();
 
-    return rows.map((row) => ({
-      id: row.id,
-      aggregateType: row.aggregateType,
-      aggregateId: row.aggregateId,
-      eventType: row.eventType,
-      payload: row.payload,
-      traceId: row.traceId ?? '',
-      occurredAt: row.createdAt,
-      status: toRecordStatus(row.status),
-      retryCount: row.retryCount,
-    }));
+    return rows.map(toRecord);
+  }
+
+  /** 已进入死信但告警尚未成功送达的事件（供下一轮补发告警） */
+  public async findDeadLettersPendingAlert(limit: number): Promise<OutboxEventRecord[]> {
+    const rows = await this.db
+      .selectFrom('outboxEvents')
+      .selectAll()
+      .where('status', '=', 'DEAD_LETTER')
+      .where('deadLetterAlertedAt', 'is', null)
+      .orderBy('processedAt', 'asc')
+      .limit(limit)
+      .execute();
+
+    return rows.map(toRecord);
   }
 
   public async markAsPublished(ids: string[]): Promise<void> {
@@ -72,30 +97,82 @@ export class KyselyOutboxRepository implements IOutboxRepository {
 
     await this.db
       .updateTable('outboxEvents')
-      .set({ status: 'PUBLISHED', processedAt: new Date() })
+      .set({
+        status: 'PUBLISHED',
+        processedAt: new Date(),
+        nextRetryAt: null,
+      })
       .where('id', 'in', ids)
       .execute();
   }
 
-  public async markAsFailed(id: string, errorReason: string): Promise<void> {
+  public async markAsFailed(
+    id: string,
+    errorReason: string,
+    nextRetryAt?: Date
+  ): Promise<void> {
     await this.db
       .updateTable('outboxEvents')
       .set((eb) => ({
         status: 'FAILED',
         errorReason,
         retryCount: eb('retryCount', '+', 1),
+        nextRetryAt: nextRetryAt ?? null,
       }))
       .where('id', '=', id)
       .execute();
   }
 
-  /** 超过最大重试次数后落死信，等待人工介入重放 */
-  public async markAsDeadLetter(id: string, errorReason: string): Promise<void> {
+  /**
+   * 达到最大失败次数后落死信。
+   * retryCount 传入本次失败次数；未传时兼容旧调用，按现有计数再推进一次。
+   */
+  public async markAsDeadLetter(
+    id: string,
+    errorReason: string,
+    retryCount?: number
+  ): Promise<void> {
     await this.db
       .updateTable('outboxEvents')
-      .set({ status: 'DEAD_LETTER', errorReason })
+      .set({
+        status: 'DEAD_LETTER',
+        errorReason,
+        processedAt: new Date(),
+        nextRetryAt: null,
+        deadLetterAlertedAt: null,
+        ...(retryCount !== undefined
+          ? { retryCount }
+          : { retryCount: sql<number>`retry_count + 1` }),
+      })
       .where('id', '=', id)
       .execute();
+  }
+
+  /** 死信告警确认送达后才落标记；Webhook 失败不会写该列，下一轮继续补发 */
+  public async markDeadLetterAlerted(id: string, alertedAt = new Date()): Promise<void> {
+    await this.db
+      .updateTable('outboxEvents')
+      .set({ deadLetterAlertedAt: alertedAt })
+      .where('id', '=', id)
+      .where('status', '=', 'DEAD_LETTER')
+      .execute();
+  }
+
+  /**
+   * 事件级 advisory lock：同一事件只允许一个 worker 正在投递。
+   * 使用 hashtextextended 的 int8 key，避免 32 位 hashtext 碰撞导致不同事件互相阻塞。
+   */
+  public async tryAcquireEventLock(id: string): Promise<boolean> {
+    const result = await sql<{ acquired: boolean }>`
+      SELECT pg_try_advisory_lock(hashtextextended(${id}, 0)) AS acquired
+    `.execute(this.db);
+    return result.rows[0]?.acquired === true;
+  }
+
+  public async releaseEventLock(id: string): Promise<void> {
+    await sql`
+      SELECT pg_advisory_unlock(hashtextextended(${id}, 0))
+    `.execute(this.db);
   }
 
   private buildInsert(event: OutboxEventRecord): OutboxEventInsert {
@@ -108,6 +185,8 @@ export class KyselyOutboxRepository implements IOutboxRepository {
       status: 'PENDING',
       retryCount: 0,
       createdAt: event.occurredAt,
+      nextRetryAt: null,
+      deadLetterAlertedAt: null,
       traceId: event.traceId,
     };
   }

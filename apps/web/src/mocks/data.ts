@@ -951,7 +951,7 @@ export const rawMrbRecords = [
     materialCode: 'MAT-SCR-M6-25',
     materialName: '高强度螺柱 M6*25 (下料工序)',
     defectDescription: '切断毛刺高度超标达到 0.18mm (允许值 ≤0.05mm)，下料长度 25.42mm 超差',
-    defectQty: 3000,
+    defectQty: 8,
     status: 'UNDER_REVIEW' as const,
     disposition: 'REWORK' as const,
     dispositionNotes: '安排机修检修切刀，车间安排二次平头倒角加工返工',
@@ -986,7 +986,7 @@ export const rawMrbRecords = [
     materialCode: 'MAT-BLT-109-M10',
     materialName: '10.9级六角头螺栓 M10*45 (成品检)',
     defectDescription: '螺栓螺纹中径偏大 0.04mm，可能影响装配拧入扭矩',
-    defectQty: 10000,
+    defectQty: 1,
     status: 'UNDER_REVIEW' as const,
     disposition: 'CONCESSION' as const,
     dispositionNotes: '客户现场试装合格，已签署特采让步接收协议，质保部会签放行',
@@ -1013,7 +1013,7 @@ export const rawMrbRecords = [
     materialCode: 'MAT-35CRMO-08',
     materialName: '35CrMo 合金圆钢 Φ8.0mm',
     defectDescription: '表面存在沿轧制方向裂纹，深度达 0.35mm',
-    defectQty: 15000,
+    defectQty: 4,
     status: 'DISPOSED' as const,
     disposition: 'RETURN_TO_VENDOR' as const,
     dispositionNotes: '严重母材缺陷，作整批退货处理并开具供应商质量处罚单',
@@ -1106,8 +1106,8 @@ export const rawPendingDefects = [
     batchNo: 'B20231012-02',
     materialCode: 'MAT-SCR-M6-25',
     materialName: '高强度螺柱 M6*25 (下料工序)',
-    defectQty: 3000,
-    totalQty: 5000,
+    defectQty: 8,
+    totalQty: 32,
     defectDescription: '切断毛刺高度超标达到 0.18mm (允许值 ≤0.05mm)，下料长度 25.42mm 超差',
     defectItemCode: 'CUT-002',
     status: 'INITIATED' as const,
@@ -1743,9 +1743,9 @@ export const mockInterceptionRules: MesInterceptionRule[] = [
  * 法定名称中英文与印章文字之外一律留空：空 = 未维护，证书按留白渲染（docs/35 §6）。
  */
 export const mockCompanyProfile: CompanyProfile = {
-  legalName: '宁波乐天紧固件制造有限公司',
-  legalNameEn: 'NINGBO LETIAN FASTENERS MANUFACTURING CO., LTD.',
-  qualityStamp: '宁波乐天质检',
+  legalName: '江阴乐天紧固件制造有限公司',
+  legalNameEn: 'JIANGYIN LETIAN FASTENERS MANUFACTURING CO., LTD.',
+  qualityStamp: '江阴乐天质检',
   updatedBy: 'seed',
 };
 
@@ -2419,7 +2419,7 @@ const SF_FAMILY_ITEMS: InspectionPlanItem[] = [
 ];
 
 /**
- * 18 条方案：16 已启用 / 1 待审批草稿 / 1 已停用
+ * 18 条方案：17 已启用 / 1 已停用（方案不再有「待审批草稿」态，见 CreatePlanModal 口径）
  *（追加 QP-OQC-SH-FAMILY 成品螺栓族分类通用出货检验方案，见 docs/37；
  *  追加 QP-OQC-{MACH,HEAT,SF}-FAMILY* 委外三页签族级通用方案，见 docs/36 §9）
  */
@@ -2427,7 +2427,7 @@ const rawPlans: PlanSeed[] = [
   { planCode: 'QP-20260706-001', planName: '六角螺栓M10-来料检验', inspectionType: 'IQC', materialCode: 'MAT-BLT-109-M10', versionNo: 'v1.2', status: 'ACTIVE', createdBy: MOCK_PLAN_CREATORS.zhangQiang, updatedAt: '2026-07-06T02:30:00.000Z', items: planItems('QP-001', { appearance: 6, dimension: 15 }) },
   { planCode: 'QP-20260706-002', planName: '六角螺栓M10-过程检验', inspectionType: 'IPQC_RL', materialCode: 'MAT-BLT-109-M10', versionNo: 'v1.1', status: 'ACTIVE', createdBy: MOCK_PLAN_CREATORS.liWei, updatedAt: '2026-07-05T08:00:00.000Z', items: planItems('QP-002', { performance: 9 }) },
   { planCode: 'QP-20260706-003', planName: '碳钢圆钢-来料检验', inspectionType: 'IQC', materialCode: 'MAT-SCR-M6-25', versionNo: 'v2.0', status: 'ACTIVE', createdBy: MOCK_PLAN_CREATORS.zhangQiang, updatedAt: '2026-07-04T01:15:00.000Z', items: planItems('QP-003', { appearance: 6, dimension: 13 }) },
-  { planCode: 'QP-20260706-004', planName: '不锈钢棒料-来料检验', inspectionType: 'IQC', materialCode: 'MAT-304SS-05', versionNo: 'v1.0', status: 'DRAFT', createdBy: MOCK_PLAN_CREATORS.liWei, updatedAt: '2026-07-03T06:20:00.000Z', items: planItems('QP-004', { appearance: 6, dimension: 15, performance: 9 }) },
+  { planCode: 'QP-20260706-004', planName: '不锈钢棒料-来料检验', inspectionType: 'IQC', materialCode: 'MAT-304SS-05', versionNo: 'v1.0', status: 'ACTIVE', createdBy: MOCK_PLAN_CREATORS.liWei, updatedAt: '2026-07-03T06:20:00.000Z', items: planItems('QP-004', { appearance: 6, dimension: 15, performance: 9 }) },
   { planCode: 'QP-20260706-005', planName: '六角螺栓M12-出货检验', inspectionType: 'OQC_SH', materialCode: 'MAT-BLT-109-M10', versionNo: 'v1.3', status: 'ACTIVE', createdBy: MOCK_PLAN_CREATORS.liuFang, updatedAt: '2026-07-02T03:45:00.000Z', items: planItems('QP-005', { appearance: 6, dimension: 10, performance: 9 }) },
   { planCode: 'QP-20260706-006', planName: '法兰螺栓-来料检验', inspectionType: 'IQC', materialCode: 'MAT-BLT-109-M10', versionNo: 'v1.1', status: 'ACTIVE', createdBy: MOCK_PLAN_CREATORS.zhangQiang, updatedAt: '2026-07-01T07:30:00.000Z', items: planItems('QP-006', { appearance: 6, dimension: 16 }) },
   { planCode: 'QP-20260706-007', planName: '平垫圈-出货检验', inspectionType: 'OQC_SH', materialCode: 'MAT-SCR-M6-25', versionNo: 'v1.0', status: 'ACTIVE', createdBy: MOCK_PLAN_CREATORS.liuFang, updatedAt: '2026-06-30T05:10:00.000Z', items: planItems('QP-007', { appearance: 4, dimension: 8 }) },
@@ -2542,3 +2542,18 @@ export function allocateMockPlanCode(
   }, 0);
   return `${prefix}${String(maxSeq + 1).padStart(3, '0')}`;
 }
+
+// ---- 检验项目字典（ERP `TestItem` 镜像；与迁移 037 种子同一份真实字典内容） ----
+// appliesToBuy/appliesToProduce/appliesToConsign 对应 ERP bBuy/bProduce/bConsign：
+// 决定该检验项目在 来料(IQC) / 过程(IPQC·FQC) / 委外·出货(OQC) 哪个环节可选。
+export const mockTestItems = [
+  { testItemCode: '00001', name: '外观', namePy: 'WG', appliesToBuy: true, appliesToProduce: true, appliesToConsign: true, sortNo: 1 },
+  { testItemCode: '00002', name: '尺寸', namePy: 'CC', appliesToBuy: true, appliesToProduce: true, appliesToConsign: true, sortNo: 2 },
+  { testItemCode: '00003', name: '通止', namePy: 'TZ', appliesToBuy: true, appliesToProduce: true, appliesToConsign: true, sortNo: 3 },
+  { testItemCode: '00004', name: '硬度实测值（5个）', namePy: 'YDSCZ5G', appliesToBuy: true, appliesToProduce: true, appliesToConsign: true, sortNo: 4 },
+  { testItemCode: '00005', name: '拉伸检测（单号）', namePy: 'LSJCDH', appliesToBuy: true, appliesToProduce: true, appliesToConsign: true, sortNo: 5 },
+  { testItemCode: '00006', name: '光谱试验（单号）', namePy: 'GPSYDH', appliesToBuy: true, appliesToProduce: true, appliesToConsign: true, sortNo: 6 },
+  { testItemCode: '00007', name: '挑选工时', namePy: 'TXGS', appliesToBuy: true, appliesToProduce: true, appliesToConsign: true, sortNo: 7 },
+  { testItemCode: '00008', name: '冲击试验（单号）', namePy: 'CJSYDH', appliesToBuy: true, appliesToProduce: true, appliesToConsign: true, sortNo: 8 },
+  { testItemCode: '00009', name: '不良品描述', namePy: 'BLPMS', appliesToBuy: true, appliesToProduce: true, appliesToConsign: true, sortNo: 9 },
+];

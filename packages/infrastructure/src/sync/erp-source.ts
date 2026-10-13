@@ -23,10 +23,22 @@ export interface ErpPtypeRow {
   parentCode: string | null;
 }
 
+/** ERP `TestItem` 检验项目字典行（检验方案明细 TITypeId 的参照表） */
+export interface ErpTestItemRow {
+  typeId: string;
+  fullName: string;
+  namePy: string | null;
+  testStandard: string | null;
+  bBuy: boolean;
+  bProduce: boolean;
+  bConsign: boolean;
+}
+
 export interface ErpSource {
   readonly name: string;
   readonly kind: 'mssql' | 'fixture';
   fetchPtype(limit: number): Promise<ErpPtypeRow[]>;
+  fetchTestItems(limit: number): Promise<ErpTestItemRow[]>;
 }
 
 /** Ptype 取数 SQL（**只读**；`sonnum = 0` 只取叶子物料，与既有 `scripts/sync-master-data.ts` 同口径） */
@@ -43,6 +55,17 @@ export function normalizeLimit(limit: number | undefined): number {
   const value = typeof limit === 'number' && Number.isFinite(limit) ? Math.floor(limit) : 500;
   return Math.min(Math.max(value, 1), 20000);
 }
+
+/** TestItem 取数 SQL（**只读**；`sonnum = 0` 只取叶子检验项目，与 Ptype 同步同一口径） */
+export const TESTITEM_SELECT_SQL = [
+  'SELECT TOP (@limit) TypeID, FullName,',
+  '       ISNULL(NamePY, NULL) AS NamePy, ISNULL(TestStandard, NULL) AS TestStandard,',
+  '       ISNULL(bBuy, 0) AS bBuy, ISNULL(bProduce, 0) AS bProduce, ISNULL(bConsign, 0) AS bConsign',
+  '  FROM TestItem',
+  ' WHERE deleted = 0 AND sonnum = 0',
+  "   AND TypeID IS NOT NULL AND TypeID <> N''",
+  ' ORDER BY TypeID',
+].join('\n');
 
 function toRunner(pool: sql.ConnectionPool): ErpQueryRunner {
   return {
@@ -65,6 +88,20 @@ export function createMssqlErpSource(pool: sql.ConnectionPool): ErpSource {
       return queryErpReadOnly<ErpPtypeRow>(runner, PTYPE_SELECT_SQL, [
         { name: 'limit', value: normalizeLimit(limit) },
       ]);
+    },
+    async fetchTestItems(limit) {
+      const rows = await queryErpReadOnly<Record<string, unknown>>(runner, TESTITEM_SELECT_SQL, [
+        { name: 'limit', value: normalizeLimit(limit) },
+      ]);
+      return rows.map((row) => ({
+        typeId: String(row.TypeID ?? ''),
+        fullName: String(row.FullName ?? ''),
+        namePy: asText(row.NamePy),
+        testStandard: asText(row.TestStandard),
+        bBuy: row.bBuy === true || row.bBuy === 1,
+        bProduce: row.bProduce === true || row.bProduce === 1,
+        bConsign: row.bConsign === true || row.bConsign === 1,
+      }));
     },
   };
 }
@@ -89,6 +126,23 @@ function coerceRow(raw: unknown, index: number): ErpPtypeRow {
   };
 }
 
+function coerceTestItemRow(raw: unknown, index: number): ErpTestItemRow {
+  const row = (raw ?? {}) as Record<string, unknown>;
+  const typeId = asText(row.typeId);
+  if (typeId === null) {
+    throw new Error(`[erp-source] 第 ${index + 1} 行缺少 typeId，检验项目样例数据不合法`);
+  }
+  return {
+    typeId,
+    fullName: asText(row.fullName) ?? typeId,
+    namePy: asText(row.namePy),
+    testStandard: asText(row.testStandard),
+    bBuy: row.bBuy === true || row.bBuy === 1,
+    bProduce: row.bProduce === true || row.bProduce === 1,
+    bConsign: row.bConsign === true || row.bConsign === 1,
+  };
+}
+
 /** 本地样例源：数据来自 JSON 数组（用于无 ERP 环境下的最小可运行验证） */
 export function createFixtureErpSource(rows: readonly unknown[], name = 'fixture(本地样例)'): ErpSource {
   return {
@@ -96,6 +150,9 @@ export function createFixtureErpSource(rows: readonly unknown[], name = 'fixture
     kind: 'fixture',
     async fetchPtype(limit) {
       return rows.slice(0, normalizeLimit(limit)).map(coerceRow);
+    },
+    async fetchTestItems(limit) {
+      return rows.slice(0, normalizeLimit(limit)).map(coerceTestItemRow);
     },
   };
 }

@@ -4,8 +4,17 @@ import { CertificatePrintModal } from '../../../components/certificate/Certifica
 import { IndicatorActualField } from '../../../components/common/IndicatorActualField';
 import { PlanMatchBanner } from '../../../components/common/PlanMatchBanner';
 import { ApprovalButton } from '../../../components/common/ApprovalButton';
-import { QualityCertificateData } from '../../../lib/inspectionTypes';
-import { buildIqcCertificateData, certificateItemsFromRows } from '../../../lib/certificateDataService';
+import {
+  CertTemplateKind,
+  ManufacturingCertData,
+  QualityCertificateData,
+} from '../../../lib/inspectionTypes';
+import {
+  buildIqcCertificateData,
+  buildManufacturingCertData,
+  certificateItemsFromRows,
+} from '../../../lib/certificateDataService';
+import { CertFieldsCard } from '../../../components/certificate/CertFieldsCard';
 import { loadCompanyProfile } from '../../../lib/companyProfile';
 import { api, errorMessage } from '../../../lib/api';
 import { useMatchedPlan } from '../../../hooks/useMatchedPlan';
@@ -18,6 +27,22 @@ import {
   summarizeJudgements,
   type PlanIndicatorRow,
 } from '../../../lib/planMatch';
+import type { InspectionItemDecision } from '@letian/contracts';
+
+/** 单项判定徽标：与 OQC 表单同款，只有 PASSED 才显示合格 */
+const VerdictBadge: React.FC<{ decision: InspectionItemDecision }> = ({ decision }) => (
+  <span
+    className={`px-2 py-0.5 rounded text-[11px] font-semibold border ${
+      decision === "PASSED"
+        ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+        : decision === "FAILED"
+        ? "bg-rose-50 text-rose-700 border-rose-200"
+        : "bg-slate-100 text-slate-500 border-slate-200"
+    }`}
+  >
+    {DECISION_LABEL[decision]}
+  </span>
+);
 
 interface IqcRecordFormProps {
   initialItem?: any;
@@ -133,6 +158,18 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
     setDecision(
       order.overallDecision === 'FAILED' ? '退货' : order.overallDecision === 'CONCESSION' ? '让步接收' : '合格'
     );
+    // 证书模板与字段袋随单落库（docs/51）：只读回看按本单真实存储值回填；
+    // 历史单列为空时不覆盖默认回落
+    if (order.certTemplate !== undefined && order.certTemplate !== null) {
+      setCertTemplate(order.certTemplate);
+    }
+    if (order.certFields !== undefined && order.certFields !== null) {
+      const bag: Record<string, string> = {};
+      for (const [key, value] of Object.entries(order.certFields)) {
+        if (typeof value === 'string' && value !== '') bag[key] = value;
+      }
+      setCertFields(bag);
+    }
   }, [planMatch.order]);
 
   // 判定与人员
@@ -147,6 +184,23 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
   // 打印预览控制
   const [printModalOpen, setPrintModalOpen] = useState(false);
   const [certData, setCertData] = useState<QualityCertificateData | null>(null);
+  const [mfgCertData, setMfgCertData] = useState<ManufacturingCertData | null>(null);
+
+  // 证书模板（docs/51）：建单时由操作员选定并随单落库；历史单没有该列时按来料场景回落质保书
+  const [certTemplate, setCertTemplate] = useState<CertTemplateKind>(
+    initialItem?.certTemplate === 'MANUFACTURING' ? 'MANUFACTURING' : 'QUALITY'
+  );
+  // 证书专用字段袋（cert_fields）：扫描件版面上有、检验单表头没有物理列的格，
+  // 一律随单落库；未填的格在证书上留白
+  const [certFields, setCertFields] = useState<Record<string, string>>(() => {
+    const raw = initialItem?.certFields;
+    if (raw === null || raw === undefined || typeof raw !== 'object') return {};
+    const bag: Record<string, string> = {};
+    for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof value === 'string' && value !== '') bag[key] = value;
+    }
+    return bag;
+  });
 
   // 写入路径状态（docs/35 §4 M3）：提交中 / 失败文案 / 成功回执，均为真实请求结果
   const [submitting, setSubmitting] = useState(false);
@@ -176,28 +230,56 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
   const handleOpenCert = () => {
     void (async () => {
       const companyProfile = await loadCompanyProfile();
-      const cert = buildIqcCertificateData({
-        orderNo: docNo,
-        materialName,
-        spec,
-        steelGrade: materialGrade,
-        quantity,
-        // IQC 的「供货单位」取供应商主数据（真实来源与 OQC 出厂场景不同，不混用企业档案）
-        supplier,
-        furnaceNo: heatNo,
-        batchNo,
-        standard,
-        inspector,
-        // 质量负责人：有真实签核动作才有值；未签核即空（证书批准人栏留白，docs/35 §5）
-        ...(approver.name !== '' ? { approverName: approver.name } : {}),
-        // 综合判定：只有检验员真的选了判定才打印结论（合格 -> PASSED、退货 -> FAILED、让步接收 -> CONCESSION）
-        // 让步接收不打印结论（尚未经 MRB 会签，证书不能替客户下特采结论）
-        ...(decision === '合格' ? { judgment: 'PASSED' } : decision === '退货' ? { judgment: 'FAILED' } : {}),
-        inspectionNotes: remark,
-        items: certificateItemsFromRows(planRowsForSubmit),
-        ...(companyProfile !== null ? { companyProfile } : {}),
-      });
-      setCertData(cert);
+      // 出证模板按本单落库的 certTemplate 走（docs/51）：
+      // 两种扫描件的字段集互不重叠 —— 同一表单态，按模板分别交给对应 builder 组装
+      if (certTemplate === 'MANUFACTURING') {
+        const cert = buildManufacturingCertData({
+          orderNo: docNo,
+          materialName,
+          partSpec: spec,
+          dimension: spec,
+          steelGrade: materialGrade,
+          materialGrade,
+          quantity,
+          // IQC 场景的「供货厂商」落到制造证书的客户/供应商格，由字段袋区分表头显示名
+          subcontractor: supplier,
+          vendorName: supplier,
+          heatNo,
+          batchNo,
+          standardsApplied: standard,
+          standard,
+          inspectorName: inspector,
+          remarks: remark,
+          certFields,
+          items: certificateItemsFromRows(planRowsForSubmit),
+          ...(companyProfile !== null ? { companyProfile } : {}),
+        });
+        setMfgCertData(cert);
+      } else {
+        const cert = buildIqcCertificateData({
+          orderNo: docNo,
+          materialName,
+          spec,
+          steelGrade: materialGrade,
+          quantity,
+          // IQC 的「供货单位」取供应商主数据（真实来源与 OQC 出厂场景不同，不混用企业档案）
+          supplier,
+          furnaceNo: heatNo,
+          batchNo,
+          standard,
+          inspector,
+          // 质量负责人：有真实签核动作才有值；未签核即空（证书批准人栏留白，docs/35 §5）
+          ...(approver.name !== '' ? { approverName: approver.name } : {}),
+          // 综合判定：只有检验员真的选了判定才打印结论（合格 -> PASSED、退货 -> FAILED、让步接收 -> CONCESSION）
+          // 让步接收不打印结论（尚未经 MRB 会签，证书不能替客户下特采结论）
+          ...(decision === '合格' ? { judgment: 'PASSED' } : decision === '退货' ? { judgment: 'FAILED' } : {}),
+          inspectionNotes: remark,
+          certFields,
+          items: certificateItemsFromRows(planRowsForSubmit),
+          ...(companyProfile !== null ? { companyProfile } : {}),
+        });
+        setCertData(cert);
+      }
       setPrintModalOpen(true);
     })();
   };
@@ -228,7 +310,9 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
       return;
     }
 
-    const measuredRows = planRowsForSubmit.filter((row) => !row.isExempt && row.actual.trim() !== '');
+    // 不解检（EXEMPT）行随提交下发：服务端按 isExempt 判 EXEMPT 并剔除出合格率分母，
+    // 此前整条被过滤导致免检标记静默丢失（v2.6.0 未结模块）
+    const measuredRows = planRowsForSubmit.filter((row) => row.isExempt || row.actual.trim() !== '');
     const hasBlankRows = planRowsForSubmit.some((row) => !row.isExempt && row.actual.trim() === '');
     const qty = parseQuantity(quantity);
 
@@ -241,6 +325,10 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
       // 溯源留痕由服务端重新解析：本单若有同炉上游记录（另一张 IQC / 委外热处理），会一并写入。
       await api.patch(`/inspections/${encodeURIComponent(orderId)}/header`, {
         furnaceHeatNo: heatNo.trim(),
+        // 证书模板选择与字段袋随头落库（docs/51）：历史单首次提交即回填当时选定的模板，
+        // 字段袋整包覆盖（空值即清空，与证书「未填留白」同口径）
+        certTemplate,
+        certFields,
         ...(materialGrade.trim() !== '' ? { materialGrade: materialGrade.trim() } : {}),
         ...(standard.trim() !== '' ? { techStandard: standard.trim() } : {}),
         ...(inspectDate.trim() !== '' ? { inspectedDate: inspectDate.trim() } : {}),
@@ -257,9 +345,13 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
                 failQty: decision === '合格' ? 0 : qty !== null ? qty : 0,
               }),
           items: measuredRows.map((row) => {
+            if (row.isExempt) {
+              return { itemCode: row.itemCode, isExempt: true };
+            }
             const numeric = parseMeasuredNumber(row.actual);
             return {
               itemCode: row.itemCode,
+              isExempt: false,
               ...(numeric !== undefined && row.planItem.dataType === 'NUMERIC'
                 ? { measuredVal: numeric }
                 : {}),
@@ -482,59 +574,68 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
           </div>
           <span className="text-[11px] text-slate-500">直读光谱仪定量分析报告</span>
         </div>
-        <div className="p-4 grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-3 text-xs">
-          {chemElements.length === 0 && (
-            <div className="col-span-full text-center text-[11px] text-slate-400 py-3">
-              {planSectionEmptyText(planMatch.status, '化学成分')}
-            </div>
-          )}
-          {chemElements.map((el, idx) => {
-            const decision = judgeIndicatorRow(el);
-            return (
-              <div key={`${el.itemCode}-${idx}`} className="border border-slate-200 rounded-lg p-2.5 bg-slate-50/30 space-y-1 text-center">
-                <div className="font-bold text-slate-800 text-sm" title={`${el.name} (${el.itemCode})`}>
-                  {el.title}
-                </div>
-                <div className="flex items-center gap-1">
-                  <span className="text-[10px] text-slate-400 shrink-0">标准:</span>
-                  <input
-                    type="text"
-                    value={el.standard}
-                    onChange={(e) => {
-                      const updated = [...chemElements];
-                      updated[idx].standard = e.target.value;
-                      setChemElements(updated);
-                    }}
-                    placeholder="0.50 ~ 0.80"
-                    title="可修改标准值, 支持区间(0.50 ~ 0.80)、上限(≤ 0.030)、下限(≥ 590)写法"
-                    className="w-full min-w-0 bg-white border border-slate-300 rounded px-1 py-0.5 text-center font-mono text-[10px] text-slate-600 focus:border-blue-500"
-                  />
-                </div>
-                <IndicatorActualField
-                  row={el}
-                  readOnly={readOnly}
-                  onValueChange={(value) => {
-                    const updated = [...chemElements];
-                    updated[idx].actual = value;
-                    setChemElements(updated);
-                  }}
-                  className={`w-full bg-white border rounded px-1.5 py-0.5 text-center font-mono font-medium focus:border-blue-500 text-xs ${
-                    decision === 'FAILED' ? 'border-rose-400 text-rose-600' : 'border-slate-300'
-                  }`}
-                />
-                {decision === 'PASSED' && (
-                  <div className="text-[10px] text-emerald-600 font-medium">✓ 符合技术要求</div>
-                )}
-                {decision === 'FAILED' && (
-                  <div className="text-[10px] text-rose-600 font-semibold">× 不符合技术要求</div>
-                )}
-                {decision === 'PENDING' && (
-                  <div className="text-[10px] text-slate-400 font-medium">— 待判定（缺实测值/标准基准）</div>
-                )}
-              </div>
-            );
-          })}
-        </div>
+        <table className="w-full text-xs text-left">
+          <thead className="bg-slate-50 text-slate-600 font-medium border-b border-slate-200">
+            <tr>
+              <th className="py-2.5 px-4 w-40">元素 (Element)</th>
+              <th className="py-2.5 px-4 w-20">单位</th>
+              <th className="py-2.5 px-4 w-56">标准技术规范 (可修改)</th>
+              <th className="py-2.5 px-4">实际测试值 (Actual Value)</th>
+              <th className="py-2.5 px-4 w-32 text-center">单项判定</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {chemElements.length === 0 && (
+              <tr>
+                <td colSpan={5} className="py-6 text-center text-[11px] text-slate-400">
+                  {planSectionEmptyText(planMatch.status, '化学成分')}
+                </td>
+              </tr>
+            )}
+            {chemElements.map((el, idx) => {
+              const decision = judgeIndicatorRow(el);
+              return (
+                <tr key={`${el.itemCode}-${idx}`} className="hover:bg-slate-50/50">
+                  <td className="py-2.5 px-4 font-medium text-slate-800" title={`${el.name} (${el.itemCode})`}>
+                    {el.title}
+                  </td>
+                  <td className="py-2.5 px-4 text-slate-500">{el.unit ?? '%'}</td>
+                  <td className="py-2.5 px-4">
+                    <input
+                      type="text"
+                      value={el.standard}
+                      onChange={(e) => {
+                        const updated = [...chemElements];
+                        updated[idx].standard = e.target.value;
+                        setChemElements(updated);
+                      }}
+                      placeholder="0.50 ~ 0.80"
+                      title="可修改标准值, 支持区间(0.50 ~ 0.80)、上限(≤ 0.030)、下限(≥ 590)写法"
+                      className="w-48 bg-white border border-slate-300 rounded px-2 py-1 font-mono text-xs text-slate-600 focus:border-blue-500 focus:outline-none"
+                    />
+                  </td>
+                  <td className="py-2.5 px-4">
+                    <IndicatorActualField
+                      row={el}
+                      readOnly={readOnly}
+                      onValueChange={(value) => {
+                        const updated = [...chemElements];
+                        updated[idx].actual = value;
+                        setChemElements(updated);
+                      }}
+                      className={`w-48 bg-white border rounded px-2 py-1 font-mono font-medium text-xs focus:border-blue-500 focus:outline-none ${
+                        decision === 'FAILED' ? 'border-rose-400 text-rose-600' : 'border-slate-200'
+                      }`}
+                    />
+                  </td>
+                  <td className="py-2.5 px-4 text-center">
+                    <VerdictBadge decision={decision} />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
 
       
@@ -794,6 +895,14 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
 
       </fieldset>
 
+      {/* 证书补充字段（docs/51）：按建单时选定的模板展示专属输入项，写入 cert_fields 随单落库 */}
+      <CertFieldsCard
+        kind={certTemplate}
+        value={certFields}
+        readOnly={readOnly}
+        onChange={(key, value) => setCertFields((prev) => ({ ...prev, [key]: value }))}
+      />
+
       {/* 模块五：入库判定与签核 */}
       <div className="bg-white border border-slate-200/80 rounded-lg p-4 shadow-sm space-y-3">
         <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-800">
@@ -917,7 +1026,8 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
             onClick={handleOpenCert}
             className="px-4 py-1.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-medium hover:bg-emerald-100 flex items-center gap-1.5"
           >
-            <Printer className="w-3.5 h-3.5" /> 预览与打印质保书
+            <Printer className="w-3.5 h-3.5" />
+            {certTemplate === 'MANUFACTURING' ? '预览与打印制造证书' : '预览与打印质保书'}
           </button>
           {!readOnly && submitted === null && (
             <button
@@ -947,8 +1057,9 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
       <CertificatePrintModal
         isOpen={printModalOpen}
         onClose={() => setPrintModalOpen(false)}
-        type="quality"
+        type={certTemplate === 'MANUFACTURING' ? 'manufacturing' : 'quality'}
         qualityData={certData}
+        manufacturingData={mfgCertData}
       />
     </div>
   );

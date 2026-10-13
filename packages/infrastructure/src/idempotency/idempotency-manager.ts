@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import { Kysely } from 'kysely';
+import { Kysely, sql } from 'kysely';
 import { Database } from '../database/schema.js';
 
 export interface IdempotencyRecord {
@@ -147,15 +147,45 @@ export class IdempotencyManager {
   }
 
   /**
-   * 清理已过期的记录
+   * 清理已过期记录（兼容旧入口）。
+   * limit 默认 1000，调用方循环调用即可完成分批清理。
    */
-  public async purgeExpired(): Promise<number> {
-    const now = new Date();
-    const result = await this.db
-      .deleteFrom('idempotencyKeys')
-      .where('expiresAt', '<=', now)
-      .executeTakeFirst();
+  public async purgeExpired(limit = 1000, now = new Date()): Promise<number> {
+    const result = await sql`
+      DELETE FROM idempotency_keys
+      WHERE (user_id, endpoint, idempotency_key) IN (
+        SELECT user_id, endpoint, idempotency_key
+        FROM idempotency_keys
+        WHERE expires_at <= ${now}
+        ORDER BY expires_at ASC
+        LIMIT ${limit}
+      )
+    `.execute(this.db);
 
-    return Number(result.numDeletedRows || 0);
+    return Number(result.numAffectedRows || 0);
+  }
+
+  /**
+   * 运维保留期清理：超过 created_at + retentionHours 的键一律删除；
+   * 同时兜底删除 expires_at 已到期的记录，防止历史 TTL 异常导致残留。
+   */
+  public async purgeOlderThan(
+    retentionHours = 24,
+    limit = 1000,
+    now = new Date()
+  ): Promise<number> {
+    const cutoff = new Date(now.getTime() - retentionHours * 60 * 60 * 1000);
+    const result = await sql`
+      DELETE FROM idempotency_keys
+      WHERE (user_id, endpoint, idempotency_key) IN (
+        SELECT user_id, endpoint, idempotency_key
+        FROM idempotency_keys
+        WHERE created_at <= ${cutoff} OR expires_at <= ${now}
+        ORDER BY created_at ASC
+        LIMIT ${limit}
+      )
+    `.execute(this.db);
+
+    return Number(result.numAffectedRows || 0);
   }
 }

@@ -20,6 +20,7 @@ import { generateTestToken } from '../../src/plugins/auth';
 const STAMP = Date.now().toString().slice(-8);
 const FAIL_BATCH = `TRACE-NODE-FAIL-${STAMP}`;
 const PASS_BATCH = `TRACE-NODE-PASS-${STAMP}`;
+const MEASURE_BATCH = `TRACE-NODE-MEASURE-${STAMP}`;
 const INBOUND_NO = `RK-TRACENODE-${STAMP}`;
 
 async function runTraceNodeRegistrationTests() {
@@ -167,6 +168,36 @@ async function runTraceNodeRegistrationTests() {
     assert.equal(passNodes[0]?.nodeStatus, 'PASSED', '合格结论必须落为 PASSED（不得一律写 FAILED）');
     assert.equal(passNodes[0]?.inspectionOrderNo, passOrder.orderNo, '合格节点同样要挂检验单号');
     console.log('✔ 合格终判同样登记节点，且状态如实为 PASSED');
+
+    const measureOrder = await createOrder(MEASURE_BATCH);
+    const itemsRow = await db.selectFrom('inspectionOrders').select('items')
+      .where('id', '=', measureOrder.id).executeTakeFirstOrThrow();
+    const numericItem = (itemsRow.items as Array<{
+      itemCode: string; dataType: string; nominalValue?: number; upperTolerance?: number;
+    }>).find((item) => item.dataType === 'NUMERIC' && typeof item.nominalValue === 'number');
+    assert.ok(numericItem, '实测终判需要数值检验项');
+    const measured = await app.inject({
+      method: 'POST',
+      url: `/api/v1/inspections/${measureOrder.id}/submit-measurements`,
+      headers,
+      payload: {
+        items: [{
+          itemCode: numericItem.itemCode,
+          measuredVal: numericItem.nominalValue! + (numericItem.upperTolerance ?? 0) + 1,
+        }],
+        failQty: 1,
+        passQty: 19,
+        isDraft: false,
+      },
+    });
+    assert.equal(measured.statusCode, 200, `正式提交实测值应终判成功：${measured.body}`);
+    const measureGraph = await graphOf(MEASURE_BATCH);
+    assert.equal(measureGraph.statusCode, 200, '实测终判后的批次必须能打开追溯图');
+    const measureNodes = (JSON.parse(measureGraph.body) as { nodes: Array<Record<string, string>> }).nodes;
+    assert.equal(measureNodes.length, 1);
+    assert.equal(measureNodes[0]?.nodeStatus, 'FAILED');
+    assert.equal(measureNodes[0]?.inspectionOrderNo, measureOrder.orderNo);
+    assert.ok((await batchRowOf(MEASURE_BATCH))?.sources.includes('TRACE_NODE'));
   } finally {
     // 节点表无外键级联，必须显式清理，否则回归测试会污染追溯看板
     if (touchedBatches.length > 0) {

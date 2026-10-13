@@ -1,6 +1,7 @@
 import {
   InspectionStatusEnum,
   OverallDecisionEnum,
+  type OverallDecision,
   type InspectionOrder as InspectionOrderDTO,
 } from '@letian/contracts';
 import { NotFoundError, ValidationFailedError } from '../../errors/application-error.js';
@@ -15,8 +16,11 @@ export interface FinalizeInspectionStatusCommand {
   orderId: string;
   /** 终判目标状态（受契约 InspectionStatusEnum 约束，非法值 400） */
   status: string;
-  /** 综合判定结论；让步 / 特采申请场景可省略（仅以 status = FAILED 表示不合格） */
-  judgment?: string;
+  /**
+   * 综合判定结论；让步 / 特采申请场景可省略（仅以 status = FAILED 表示不合格）。
+   * 与契约 OverallDecisionEnum 同一取值域 —— 裸 string 会让任意拼写一路写进 judgment 列。
+   */
+  judgment?: OverallDecision;
   passQty?: number;
   failQty?: number;
   sampleQty?: number;
@@ -122,6 +126,15 @@ export class FinalizeInspectionStatusUseCase {
       ]);
     }
 
+    if (
+      (cmd.judgment === 'FAILED' && targetStatus !== 'FAILED') ||
+      (targetStatus === 'FAILED' && cmd.judgment === 'PASSED')
+    ) {
+      throw new ValidationFailedError('检验状态与综合判定结论不一致', [
+        { name: 'judgment', reason: '不合格结论必须对应 FAILED 状态，FAILED 状态不能判合格' },
+      ]);
+    }
+
     return await this.uow.execute(async (ctx) => {
       const existing = await ctx.inspectionOrders.findById(cmd.orderId);
       if (existing === null) {
@@ -142,6 +155,23 @@ export class FinalizeInspectionStatusUseCase {
 
       // 排他事务锁：与实测录入判定共用同一把工单锁，避免并发终判与入池读到中间态
       await ctx.locks.acquireXactLock(`LOCK_ORDER_${existing.batchNo}`);
+      const lockedOrder = await ctx.inspectionOrders.findById(cmd.orderId);
+      if (lockedOrder === null) {
+        throw new NotFoundError(`检验单不存在: ${cmd.orderId}`);
+      }
+      if (
+        targetStatus === 'PASSED' &&
+        (lockedOrder.status === 'IN_MRB_REVIEW' || lockedOrder.overallDecision === 'FAILED')
+      ) {
+        throw new ValidationFailedError('不合格单据不能直接改判合格', [
+          { name: 'status', reason: '请通过 MRB 处置或复检流程完成放行' },
+        ]);
+      }
+      if (targetStatus === 'FAILED' && (cmd.judgment ?? lockedOrder.overallDecision) === 'PASSED') {
+        throw new ValidationFailedError('检验状态与综合判定结论不一致', [
+          { name: 'judgment', reason: 'FAILED 状态不能保留合格结论' },
+        ]);
+      }
 
       const note = cmd.inspectionNotes ?? cmd.remark;
       await ctx.inspectionOrders.updateStatus(cmd.orderId, targetStatus, note);
@@ -149,7 +179,7 @@ export class FinalizeInspectionStatusUseCase {
       const stats: {
         passQty?: number;
         failQty?: number;
-        judgment?: string;
+        judgment?: OverallDecision;
         completedAt?: Date;
         inspectionNotes?: string;
       } = {};
@@ -209,6 +239,10 @@ export class FinalizeInspectionStatusUseCase {
 
       // 自动建单会把检验单推进到 IN_MRB_REVIEW，因此回读最终态返回给调用方
       // （此前返回的是 FAILED 中间态，前端列表刷新前会看到与实际不一致的状态）。
+      if (auto !== null && !auto.created &&
+          (auto.mrbReview.status === 'PENDING_REVIEW' || auto.mrbReview.status === 'UNDER_REVIEW')) {
+        await ctx.inspectionOrders.updateStatus(cmd.orderId, 'IN_MRB_REVIEW');
+      }
       const finalized =
         auto !== null ? (await ctx.inspectionOrders.findById(cmd.orderId)) ?? updated : updated;
 

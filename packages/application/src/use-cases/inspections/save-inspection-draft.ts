@@ -22,6 +22,9 @@ export interface SaveInspectionDraftCommand
     inheritedHeatValue?: number | string;
     isManuallyModified?: boolean;
     modificationReason?: string;
+    /** 不解检（EXEMPT）标记：草稿暂存同样保留 */
+    isExempt?: boolean;
+    exemptReason?: string;
   }>;
   inspectorRemark?: string;
   operatorId: string;
@@ -87,6 +90,16 @@ export class SaveInspectionDraftUseCase {
         }
 
         for (const item of cmd.items) {
+          // 与 record-measurements 同口径：免检标记先落、后录实测值，
+          // 免检行本身不携带实测值则跳过录入。
+          if (item.isExempt !== undefined) {
+            order.markItemExempt({
+              itemCode: item.itemCode,
+              isExempt: item.isExempt,
+              ...(item.exemptReason !== undefined ? { exemptReason: item.exemptReason } : {}),
+            });
+          }
+          if (item.isExempt === true) continue;
           order.recordItemMeasurement({
             itemCode: item.itemCode,
             ...(item.measuredVal !== undefined ? { measuredVal: item.measuredVal } : {}),

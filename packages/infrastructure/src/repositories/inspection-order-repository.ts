@@ -24,6 +24,21 @@ const INSPECTION_STATUSES: readonly string[] = [
 ];
 
 /**
+ * 日期列归一：DATE/TIMESTAMP 列在 Kysely 下可能取回 `Date`，也可能（视驱动与列类型）
+ * 取回字符串。这里用 `unknown` 收口一处、供所有日期列复用 ——
+ * 替代原先散落在 mapRow 里的 `(row as any).x instanceof Date ? … : String(…)` 写法，
+ * 既去掉 `any`，也避免同一个判别逻辑在 4 个列上各写一遍而彼此漂移。
+ */
+function toDateOnly(value: unknown): string {
+  return value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
+}
+
+/** 时间戳列归一为 ISO 字符串（与 toDateOnly 同源，只是保留时分秒） */
+function toIsoInstant(value: unknown): string {
+  return value instanceof Date ? value.toISOString() : String(value);
+}
+
+/**
  * 台账派生列「检验状态」→ 库内 status 组合（不含终检合格判定）。
  *
  * 台账列展示的是**业务语义状态**，与契约 `status` 枚举并非一一对应：
@@ -140,10 +155,30 @@ export interface OrderListQuery {
    * 与 status / statuses 相互独立（叠加时为 AND）；翻译口径见 docs 16 §5.1。
    */
   inspectionState?: string;
+  /**
+   * 「检验状态」派生列的多选语义筛选（检验进度明细页多状态组合查询）：
+   * 每个取值先翻译成对应的 status + judgment 谓词，再多值间 OR 叠加；
+   * 与 inspectionState 并存（叠加时为 AND）。
+   */
+  inspectionStates?: readonly string[];
   inspectors?: readonly string[];
   supplierCodes?: readonly string[];
   dateFrom?: string;
   dateTo?: string;
+  /**
+   * 入库日期范围（YYYY-MM-DD，按 inbound_date 物理列过滤，含起止当日）。
+   * 来料检验台账「入库日期」筛选专用：与台账列显示口径一致；
+   * 区别于 dateFrom/dateTo 的建单时间（created_at）口径。
+   */
+  inboundDateFrom?: string;
+  inboundDateTo?: string;
+  /**
+   * 回厂日期范围（YYYY-MM-DD，按 return_date 物理列过滤，含起止当日）。
+   * 委外检验台账「回厂日期」筛选专用：与该列显示口径一致（mapRow 输出 slice(0,10)）；
+   * 区别于 dateFrom/dateTo 的建单时间（created_at）与 inboundDate* 的来料入库日期。
+   */
+  returnDateFrom?: string;
+  returnDateTo?: string;
   partnerKeyword?: string;
   /** 入库单号模糊匹配（来料检验台账「入库单号」列，006 字段扩展） */
   inboundNo?: string;
@@ -156,6 +191,8 @@ export interface OrderListQuery {
   /** 炉批号（furnace_heat_batch_no）模糊匹配：出货检验台账「炉批号」筛选框（docs/47 §4.2⑤ / P2） */
   furnaceHeatNo?: string;
   materialCode?: string;
+  /** 「物料」多选：material_code IN (...) 精确匹配（多值间为 OR），与 materialCode 模糊匹配并存 */
+  materialCodes?: readonly string[];
   /** 委外加工单号（ERP 委外工单号）模糊匹配 */
   outsourceNo?: string;
   /** 加工类型/工艺分类精确匹配（如 镀锌 / 热处理 / 机加工） */
@@ -163,8 +200,22 @@ export interface OrderListQuery {
   salesOrderNo?: string;
   customerName?: string;
   salesOrderPoNo?: string;
+  /** 出库日期精确匹配（YYYY-MM-DD，出货检验台账专用） */
   dispatchDate?: string;
+  /**
+   * 出库日期范围（YYYY-MM-DD，出货检验台账「单据日期」区间筛选）。
+   * 与 dispatchDate 精确匹配互斥：传了区间即按 [from, to] 半开/闭区间过滤，
+   * 不再做精确等于。上界刻意取「当日 23:59:59」以兼容 dispatch_date 既可能是 DATE 也可能是 TIMESTAMP。
+   */
+  dispatchDateFrom?: string;
+  dispatchDateTo?: string;
   erpStatus?: string;
+  /**
+   * 呈现上限（行数）。出货检验台账强制 10000（见需求「最大呈现上限万条数据」）：
+   * 当命中总行数超过该值时，total 截断为该值并置 capped=true，避免超大结果集拖垮查询与界面。
+   * 不传或传 undefined 表示不封顶（其它台账保持原行为）。
+   */
+  maxTotal?: number;
   /** 鎵规鍙?/ 鐗╂枡缂栫爜 / 鐗╂枡鍚嶇О / 宸ュ崟鍙?鐨勬ā绯婂尮閰?*/
   keyword?: string;
   /**
@@ -208,6 +259,8 @@ export interface OrderListResult {
   total: number;
   list: InspectionOrder[];
   statusCounts: Record<string, number>;
+  /** 命中数超过 maxTotal 被截断时为 true（出货检验万条上限场景） */
+  capped?: boolean;
 }
 
 /**
@@ -344,7 +397,11 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
    */
   public async findChainCandidates(
     anchors: readonly ChainAnchor[],
-    options: { inspectionTypes?: readonly InspectionType[]; materialCode?: string } = {}
+    options: {
+      inspectionTypes?: readonly InspectionType[];
+      materialCode?: string;
+      crossMaterialAnchorKinds?: readonly ChainAnchorKind[];
+    } = {}
   ): Promise<readonly UpstreamCandidate[]> {
     const buckets = splitAnchorValues(anchors);
     if (!hasAnyAnchorValue(buckets)) {
@@ -353,9 +410,31 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
 
     const materialCode = (options.materialCode ?? '').trim();
     const inspectionTypes = options.inspectionTypes ?? [];
+    const crossMaterial = options.crossMaterialAnchorKinds ?? [];
 
     const rows = await this.buildChainCandidateQuery(buckets, inspectionTypes)
-      .$if(materialCode !== '', (qb) => qb.where('materialCode', '=', materialCode))
+      // 物料谓词：
+      //   `material_code = 本单物料` OR 「该行命中的锚点属于允许跨物料的锚点」
+      // —— 传 `['HEAT']` 时，同一炉批号下的跨物料上游单会**进入候选集并参与门禁判定**；
+      //    不传（默认）时退化为严格同物料，与改造前行为完全一致（向后兼容）。
+      .$if(materialCode !== '', (qb) =>
+        qb.where((eb) => {
+          const clauses: Expression<SqlBool>[] = [];
+          if (crossMaterial.includes('HEAT') && buckets.heat.length > 0) {
+            clauses.push(eb('furnaceHeatBatchNoNorm', 'in', [...buckets.heat]));
+          }
+          if (crossMaterial.includes('BATCH') && buckets.batch.length > 0) {
+            clauses.push(eb('batchNo', 'in', [...buckets.batch]));
+          }
+          if (crossMaterial.includes('WORK_ORDER') && buckets.workOrder.length > 0) {
+            clauses.push(eb('workOrderNo', 'in', [...buckets.workOrder]));
+          }
+          if (clauses.length === 0) {
+            return eb('materialCode', '=', materialCode);
+          }
+          return eb.or([eb('materialCode', '=', materialCode), ...clauses]);
+        })
+      )
       .orderBy(sql`updated_at DESC NULLS LAST`)
       .orderBy(sql`created_at DESC`)
       .orderBy(sql`order_no DESC`)
@@ -365,6 +444,8 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
     return rows.map((row) => ({
       order: this.mapRow(row, names, supplierNames),
       matchedAnchors: matchChainAnchors(row, buckets),
+      // 跨物料标注：只作可解释性（界面要能说清「为什么被一张不同物料的单挡住」），不改判定
+      ...(materialCode !== '' && row.materialCode !== materialCode ? { crossMaterial: true } : {}),
     }));
   }
 
@@ -514,6 +595,10 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
         ...(order.materialGrade !== undefined ? { materialGrade: order.materialGrade } : {}),
         ...(order.techStandard !== undefined ? { techStandard: order.techStandard } : {}),
         ...(order.inspectedDate !== undefined ? { inspectedDate: order.inspectedDate } : {}),
+        // 038 证书模板与证书专用字段袋（docs/51）：同一「显式传入才写」口径；cert_fields 是 jsonb，
+        // 必须显式字符串化（同上方 planSnapshot/items 的写法，避免 node-postgres 渲成 PG 数组字面量）
+        ...(order.certTemplate !== undefined ? { certTemplate: order.certTemplate } : {}),
+        ...(order.certFields !== undefined ? { certFields: JSON.stringify(order.certFields) } : {}),
         // 034 炉批号与溯源留痕（docs/47 D1）：同样「显式传入才写」——未传时不覆盖既有值；
         // 清空请走 updateHeatHeaderFields 的 '' 语义（本方法不接受空串兜底，避免误清真实炉号）。
         ...(order.furnaceHeatNo !== undefined ? { furnaceHeatBatchNo: order.furnaceHeatNo } : {}),
@@ -536,6 +621,7 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
         ...(order.completedAt !== undefined ? { completedAt: toTimestamp(order.completedAt) } : {}),
         planSnapshot: JSON.stringify(order.planSnapshot),
         items: JSON.stringify(order.items),
+        ...(order.createdAt !== undefined ? { createdAt: new Date(order.createdAt) } : {}),
         updatedAt: now,
         ...(order.id !== undefined ? { id: order.id } : {}),
       })
@@ -586,6 +672,9 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
         ...(order.materialGrade !== undefined ? { materialGrade: order.materialGrade } : {}),
         ...(order.techStandard !== undefined ? { techStandard: order.techStandard } : {}),
         ...(order.inspectedDate !== undefined ? { inspectedDate: order.inspectedDate } : {}),
+        // 038 证书模板与证书专用字段袋：与 insert 同一口径（cert_fields 为 jsonb，显式字符串化）
+        ...(order.certTemplate !== undefined ? { certTemplate: order.certTemplate } : {}),
+        ...(order.certFields !== undefined ? { certFields: JSON.stringify(order.certFields) } : {}),
         // 007 过程检验工序字段：与 insert 同一「显式传入才写」口径。
         // 这些值来自仓储读侧的 DTO 回吐（见 mapRow），因此重建型用例（暂存草稿 / 录入实测值 /
         // 复检）不会把已有值抹成 NULL。
@@ -630,6 +719,11 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
       if (query.inspectionState !== undefined && query.inspectionState !== '') {
         list.push(toInspectionStateWhere(eb, query.inspectionState));
       }
+      // 多选版本：每个取值翻译成对应的 status + judgment 谓词后 OR 叠加
+      // （多值间为 OR，与前端「检验状态」多选及列显示口径一致）
+      if (query.inspectionStates !== undefined && query.inspectionStates.length > 0) {
+        list.push(eb.or(query.inspectionStates.map((s) => toInspectionStateWhere(eb, s))));
+      }
       if (query.batchNo !== undefined) {
         list.push(eb('batchNo', 'ilike', `%${escapeLike(query.batchNo)}%`));
       }
@@ -640,6 +734,10 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
       }
       if (query.materialCode !== undefined) {
         list.push(eb('materialCode', 'ilike', `%${escapeLike(query.materialCode)}%`));
+      }
+      // 「物料」多选：精确 IN 匹配（多值间为 OR），与上面的单值模糊匹配并存（叠加为 AND）
+      if (query.materialCodes !== undefined && query.materialCodes.length > 0) {
+        list.push(eb('materialCode', 'in', query.materialCodes as string[]));
       }
       if (query.outsourceNo !== undefined && query.outsourceNo !== '') {
         list.push(eb('outsourceNo', 'ilike', `%${escapeLike(query.outsourceNo)}%`));
@@ -663,6 +761,29 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
         }
         list.push(eb('createdAt', '<=', to));
       }
+      // 来料检验台账「入库日期」范围：按 inbound_date 物理列过滤（与该列显示口径一致）
+      if (query.inboundDateFrom !== undefined && query.inboundDateFrom !== '') {
+        list.push(eb('inboundDate', '>=', new Date(query.inboundDateFrom)));
+      }
+      if (query.inboundDateTo !== undefined && query.inboundDateTo !== '') {
+        const inTo = new Date(query.inboundDateTo);
+        if (query.inboundDateTo.length <= 10) {
+          inTo.setHours(23, 59, 59, 999);
+        }
+        list.push(eb('inboundDate', '<=', inTo));
+      }
+      // 委外检验台账「回厂日期」范围：按 return_date 物理列过滤（与该列显示口径一致）。
+      // return_date 是 VARCHAR 且取值形如 YYYY-MM-DD，故直接按字符串比较（字典序 == 时间序），
+      // 上界刻意取「次日」而非「当日 <=」：写成 <= 'YYYY-MM-DD' 会把带时间后缀的历史行漏掉，
+      // 半开区间 [from, 次日) 才能完整包含结束当日。
+      if (query.returnDateFrom !== undefined && query.returnDateFrom !== '') {
+        list.push(eb('returnDate', '>=', query.returnDateFrom));
+      }
+      if (query.returnDateTo !== undefined && query.returnDateTo !== '') {
+        const retTo = new Date(`${query.returnDateTo}T00:00:00Z`);
+        retTo.setUTCDate(retTo.getUTCDate() + 1);
+        list.push(eb('returnDate', '<', retTo.toISOString().slice(0, 10)));
+      }
       if (query.inboundNo !== undefined && query.inboundNo !== '') {
         list.push(eb('inboundNo', 'ilike', `%${escapeLike(query.inboundNo)}%`));
       }
@@ -679,6 +800,18 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
       }
       if (query.dispatchDate !== undefined && query.dispatchDate !== '') {
         list.push(eb('dispatchDate', '=', query.dispatchDate));
+      }
+      // 出货检验台账「单据日期」区间筛选：与 dispatchDate 精确匹配互斥，
+      // 区间优先（传了任一边即按 [from, to] 过滤，含起止当日）。
+      // dispatch_date 为字符串列：起点用 >= 直接比，终点用「次日 00:00 之前」的半开区间，
+      // 与 returnDateTo 同一纪律，兼容「纯日期」与「带时分秒」两种存储写法。
+      if (query.dispatchDateFrom !== undefined && query.dispatchDateFrom !== '') {
+        list.push(eb('dispatchDate', '>=', query.dispatchDateFrom));
+      }
+      if (query.dispatchDateTo !== undefined && query.dispatchDateTo !== '') {
+        const dTo = new Date(`${query.dispatchDateTo.slice(0, 10)}T00:00:00Z`);
+        dTo.setUTCDate(dTo.getUTCDate() + 1);
+        list.push(eb('dispatchDate', '<', dTo.toISOString().slice(0, 10)));
       }
       if (query.erpStatus !== undefined && query.erpStatus !== '') {
         list.push(eb('erpStatus', '=', query.erpStatus));
@@ -780,7 +913,14 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
       .select((eb) => eb.fn.countAll().as('total'))
       .where(filter)
       .executeTakeFirst();
-    const total = countRow ? Number(countRow.total) : 0;
+    let total = countRow ? Number(countRow.total) : 0;
+    // 呈现上限（出货检验台账强制 10000）：命中数超过上限时截断 total 并标记 capped，
+    // 由控制器与前端据以提示「结果已截断，请缩小筛选范围」。
+    let capped = false;
+    if (query.maxTotal !== undefined && Number(query.maxTotal) > 0 && total > query.maxTotal) {
+      total = query.maxTotal;
+      capped = true;
+    }
 
     // 鐘舵€佽鏁扮敤浜庣湅鏉垮崱鐗囷紝鎸夊叏琛ㄧ粺璁★紙涓嶅彈绛涢€夋潯浠跺奖鍝嶏級
     const statusRows = await this.db
@@ -795,7 +935,7 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
     }
 
     const [names, supplierNames] = await this.getRefNameMaps();
-    return { total, list: rows.map((row) => this.mapRow(row, names, supplierNames)), statusCounts };
+    return { total, list: rows.map((row) => this.mapRow(row, names, supplierNames)), statusCounts, capped };
   }
 
   public async getIpqcOverviewStats(): Promise<{
@@ -884,9 +1024,17 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
 
   public async updateStatsAndVerdict(
     id: string,
-    data: { passQty?: number; failQty?: number; judgment?: string; completedAt?: Date; inspectionNotes?: string }
+    data: {
+      passQty?: number;
+      failQty?: number;
+      // 判定结论与表列同口径（OverallDecision 的三个取值），不用裸 string ——
+      // 裸 string 会让写进 judgment 列的值绕过契约校验而无人发现
+      judgment?: InspectionOrderUpdate['judgment'];
+      completedAt?: Date;
+      inspectionNotes?: string;
+    }
   ): Promise<void> {
-    const values: any = { updatedAt: new Date() };
+    const values: InspectionOrderUpdate = { updatedAt: new Date() };
     if (data.passQty !== undefined) values.passQty = data.passQty;
     if (data.failQty !== undefined) values.failQty = data.failQty;
     if (data.judgment !== undefined) values.judgment = data.judgment;
@@ -914,13 +1062,21 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
       materialGrade?: string;
       techStandard?: string;
       inspectedDate?: string;
-      heatSourceType?: string;
+      // 与表列 / 契约 HeatTraceAppliedSourceTypeEnum 同一取值域；原先写 string，
+      // 非法值会一路写进库而不被类型系统拦下
+      heatSourceType?: 'OUTSOURCE_HEAT_TREATMENT' | 'IQC_RAW_MATERIAL';
       heatSourceOrderNo?: string;
+      // 038 证书模板与证书专用字段袋（docs/51）：undefined = 不动该列；certTemplate 空串 = 清空；
+      // certFields 传对象即整袋覆盖（空对象 = 清空为 NULL），与其它表头字段同一显式语义
+      certTemplate?: 'QUALITY' | 'MANUFACTURING';
+      certFields?: Record<string, string>;
     }
   ): Promise<void> {
-    const blankToNull = (value: string): string | null => {
+    // 泛型签名保形：blankToNull(字面量联合) 必须仍返回该联合，否则收窄后的列类型
+    // 会在赋回 values 时被撑回 string 而报错。trim 不改变取值域，故按 T 返回。
+    const blankToNull = <T extends string>(value: T): T | null => {
       const trimmed = value.trim();
-      return trimmed === '' ? null : trimmed;
+      return trimmed === '' ? null : (trimmed as T);
     };
 
     const values: InspectionOrderUpdate = { updatedAt: new Date() };
@@ -947,6 +1103,13 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
     }
     if (fields.heatSourceOrderNo !== undefined) {
       values.heatSourceOrderNo = blankToNull(fields.heatSourceOrderNo);
+    }
+    if (fields.certTemplate !== undefined) {
+      values.certTemplate = blankToNull(fields.certTemplate);
+    }
+    if (fields.certFields !== undefined) {
+      values.certFields =
+        Object.keys(fields.certFields).length === 0 ? null : JSON.stringify(fields.certFields);
     }
 
     await this.db.updateTable('inspectionOrders').set(values).where('id', '=', id).execute();
@@ -1105,7 +1268,7 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
     // 快照为空（历史行 / 只传了编码）时按 supplier_code 回查供应商主数据，
     // 让台账永远展示厂商全称而不是内部编码（SUP-001）。
     const resolvedSupplierName =
-      (row as any).supplierName ||
+      row.supplierName ||
       (row.supplierCode !== null ? supplierNames?.get(row.supplierCode) : undefined);
     return {
       id: row.id,
@@ -1132,50 +1295,50 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
       ...(row.judgment !== null ? { overallDecision: row.judgment } : {}),
       ...(row.inspectionNotes !== null ? { inspectionNotes: row.inspectionNotes } : {}),
       ...(row.totalQty !== null && row.totalQty !== undefined ? { totalQty: Number(row.totalQty) } : {}),
-      ...((row as any).inboundNo ? { inboundNo: (row as any).inboundNo } : {}),
-      ...((row as any).inboundDate ? { inboundDate: ((row as any).inboundDate instanceof Date ? (row as any).inboundDate.toISOString().slice(0, 10) : String((row as any).inboundDate).slice(0, 10)) } : {}),
-      ...((row as any).specification || (row as any).spec ? { specification: (row as any).specification || (row as any).spec, spec: (row as any).specification || (row as any).spec } : {}),
-      ...((row as any).unit ? { unit: (row as any).unit } : {}),
+      ...(row.inboundNo ? { inboundNo: row.inboundNo } : {}),
+      ...(row.inboundDate ? { inboundDate: (toDateOnly(row.inboundDate)) } : {}),
+      ...(row.specification ? { specification: row.specification } : {}),
+      ...(row.unit ? { unit: row.unit } : {}),
       ...(resolvedSupplierName ? { supplierName: resolvedSupplierName } : {}),
       // inspector_name 为冗余快照列，历史上可能为空：按员工主数据（id -> 姓名）补齐
-      ...((row as any).inspectorName
-        ? { inspectorName: (row as any).inspectorName }
+      ...(row.inspectorName
+        ? { inspectorName: row.inspectorName }
         : row.inspectorId && employeeNames?.has(row.inspectorId)
           ? { inspectorName: employeeNames.get(row.inspectorId) as string }
           : {}),
-      ...((row as any).workOrderNo ? { workOrderNo: (row as any).workOrderNo } : (row.batchNo ? { workOrderNo: row.batchNo } : {})),
-      ...((row as any).blankingLength !== null && (row as any).blankingLength !== undefined ? { blankingLength: Number((row as any).blankingLength) } : {}),
-      ...((row as any).operatorName ? { operatorName: (row as any).operatorName } : {}),
-      ...((row as any).operatorId ? { operatorId: (row as any).operatorId } : {}),
-      ...((row as any).equipmentCode ? { equipmentCode: (row as any).equipmentCode } : {}),
-      ...((row as any).equipmentName ? { equipmentName: (row as any).equipmentName } : {}),
-      ...((row as any).threadSpec ? { threadSpec: (row as any).threadSpec } : {}),
-      ...((row as any).inspectionTeam ? { inspectionTeam: (row as any).inspectionTeam } : {}),
-      ...((row as any).processStep ? { processStep: (row as any).processStep } : {}),
-      ...((row as any).completedAt ? { completedAt: (row as any).completedAt instanceof Date ? (row as any).completedAt.toISOString() : String((row as any).completedAt) } : {}),
-      ...((row as any).salesOrderNo ? { salesOrderNo: (row as any).salesOrderNo } : {}),
-      ...((row as any).dispatchDate ? { dispatchDate: (row as any).dispatchDate instanceof Date ? (row as any).dispatchDate.toISOString().slice(0, 10) : String((row as any).dispatchDate).slice(0, 10) } : {}),
-      ...((row as any).customerName ? { customerName: (row as any).customerName } : {}),
-      ...((row as any).salesOrderPoNo ? { salesOrderPoNo: (row as any).salesOrderPoNo } : {}),
-      ...((row as any).erpStatus ? { erpStatus: (row as any).erpStatus } : {}),
+      ...(row.workOrderNo ? { workOrderNo: row.workOrderNo } : (row.batchNo ? { workOrderNo: row.batchNo } : {})),
+      ...(row.blankingLength !== null && row.blankingLength !== undefined ? { blankingLength: Number(row.blankingLength) } : {}),
+      ...(row.operatorName ? { operatorName: row.operatorName } : {}),
+      ...(row.operatorId ? { operatorId: row.operatorId } : {}),
+      ...(row.equipmentCode ? { equipmentCode: row.equipmentCode } : {}),
+      ...(row.equipmentName ? { equipmentName: row.equipmentName } : {}),
+      ...(row.threadSpec ? { threadSpec: row.threadSpec } : {}),
+      ...(row.inspectionTeam ? { inspectionTeam: row.inspectionTeam } : {}),
+      ...(row.processStep ? { processStep: row.processStep } : {}),
+      ...(row.completedAt ? { completedAt: toIsoInstant(row.completedAt) } : {}),
+      ...(row.salesOrderNo ? { salesOrderNo: row.salesOrderNo } : {}),
+      ...(row.dispatchDate ? { dispatchDate: toDateOnly(row.dispatchDate) } : {}),
+      ...(row.customerName ? { customerName: row.customerName } : {}),
+      ...(row.salesOrderPoNo ? { salesOrderPoNo: row.salesOrderPoNo } : {}),
+      ...(row.erpStatus ? { erpStatus: row.erpStatus } : {}),
       // 034 炉批号与溯源留痕（docs/47 D3）：此前 furnace_heat_batch_no 读侧也没映射，
       // 契约 furnaceHeatNo 恒空 -> 出货台账「炉号」列与质保书炉号栏一直空白。
       // 三个字段一律「列空即不输出该键」，界面按留白渲染，不用 batchNo 兜底（同 docs/34 §5.3 口径）。
-      ...((row as any).furnaceHeatBatchNo ? { furnaceHeatNo: (row as any).furnaceHeatBatchNo } : {}),
-      ...((row as any).heatSourceType ? { heatSourceType: (row as any).heatSourceType } : {}),
-      ...((row as any).heatSourceOrderNo ? { heatSourceOrderNo: (row as any).heatSourceOrderNo } : {}),
+      ...(row.furnaceHeatBatchNo ? { furnaceHeatNo: row.furnaceHeatBatchNo } : {}),
+      ...(row.heatSourceType ? { heatSourceType: row.heatSourceType } : {}),
+      ...(row.heatSourceOrderNo ? { heatSourceOrderNo: row.heatSourceOrderNo } : {}),
       // 035 建单传递留痕（docs/48 §4.1）：与列表实时派生的 chainKey / predecessorOrderNo 是**两个语义**
       // —— 一个是「建单当初凭什么放行」的历史存档，一个是「现在还能不能传」的实时判定。
       // 因此单独挂在 transferTrace 下，绝不与实时字段同名。任一列有值才输出该键；列空即不输出，
       // 界面按 — 呈现，绝不用实时判定去填满留痕（那会让「没留痕」看起来像「留过痕」）。
-      ...((row as any).chainKey || (row as any).upstreamGateCode
+      ...(row.chainKey || row.upstreamGateCode
         ? {
             transferTrace: {
-              ...((row as any).chainKey ? { chainKey: (row as any).chainKey } : {}),
-              ...((row as any).chainKeyKind ? { chainKeyKind: (row as any).chainKeyKind } : {}),
-              ...((row as any).upstreamOrderNo ? { upstreamOrderNo: (row as any).upstreamOrderNo } : {}),
-              ...((row as any).upstreamGateCode
-                ? { upstreamGateCode: (row as any).upstreamGateCode }
+              ...(row.chainKey ? { chainKey: row.chainKey } : {}),
+              ...(row.chainKeyKind ? { chainKeyKind: row.chainKeyKind } : {}),
+              ...(row.upstreamOrderNo ? { upstreamOrderNo: row.upstreamOrderNo } : {}),
+              ...(row.upstreamGateCode
+                ? { upstreamGateCode: row.upstreamGateCode }
                 : {}),
             },
           }
@@ -1184,33 +1347,37 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
       // 列为空即不输出该键，界面按 `-` 渲染。历史上这里用 batch_no 顶替委外加工单号、
       // 用 created_at 顶替回厂日期，属「推导值冒充真实字段」——已被 docs/09 §2.4 与
       // scripts/testing/README.md 的断言口径明令禁止（见 docs/32 §2）。
-      ...((row as any).outsourceNo ? { outsourceNo: (row as any).outsourceNo } : {}),
-      ...((row as any).processType ? { processType: (row as any).processType } : {}),
-      ...((row as any).returnDate
-        ? { returnDate: String((row as any).returnDate).slice(0, 10) }
+      ...(row.outsourceNo ? { outsourceNo: row.outsourceNo } : {}),
+      ...(row.processType ? { processType: row.processType } : {}),
+      ...(row.returnDate
+        ? { returnDate: String(row.returnDate).slice(0, 10) }
         : {}),
-      ...((row as any).vendorName
-        ? { vendorName: (row as any).vendorName }
+      ...(row.vendorName
+        ? { vendorName: row.vendorName }
         : resolvedSupplierName
           ? { vendorName: resolvedSupplierName }
           : {}),
       // 030 委外检验录入页业务事实字段（docs/36）：只取物理列，为空即不输出该键（界面留空），
       // 绝不从物料名称 / 方案号 / 建单时间推导（历史行三列均为 NULL 属既定口径）
-      ...((row as any).materialGrade ? { materialGrade: (row as any).materialGrade } : {}),
-      ...((row as any).techStandard ? { techStandard: (row as any).techStandard } : {}),
-      ...((row as any).inspectedDate
-        ? { inspectedDate: String((row as any).inspectedDate).slice(0, 10) }
+      ...(row.materialGrade ? { materialGrade: row.materialGrade } : {}),
+      ...(row.techStandard ? { techStandard: row.techStandard } : {}),
+      ...(row.inspectedDate
+        ? { inspectedDate: String(row.inspectedDate).slice(0, 10) }
         : {}),
+      // 038 证书模板与证书专用字段袋（docs/51）：只取物理列，列为空即不输出该键，界面按
+      // 模块缺省/留白渲染；cert_fields 是 jsonb，驱动直接返回解析后的对象，无需二次 parse
+      ...(row.certTemplate ? { certTemplate: row.certTemplate } : {}),
+      ...(row.certFields ? { certFields: row.certFields } : {}),
       // 029 质量负责人签核（docs/35 §5）：只输出物理列的真实值；未签核即不输出该键，
       // 制造证书 / 质量证书据此留白，绝不用「签核人」这类键冒充已发生的签核动作。
-      ...((row as any).approverId ? { approverId: (row as any).approverId } : {}),
-      ...((row as any).approverName ? { approverName: (row as any).approverName } : {}),
-      ...((row as any).approvedAt
+      ...(row.approverId ? { approverId: row.approverId } : {}),
+      ...(row.approverName ? { approverName: row.approverName } : {}),
+      ...(row.approvedAt
         ? {
             approvedAt:
-              (row as any).approvedAt instanceof Date
-                ? (row as any).approvedAt.toISOString()
-                : String((row as any).approvedAt),
+              row.approvedAt instanceof Date
+                ? row.approvedAt.toISOString()
+                : String(row.approvedAt),
           }
         : {}),    };
   }

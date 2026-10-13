@@ -143,6 +143,8 @@ export interface InspectionPlansTable {
   versionStatus: Generated<PlanVersionStatus>;
   /** 与契约 InspectionTypeEnum 的 13 个取值一致（016 迁移已把 CHECK 约束补齐到含委外七分类） */
   inspectionStage: InspectionType;
+  /** 方案适用的检验类型全集（039 迁移新增，含主类型 inspectionStage；匹配/筛选按数组包含判定） */
+  inspectionTypes: JsonColumnType<InspectionType[]>;
   items: JsonColumnType<InspectionPlanItem[]>;
   samplingConfig: JsonColumnType<PlanSamplingConfig>;
   workshopCode: string | null;
@@ -229,8 +231,14 @@ export interface InspectionOrdersTable {
   furnaceHeatBatchNo?: string | null;
   /** 归一化炉批号（生成列：upper + 去空格 / 连字符 / 下划线 / 全角空格）；仅供等值查询 */
   furnaceHeatBatchNoNorm?: Generated<string | null>;
-  /** 本单炉批号数据的带出源：OUTSOURCE_HEAT_TREATMENT / IQC_RAW_MATERIAL；未带出为空 */
-  heatSourceType?: string | null;
+  /**
+   * 本单炉批号数据的带出源：OUTSOURCE_HEAT_TREATMENT / IQC_RAW_MATERIAL；未带出为空。
+   *
+   * 与契约 `HeatTraceAppliedSourceTypeEnum` 同口径（迁移 020 的 CHECK 约束只允许这两个值）。
+   * 原先登记为 `string | null`，会让装配 DTO 时出现「string 不能赋给两值联合」的类型错误 ——
+   * 那个错误此前被 `(row as any)` 掩盖掉了。登记真实取值域后，越界值在编译期就会暴露。
+   */
+  heatSourceType?: 'OUTSOURCE_HEAT_TREATMENT' | 'IQC_RAW_MATERIAL' | null;
   /** 本单炉批号数据带出的源检验单号；未带出为空 */
   heatSourceOrderNo?: string | null;
   // 035 「合格后传递」建单留痕（docs/48 §4.1）：建单那一次判定的存档。
@@ -243,6 +251,23 @@ export interface InspectionOrdersTable {
   upstreamOrderNo?: string | null;
   /** 建单时的判定理由码（TransferGateCode） */
   upstreamGateCode?: string | null;
+  // 038 证书模板与证书专用字段（docs/51）：操作员在「填写检验内容前」选定打印模板；
+  // 两列只作证书打印与展示，不进任何判定/权限/传递链路；NULL = 未选择，界面按模块缺省渲染。
+  /**
+   * 证书模板：'QUALITY' = 质量保证书（纵向）/ 'MANUFACTURING' = 制造证书（横向）。
+   *
+   * 与契约 `CertTemplateEnum` 同一取值域；原先写 `string | null`，
+   * 装配 DTO 时会因「string 不能赋给两值联合」而报错 —— 该错误此前被 `(row as any)` 掩盖。
+   */
+  certTemplate?: 'QUALITY' | 'MANUFACTURING' | null;
+  /**
+   * 证书专用补充字段袋（制造证书 DO ref./Jobcard/交货点/涂层/颜色，质保书 印记/抽样计划 等）。
+   *
+   * 与契约 `CertFieldsSchema`（z.record(z.string(), z.string())）同一取值域；
+   * 原先登记 `Record<string, unknown>`，装配 DTO 时因「unknown 不能赋给 string」而报错 ——
+   * 该错误此前被 `(row as any)` 掩盖。JSONB 存的是字符串值袋，按实情登记。
+   */
+  certFields?: JsonColumnType<Record<string, string>> | null;
 }
 
 // ============================================================================
@@ -294,6 +319,10 @@ export interface MrbReviewsTable {
   disposedAt: Date | null;
   /** 015：最终裁决人姓名 */
   disposedBy: string | null;
+  /** 047：最近一次自动催办时间；未催办为 null */
+  lastRemindedAt: Generated<Date | null>;
+  /** 047：自动催办次数 */
+  reminderCount: Generated<number>;
   createdAt: Generated<Date>;
   updatedAt: Generated<Date>;
 }
@@ -371,6 +400,10 @@ export interface OutboxEventsTable {
   retryCount: Generated<number>;
   createdAt: Generated<Date>;
   processedAt: Date | null;
+  /** 047：FAILED 事件下一次允许投递的时间；立即重试时为 null */
+  nextRetryAt: Generated<Date | null>;
+  /** 047：死信告警成功送达时间；未送达则后台任务继续补发 */
+  deadLetterAlertedAt: Generated<Date | null>;
   traceId: string | null;
   errorReason: string | null;
 }
@@ -598,9 +631,29 @@ export interface CompanyProfileTable {
   originPlace: string | null;
   phone: string | null;
   email: string | null;
-  /** 证书印章文字（如「宁波乐天质检」）；无值即不打印印章 */
+  /** 证书印章文字（如「江阴乐天质检」）；无值即不打印印章 */
   qualityStamp: string | null;
   updatedBy: string | null;
+  updatedAt: Generated<Date>;
+}
+
+/**
+ * 检验项目字典（迁移 037）：ERP `TestItem` 表的 QMS 镜像。
+ * 检验方案明细 ERP 口径字段（testItemCode / dif / checkWay）中的 `testItemCode` 回链表；
+ * `bBuy/bProduce/bConsign` 三标志决定该项目在哪个质检阶段（来料/过程/委外·出货）可被选用。
+ */
+export interface TestItemsTable {
+  id: Generated<string>;
+  /** ERP `TestItem.TypeID`（如 '00001'），全局唯一 */
+  testItemCode: string;
+  name: string;
+  namePy: string | null;
+  testStandard: string | null;
+  appliesToBuy: Generated<boolean>;
+  appliesToProduce: Generated<boolean>;
+  appliesToConsign: Generated<boolean>;
+  sortNo: Generated<number>;
+  createdAt: Generated<Date>;
   updatedAt: Generated<Date>;
 }
 
@@ -613,6 +666,7 @@ export interface Database {
   workshops: WorkshopsTable;
   employees: EmployeesTable;
   companyProfile: CompanyProfileTable;
+  testItems: TestItemsTable;
   inspectionPlans: InspectionPlansTable;
   inspectionOrders: InspectionOrdersTable;
   reviewFlows: ReviewFlowsTable;
@@ -635,6 +689,29 @@ export interface Database {
   materialCategoryReassignments: MaterialCategoryReassignmentsTable;
   outsourceReferenceRenumberings: OutsourceReferenceRenumberingsTable;
   transferOverrideTickets: TransferOverrideTicketsTable;
+  qmsErpCodeMapping: QmsErpCodeMappingTable;
+}
+
+// ============================================================================
+// QMS ↔ ERP 编码映射表（迁移 041）：物料/供应商/检验员 的 QMS 编码 → ERP typeId
+// ============================================================================
+
+export interface QmsErpCodeMappingTable {
+  id: Generated<string>;
+  /** 'MATERIAL' | 'SUPPLIER' | 'EMPLOYEE' */
+  entityType: string;
+  /** materialCode / supplierCode / inspectorName（QMS 侧键） */
+  qmsCode: string;
+  /** ERP Ptype / Btype / Employee 的 typeId */
+  erpTypeId: string;
+  /** ERP UserCode（物料/供应商备查；员工为空） */
+  erpUserCode: string | null;
+  /** ERP FullName / Employee.Name（备查） */
+  erpFullName: string | null;
+  /** 'auto' = 回填脚本自动解析；'manual' = 运维手工补合成码 */
+  source: string;
+  createdAt: Generated<Date>;
+  updatedAt: Generated<Date>;
 }
 
 // ============================================================================
@@ -649,6 +726,7 @@ export type WorkshopRow = Selectable<WorkshopsTable>;
 export type EmployeeRow = Selectable<EmployeesTable>;
 export type InspectionPlanRow = Selectable<InspectionPlansTable>;
 export type CompanyProfileRow = Selectable<CompanyProfileTable>;
+export type TestItemRow = Selectable<TestItemsTable>;
 export type InspectionOrderRow = Selectable<InspectionOrdersTable>;
 export type ReviewFlowRow = Selectable<ReviewFlowsTable>;
 export type MrbReviewRow = Selectable<MrbReviewsTable>;
@@ -706,6 +784,10 @@ export interface TransferOverrideTicketsTable {
 export type TransferOverrideTicketRow = Selectable<TransferOverrideTicketsTable>;
 export type TransferOverrideTicketInsert = Insertable<TransferOverrideTicketsTable>;
 export type TransferOverrideTicketUpdate = Updateable<TransferOverrideTicketsTable>;
+
+export type QmsErpCodeMappingRow = Selectable<QmsErpCodeMappingTable>;
+export type QmsErpCodeMappingInsert = Insertable<QmsErpCodeMappingTable>;
+export type QmsErpCodeMappingUpdate = Updateable<QmsErpCodeMappingTable>;
 
 
 export type MaterialInsert = Insertable<MaterialsTable>;

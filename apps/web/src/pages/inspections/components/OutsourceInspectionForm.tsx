@@ -4,7 +4,18 @@ import { CertificatePrintModal } from '../../../components/certificate/Certifica
 import { TransferOverridePanel } from './TransferOverridePanel';
 import { PlanMatchBanner } from '../../../components/common/PlanMatchBanner';
 import { ApprovalButton } from '../../../components/common/ApprovalButton';
-import { ManufacturingCertData, OutsourceTestResult } from '../../../lib/inspectionTypes';
+import {
+  CertTemplateKind,
+  ManufacturingCertData,
+  OutsourceTestResult,
+  QualityCertificateData,
+} from '../../../lib/inspectionTypes';
+import {
+  buildIqcCertificateData,
+  buildManufacturingCertData,
+  certificateItemsFromRows,
+} from '../../../lib/certificateDataService';
+import { CertFieldsCard } from '../../../components/certificate/CertFieldsCard';
 import { useMatchedPlan } from '../../../hooks/useMatchedPlan';
 import {
   DECISION_LABEL,
@@ -258,6 +269,23 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
   // 打印预览控制
   const [printModalOpen, setPrintModalOpen] = useState(false);
   const [manufacturingCertData, setManufacturingCertData] = useState<ManufacturingCertData | null>(null);
+  const [qualityCertData, setQualityCertData] = useState<QualityCertificateData | null>(null);
+
+  // 证书模板（docs/51）：建单时由操作员选定并随单落库；委外场景默认横向制造证书，
+  // 历史单没有该列时同样回落 MANUFACTURING（与该模块此前的硬编码口径一致）
+  const [certTemplate, setCertTemplate] = useState<CertTemplateKind>(
+    initialItem?.certTemplate === 'QUALITY' ? 'QUALITY' : 'MANUFACTURING'
+  );
+  // 证书专用字段袋（cert_fields）：扫描件版面上有、检验单表头没有物理列的格；未填留白
+  const [certFields, setCertFields] = useState<Record<string, string>>(() => {
+    const raw = initialItem?.certFields;
+    if (raw === null || raw === undefined || typeof raw !== 'object') return {};
+    const bag: Record<string, string> = {};
+    for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof value === 'string' && value !== '') bag[key] = value;
+    }
+    return bag;
+  });
 
   // 委外检验类型：优先取检验单上的类型，其次按列表 Tab 推导（表面处理 / 热处理 / 机加工）
   const inspectionType: InspectionType =
@@ -496,6 +524,17 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
     setDecision(
       order.overallDecision === 'FAILED' ? '不合格' : order.overallDecision === 'PASSED' ? '合格' : ''
     );
+    // 证书模板与字段袋随单落库（docs/51）：只读回看按本单真实存储值回填
+    if (order.certTemplate !== undefined && order.certTemplate !== null) {
+      setCertTemplate(order.certTemplate);
+    }
+    if (order.certFields !== undefined && order.certFields !== null) {
+      const bag: Record<string, string> = {};
+      for (const [key, value] of Object.entries(order.certFields)) {
+        if (typeof value === 'string' && value !== '') bag[key] = value;
+      }
+      setCertFields(bag);
+    }
   }, [planMatch.order]);
 
   // 组装最新表单数据为制造业证书格式
@@ -569,39 +608,75 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
         ? 'FAILED'
         : 'RE_INSPECTING';
 
-    const cert: ManufacturingCertData = {
-      // 键名与 `ManufacturingCertTemplate` 的读取口径一致（certNo / dateOfIssue / testResults）：
-      // 历史实现写的是 certificateNo / date / tests，模板从不读取，导致证书编号与签发日期恒空白
-      certNo: docNo.trim() === '' ? '' : `MC-${docNo}`,
+    // 扫描件 1:1 版式（docs/51 模板A）只认 `buildManufacturingCertData` 的输出键：
+    // 表头七格 + 14 列产品行 + 验收标准副行；手搓对象的历史缺陷（certificateNo/date/tests
+    // 键名错位）不再重演 —— 表单态进服务层归一化，cert_fields 袋兜底专属格
+    return buildManufacturingCertData({
+      docNo: docNo.trim(),
       dateOfIssue: inspectDate,
       subcontractNo: outsourceNo,
       subcontractor: vendorName,
-      processName: processType,
-      productDescription: partName,
-      dimension: spec,
+      vendorName,
+      process: processType,
+      processType,
+      productName: partName,
+      materialName: partName,
+      materialGrade,
+      steelGrade: materialGrade,
+      specification: spec,
+      partSpec: spec,
       standardsApplied: techStandard,
-      batchNo: batchNo,
+      standard: techStandard,
+      batchNo,
+      heatNo,
+      quantity,
       quantityPcs: quantity,
+      inspector: inspector,
       inspectorName: inspector,
-      // 质量负责人 = 真实签核动作的产物（inspection_orders.approver_name）；未签核即留空
       qaManagerName: approver.name,
       visualInspection: visualDecision,
       overallDecision: certOverallDecision,
       visualStandard: withUnit(visualSpec, visualRow?.unit ?? '', ''),
       visualActual: [visualResult.trim(), threadResult.trim()].filter((value) => value !== '').join(' / '),
       remarks: conclusion,
+      certFields,
       testResults,
       ...(companyProfile !== null ? { companyProfile } : {}),
-    };
-
-    return cert;
+    });
   };
 
-  /** 打开制造证书预览：先取企业档案主数据（模块级缓存），再按真实值组装 */
+  /** 打开证书预览：按本单落库的 certTemplate 走（docs/51），先取企业档案主数据（模块级缓存） */
   const handleOpenCert = () => {
     void (async () => {
       const companyProfile = await loadCompanyProfile();
-      setManufacturingCertData(buildCertData(companyProfile));
+      if (certTemplate === 'QUALITY') {
+        setQualityCertData(
+          buildIqcCertificateData({
+            orderNo: docNo,
+            materialName: partName,
+            spec,
+            steelGrade: materialGrade,
+            quantity,
+            supplier: vendorName,
+            furnaceNo: heatNo,
+            batchNo,
+            standard: techStandard,
+            inspector,
+            ...(approver.name !== '' ? { approverName: approver.name } : {}),
+            ...(decision === '合格'
+              ? { judgment: 'PASSED' }
+              : decision === '不合格'
+              ? { judgment: 'FAILED' }
+              : {}),
+            inspectionNotes: conclusion,
+            certFields,
+            items: certificateItemsFromRows(planRowsForJudge),
+            ...(companyProfile !== null ? { companyProfile } : {}),
+          })
+        );
+      } else {
+        setManufacturingCertData(buildCertData(companyProfile));
+      }
       setPrintModalOpen(true);
     })();
   };
@@ -657,6 +732,9 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
           batchNo,
           sampleQty: qty,
           totalQty: qty,
+          // 证书模板选择与字段袋建单即落库（docs/51）：操作员在录入前选定的模板必须随单存活
+          certTemplate,
+          certFields,
           ...(partName.trim() !== '' ? { materialName: partName } : {}),
           ...(spec.trim() !== '' ? { specification: spec } : {}),
           ...(outsourceNo.trim() !== '' ? { outsourceNo } : {}),
@@ -702,6 +780,9 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
       //      「本炉材料来自哪张来料检验单」，前端不自称来源。
       await api.patch(`/inspections/${encodeURIComponent(orderId)}/header`, {
         furnaceHeatNo: heatNo.trim(),
+        // 证书模板选择与字段袋随头落库（docs/51）：字段袋整包覆盖（空值即清空）
+        certTemplate,
+        certFields,
         ...(materialGrade.trim() !== '' ? { materialGrade: materialGrade.trim() } : {}),
         ...(techStandard.trim() !== '' ? { techStandard: techStandard.trim() } : {}),
         ...(inspectDate.trim() !== '' ? { inspectedDate: inspectDate.trim() } : {}),
@@ -713,7 +794,8 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
 
       // 实测值：只下发方案命中行里已填写的项。缺项时按草稿落库 —— 用「未录入」触发领域终判会把
       // 整单判成不合格并汇入不合格待审池（collectPendingDefect），那不是检验员的真实结论。
-      const measuredRows = rowsForSubmit.filter((row) => !row.isExempt && row.actual.trim() !== '');
+      // 不解检（EXEMPT）行随提交下发：服务端按 isExempt 判 EXEMPT 并剔除出合格率分母（v2.6.0 未结模块）
+      const measuredRows = rowsForSubmit.filter((row) => row.isExempt || row.actual.trim() !== '');
       const hasBlankRows = rowsForSubmit.some((row) => !row.isExempt && row.actual.trim() === '');
       if (measuredRows.length > 0) {
         await api.post(`/inspections/${encodeURIComponent(orderId)}/submit-measurements`, {
@@ -726,10 +808,14 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
                 failQty: decision === '不合格' ? qty : 0,
               }),
           items: measuredRows.map((row) => {
+            if (row.isExempt) {
+              return { itemCode: row.itemCode, isExempt: true };
+            }
             const numeric =
               row.planItem.dataType === 'NUMERIC' ? parseMeasuredNumber(row.actual) : undefined;
             return {
               itemCode: row.itemCode,
+              isExempt: false,
               ...(numeric !== undefined ? { measuredVal: numeric } : {}),
               measuredText: row.actual,
             };
@@ -804,7 +890,8 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
             onClick={handleOpenCert}
             className="px-3.5 py-1.5 rounded bg-indigo-50 border border-indigo-200 text-indigo-700 text-xs font-medium hover:bg-indigo-100 flex items-center gap-1.5 transition-colors shadow-sm"
           >
-            <Printer className="w-3.5 h-3.5" /> 预览并导出制造证书 (PDF)
+            <Printer className="w-3.5 h-3.5" />
+            {certTemplate === 'QUALITY' ? '预览并导出质保书 (PDF)' : '预览并导出制造证书 (PDF)'}
           </button>
         </div>
       </div>
@@ -1163,7 +1250,8 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
         </div>
       </div>
 
-      {/* 模块二：表面处理膜厚检测 (5点法实测与平均值自动换算) */}
+      {/* 模块二：表面处理膜厚检测 (5点法实测与平均值自动换算) —— 仅方案命中「膜厚 / 镀层厚度 / 涂层厚度」指标才渲染（docs/34 §4） */}
+      {thicknessRow && (
       <div className="bg-white border border-slate-200/80 rounded-lg p-4 shadow-sm space-y-3">
         <div className="flex items-center justify-between pb-2 border-b border-slate-100 text-xs font-semibold text-slate-800">
           <div className="flex items-center gap-2">
@@ -1249,8 +1337,10 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
           </div>
         </div>
       </div>
+      )}
 
-      {/* 模块三：理化试验与特种工艺检验 (耐腐盐雾、划格附着力、硬度、去氢回火) */}
+      {/* 模块三：理化试验与特种工艺检验 (耐腐盐雾、划格附着力、硬度、去氢回火) —— 仅方案命中的指标行渲染，未定义项整行不出现（docs/34 §4） */}
+      {(saltSprayRow || adhesionRow || hardnessRows.length > 0 || bakingRow || visualRow) && (
       <div className="bg-white border border-slate-200/80 rounded-lg shadow-sm overflow-hidden">
         <div className="px-4 py-3 bg-[#F8FAFC] border-b border-slate-200 flex items-center justify-between">
           <div className="flex items-center gap-2 text-xs font-semibold text-slate-800">
@@ -1271,6 +1361,7 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
           </thead>
           <tbody className="divide-y divide-slate-100">
             {/* 盐雾测试 */}
+            {saltSprayRow && (
             <tr className="hover:bg-slate-50/50">
               <td className="py-3 px-4 font-medium text-slate-800">
                 <div>耐中性盐雾腐蚀 (NSS)</div>
@@ -1306,8 +1397,10 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
                 </select>
               </td>
             </tr>
+            )}
 
             {/* 划格附着力 */}
+            {adhesionRow && (
             <tr className="hover:bg-slate-50/50">
               <td className="py-3 px-4 font-medium text-slate-800">
                 <div>涂层附着力 (Adhesion)</div>
@@ -1343,8 +1436,10 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
                 </select>
               </td>
             </tr>
+            )}
 
             {/* 心部与表面硬度 */}
+            {(hardnessRows.length > 0) && (
             <tr className="hover:bg-slate-50/50">
               <td className="py-3 px-4 font-medium text-slate-800">
                 <div>热处理硬度 (Hardness)</div>
@@ -1394,8 +1489,10 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
                 </select>
               </td>
             </tr>
+            )}
 
             {/* 去氢回火记录 */}
+            {bakingRow && (
             <tr className="hover:bg-slate-50/50">
               <td className="py-3 px-4 font-medium text-slate-800">
                 <div className="flex items-center gap-1 text-amber-700">
@@ -1433,8 +1530,10 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
                 </select>
               </td>
             </tr>
+            )}
 
             {/* 外观与螺纹精度 */}
+            {visualRow && (
             <tr className="hover:bg-slate-50/50">
               <td className="py-3 px-4 font-medium text-slate-800">
                 <div>外观与外螺纹精度</div>
@@ -1477,9 +1576,11 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
                 </select>
               </td>
             </tr>
+            )}
           </tbody>
         </table>
       </div>
+      )}
 
       {/* 模块四：综合判定与签核签字 */}
       <div className="bg-white border border-slate-200/80 rounded-lg p-4 shadow-sm space-y-3">
@@ -1626,7 +1727,8 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
             onClick={handleOpenCert}
             className="px-4 py-1.5 rounded bg-indigo-50 border border-indigo-200 text-indigo-700 text-xs font-medium hover:bg-indigo-100 flex items-center gap-1.5"
           >
-            <Printer className="w-3.5 h-3.5" /> 生成制造证书
+            <Printer className="w-3.5 h-3.5" />
+            {certTemplate === 'QUALITY' ? '生成质保书' : '生成制造证书'}
           </button>
           {!readOnly && submitted === null && (
           <button
@@ -1671,11 +1773,20 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
       </div>
       </fieldset>
 
-      {/* 委外制造证书 PDF 打印预览弹窗 */}
+      {/* 证书补充字段（docs/51）：按建单时选定的模板展示专属输入项，写入 cert_fields 随单落库 */}
+      <CertFieldsCard
+        kind={certTemplate}
+        value={certFields}
+        readOnly={readOnly}
+        onChange={(key, value) => setCertFields((prev) => ({ ...prev, [key]: value }))}
+      />
+
+      {/* 委外证书 PDF 打印预览弹窗（docs/51：按本单落库模板渲染制造证书或质保书） */}
       <CertificatePrintModal
         isOpen={printModalOpen}
         onClose={() => setPrintModalOpen(false)}
-        type="manufacturing"
+        type={certTemplate === 'QUALITY' ? 'quality' : 'manufacturing'}
+        qualityData={qualityCertData}
         manufacturingData={manufacturingCertData}
       />
     </div>

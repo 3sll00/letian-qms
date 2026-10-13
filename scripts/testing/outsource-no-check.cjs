@@ -36,7 +36,7 @@ function resolvePg() {
 
 const DATABASE_URL =
   process.env.DATABASE_URL ||
-  'postgresql://letian_user:letian_secure_pass_2026@127.0.0.1:5432/letian_qms_db';
+  'postgresql://letian_user:letian_secure_pass_2026@127.0.0.1:5433/letian_qms_db';
 
 const PREFIX = 'WWJG-';
 const LEGACY_PREFIX = 'WW-';

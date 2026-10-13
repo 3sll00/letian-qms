@@ -48,12 +48,14 @@ export const QualityReportTemplateSchema = z.object({
 /**
  * 质检报告外观段明细项
  */
+export const ReportItemDecisionEnum = z.enum(['PENDING', 'PASSED', 'FAILED', 'EXEMPT']).openapi('ReportItemDecision');
+
 export const AppearanceSectionItemSchema = z.object({
   itemCode: z.string(),
   name: z.string(),
   standardText: z.string(),
   measuredResult: z.string(),
-  conclusion: z.enum(['PASSED', 'FAILED', 'EXEMPT']),
+  conclusion: ReportItemDecisionEnum,
   defectDescription: z.string().optional(),
 });
 
@@ -69,7 +71,7 @@ export const DimensionSectionItemSchema = z.object({
   unit: z.string().optional(),
   measuredVal: z.number().optional(),
   sampleSize: z.number().int().optional(),
-  conclusion: z.enum(['PASSED', 'FAILED', 'EXEMPT']),
+  conclusion: ReportItemDecisionEnum,
 });
 
 /**
@@ -84,7 +86,7 @@ export const MechanicalSectionItemSchema = z.object({
   unit: z.string().optional(),
   inheritedFrom: z.enum(['OUTSOURCE_HEAT_TREATMENT', 'IQC_RAW_MATERIAL', 'MANUAL_ENTRY']).optional(),
   isManuallyModified: z.boolean().default(false),
-  conclusion: z.enum(['PASSED', 'FAILED', 'EXEMPT']),
+  conclusion: ReportItemDecisionEnum,
 });
 
 /**
@@ -93,10 +95,11 @@ export const MechanicalSectionItemSchema = z.object({
 export const ChemicalElementItemSchema = z.object({
   element: z.string().openapi({ description: '化学元素符号', example: 'C' }),
   elementName: z.string().openapi({ description: '元素中文名称', example: '碳' }),
+  standardText: z.string().optional().openapi({ description: '方案快照中的标准原文' }),
   standardMin: z.number().optional().openapi({ description: '标准下限(%)' }),
   standardMax: z.number().optional().openapi({ description: '标准上限(%)' }),
-  measuredVal: z.number().openapi({ description: '实测百分比含量(%)' }),
-  conclusion: z.enum(['PASSED', 'FAILED', 'EXEMPT']),
+  measuredVal: z.number().optional().openapi({ description: '实测百分比含量(%)；未录入时缺省' }),
+  conclusion: ReportItemDecisionEnum,
 });
 
 /**
@@ -116,7 +119,7 @@ export const QualityReportDataSchema = z.object({
   customerName: z.string().optional(),
   inspectionDate: z.string(),
   inspectorName: z.string().optional(),
-  overallDecision: z.enum(['PASSED', 'FAILED', 'CONCESSION']),
+  overallDecision: z.enum(['PENDING', 'PASSED', 'FAILED', 'CONCESSION']),
   
   // 四段结构数据
   appearanceSection: z.object({
@@ -141,10 +144,11 @@ export const QualityReportDataSchema = z.object({
  * 打印/导出质检报告请求 Schema
  */
 export const GenerateReportRequestSchema = z.object({
-  orderId: z.string().uuid().openapi({ description: '检验单唯一标识' }),
+  orderId: z.string().uuid().optional().openapi({ description: '检验单唯一标识；与 orderNo 至少提供一项' }),
+  orderNo: z.string().min(1).optional().openapi({ description: '检验单号；与 orderId 至少提供一项' }),
   templateId: z.string().uuid().optional().openapi({ description: '选用报告模板ID (不传则采用默认模板)' }),
   sections: z.array(ReportSectionEnum).optional().openapi({ description: '指定导出的分段 (不传则全部段落)' }),
-  format: z.enum(['PDF', 'EXCEL', 'HTML']).default('PDF').openapi({ description: '导出格式' }),
+  format: z.enum(['PDF', 'EXCEL', 'JSON']).default('PDF').openapi({ description: '导出格式；JSON 为服务端组装后的四段式数据预览' }),
 }).openapi('GenerateReportRequest');
 
 /**

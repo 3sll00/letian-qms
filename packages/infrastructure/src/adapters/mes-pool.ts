@@ -84,6 +84,151 @@ export async function queryMes<T = any>(sql: string, params: any[] = []): Promis
   return rows as T[];
 }
 
+export interface MesPagedReadOptions {
+  search?: string;
+  page: number;
+  pageSize: number;
+}
+
+export async function fetchMesProductionTasks(
+  options: MesPagedReadOptions
+): Promise<Record<string, unknown>[]> {
+  const offset = (options.page - 1) * options.pageSize;
+  let sql = `
+    SELECT
+      t.id, t.bill_no, t.heat_number, t.steel_mill, t.cutting_length, t.production_num, t.bill_date,
+      m.code as materiel_code, m.name as materiel_name, m.spec as materiel_spec
+    FROM t_production_task t
+    LEFT JOIN t_materiel m ON t.materiel_id = m.id
+  `;
+  const params: unknown[] = [];
+  if (options.search) {
+    sql += ` WHERE t.bill_no LIKE ? OR t.heat_number LIKE ? OR m.code LIKE ? OR m.name LIKE ?`;
+    const search = `%${options.search}%`;
+    params.push(search, search, search, search);
+  }
+  sql += ` ORDER BY t.bill_date DESC LIMIT ? OFFSET ?`;
+  params.push(options.pageSize, offset);
+  return queryMes<Record<string, unknown>>(sql, params);
+}
+
+export async function fetchMesCheckReports(
+  options: MesPagedReadOptions
+): Promise<Record<string, unknown>[]> {
+  const offset = (options.page - 1) * options.pageSize;
+  let sql = `
+    SELECT
+      r.id, r.bill_no, r.bill_date, r.check_date,
+      r.check_qty, r.qualified_qty, r.unqualified_qty, r.is_qualified, r.remarks,
+      t.bill_no as task_bill_no, t.heat_number, t.steel_mill,
+      m.code as materiel_code, m.name as materiel_name,
+      p.name as procedure_name,
+      u.realname as inspector_name
+    FROM t_check_report r
+    LEFT JOIN t_production_task t ON r.task_id = t.id
+    LEFT JOIN t_materiel m ON r.materiel_id = m.id
+    LEFT JOIN t_procedure p ON r.procedure_id = p.id
+    LEFT JOIN sys_user u ON r.create_user_id = u.id
+  `;
+  const params: unknown[] = [];
+  if (options.search) {
+    sql += ` WHERE r.bill_no LIKE ? OR t.bill_no LIKE ? OR t.heat_number LIKE ? OR m.name LIKE ?`;
+    const search = `%${options.search}%`;
+    params.push(search, search, search, search);
+  }
+  sql += ` ORDER BY r.create_time DESC LIMIT ? OFFSET ?`;
+  params.push(options.pageSize, offset);
+  return queryMes<Record<string, unknown>>(sql, params);
+}
+
+export async function fetchMesProcedures(): Promise<Record<string, unknown>[]> {
+  return queryMes<Record<string, unknown>>(
+    'SELECT id, code, name, remarks FROM t_procedure ORDER BY code ASC'
+  );
+}
+
+export interface MesOqcSourceOptions {
+  materialCode?: string;
+  batchNo?: string;
+  salesOrderNo?: string;
+}
+
+export interface MesOqcSourceBundle {
+  productionTrace: Record<string, unknown>[];
+  serials: Record<string, unknown>[];
+  processInspections: Record<string, unknown>[];
+}
+
+export async function fetchMesOqcSourceBundle(
+  options: MesOqcSourceOptions
+): Promise<MesOqcSourceBundle> {
+  const materialCode = options.materialCode ?? '';
+  const batchNo = options.batchNo ?? '';
+  const salesOrderNo = options.salesOrderNo ?? '';
+  if (!materialCode && !batchNo && !salesOrderNo) {
+    return { productionTrace: [], serials: [], processInspections: [] };
+  }
+
+  const productionTrace = await queryMes<Record<string, unknown>>(
+    `SELECT id, bill_no, work_no, bill_date, materiel_id, batch_no, heat_number, steel_mill,
+            production_num, production_type, plan_begin_date, plan_end_date, delivery_date, finished_date,
+            status, bill_status, material_code, erp_bill_no
+     FROM t_production_task
+     WHERE del_flag = 0 AND (material_code = ? OR batch_no = ? OR erp_bill_no = ?)
+     ORDER BY create_time DESC LIMIT 50`,
+    [materialCode, batchNo, salesOrderNo]
+  );
+  const taskIds = productionTrace.map((task) => task.id).filter(Boolean) as string[];
+  if (taskIds.length === 0) {
+    return { productionTrace, serials: [], processInspections: [] };
+  }
+
+  const taskPlaceholders = taskIds.map(() => '?').join(',');
+  const serials = await queryMes<Record<string, unknown>>(
+    `SELECT id, task_id, materiel_id, serial_number
+     FROM t_pro_task_serial_number
+     WHERE del_flag = 0 AND task_id IN (${taskPlaceholders}) LIMIT 500`,
+    taskIds
+  );
+  const reports = await queryMes<Record<string, unknown>>(
+    `SELECT r.id, r.bill_no, r.bill_date, r.check_qty, r.qualified_qty, r.unqualified_qty,
+            r.is_qualified, r.check_date, r.remarks, r.task_id,
+            t.bill_no AS task_bill_no, t.heat_number, t.batch_no
+     FROM t_check_report r
+     LEFT JOIN t_production_task t ON r.task_id = t.id
+     WHERE r.del_flag = 0 AND (r.task_id IN (${taskPlaceholders}) OR r.materiel_id = ?)
+     ORDER BY r.create_time DESC LIMIT 100`,
+    [...taskIds, materialCode]
+  );
+  const reportIds = reports.map((report) => report.id).filter(Boolean) as string[];
+  if (reportIds.length === 0) {
+    return { productionTrace, serials, processInspections: reports };
+  }
+
+  const reportPlaceholders = reportIds.map(() => '?').join(',');
+  const reportParams = await queryMes<Record<string, unknown>>(
+    `SELECT id, report_id, parameter_id, parameter_value, determine, control_id
+     FROM t_check_report_parameter
+     WHERE del_flag = 0 AND report_id IN (${reportPlaceholders}) LIMIT 500`,
+    reportIds
+  );
+  const paramsByReportId = new Map<unknown, Record<string, unknown>[]>();
+  for (const param of reportParams) {
+    const items = paramsByReportId.get(param.report_id) ?? [];
+    items.push(param);
+    paramsByReportId.set(param.report_id, items);
+  }
+
+  return {
+    productionTrace,
+    serials,
+    processInspections: reports.map((report) => ({
+      ...report,
+      parameters: paramsByReportId.get(report.id) ?? [],
+    })),
+  };
+}
+
 /**
  * 测试 MES 数据库物理连通性
  */

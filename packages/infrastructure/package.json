@@ -3,10 +3,13 @@
   "version": "1.0.0",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b --force",
-    "test": "tsx src/__tests__/audit-diff.test.ts && tsx src/__tests__/idempotency.test.ts && tsx src/__tests__/pbac-translator.test.ts && tsx src/__tests__/jsonb-shape.test.ts && tsx src/__tests__/erp-readonly.test.ts",
+    "test": "tsx src/__tests__/audit-diff.test.ts && tsx src/__tests__/idempotency.test.ts && tsx src/__tests__/pbac-translator.test.ts && tsx src/__tests__/background-ops-jobs.test.ts && tsx src/__tests__/jsonb-shape.test.ts && tsx src/__tests__/erp-readonly.test.ts && tsx src/__tests__/report-render.test.ts",
     "migrate:up": "tsx src/migrations/runner.ts up",
     "migrate:down": "tsx src/migrations/runner.ts down",
     "seed": "tsx src/seeds/runner.ts"
@@ -17,12 +20,15 @@
     "@letian/domain": "workspace:*",
     "@types/mssql": "^12.3.0",
     "dotenv": "^16.4.5",
+    "exceljs": "4.4.0",
     "kysely": "^0.27.3",
     "mssql": "^12.7.2",
     "mysql2": "^3.24.4",
+    "pdfkit": "0.15.2",
     "pg": "^8.11.5"
   },
   "devDependencies": {
+    "@types/pdfkit": "0.13.9",
     "@types/pg": "^8.11.4",
     "tsx": "^4.7.2",
     "typescript": "^5.4.5"

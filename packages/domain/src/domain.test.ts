@@ -250,6 +250,17 @@ export function runDomainTests(): { total: number; passed: number } {
     assert(order.getPlanSnapshot()?.items[0]?.nominalValue === 8.0, '工单快照必须不受外部篡改影响');
   });
 
+  test('InspectionOrder: 检验项的嵌套判标值与方案版本深拷贝隔离', () => {
+    const version = makePlanVersion({ items: [makePlanItem({ acceptableValues: ['合格'] })] });
+    const order = makeOrder();
+    order.bindPlanSnapshot(version, { planId: 'plan-001', planCode: 'QP-2026-001' });
+    version.items[0]!.acceptableValues!.push('不合格');
+    assert(order.getPlanSnapshot()?.items[0]?.acceptableValues?.length === 1, '快照不应共享源版本的嵌套数组');
+    assert(order.getItems()[0]?.acceptableValues?.length === 1, '检验项不应共享源版本的嵌套数组');
+    order.getItems()[0]!.acceptableValues!.push('待复核');
+    assert(order.getPlanSnapshot()?.items[0]?.acceptableValues?.length === 1, '检验项也不得改写方案快照');
+  });
+
   test('InspectionOrder: 空指标版本禁止绑定（ORDER_EMPTY_ITEMS）', () => {
     const order = makeOrder();
     assertThrows(

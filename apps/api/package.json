@@ -2,19 +2,24 @@
   "name": "@letian/api",
   "version": "1.0.0",
   "private": true,
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -p tsconfig.test.json",
     "dev": "tsx src/server.ts",
-    "test": "tsx test/contract/schemas.contract.test.ts && tsx test/api.test.ts && tsx test/integration/e2e.test.ts && tsx test/integration/outsource-inspection-link.test.ts && tsx test/integration/permission-management-link.test.ts && tsx test/integration/inspection-finalize-pool-link.test.ts && tsx test/integration/reinspection-resume-link.test.ts && tsx test/integration/plan-match-pbac-link.test.ts && tsx test/integration/trace-node-registration.test.ts && tsx test/integration/heat-batch-trace-link.test.ts"
+    "test": "tsx test/contract/schemas.contract.test.ts && tsx test/api.test.ts && tsx test/integration/e2e.test.ts && tsx test/integration/outsource-inspection-link.test.ts && tsx test/integration/permission-management-link.test.ts && tsx test/integration/inspection-finalize-pool-link.test.ts && tsx test/integration/reinspection-resume-link.test.ts && tsx test/integration/mrb-defect-qty-parity.test.ts && tsx test/integration/plan-match-pbac-link.test.ts && tsx test/integration/trace-node-registration.test.ts && tsx test/integration/mrb-defect-qty-db-parity.test.ts && tsx test/integration/heat-batch-trace-link.test.ts && tsx test/integration/plan-import-link.test.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",
+    "@fastify/multipart": "9.4.0",
     "@letian/application": "workspace:*",
     "@letian/contracts": "workspace:*",
     "@letian/domain": "workspace:*",
     "@letian/infrastructure": "workspace:*",
     "@types/jsonwebtoken": "^9.0.10",
+    "exceljs": "4.4.0",
     "fastify": "^5.12.4",
     "fastify-plugin": "^6.0.0",
     "jsonwebtoken": "^9.0.3",

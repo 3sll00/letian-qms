@@ -1,0 +1,11 @@
+[
+  { "typeId": "00001", "fullName": "外观", "namePy": "WG", "bBuy": true, "bProduce": true, "bConsign": true },
+  { "typeId": "00002", "fullName": "尺寸", "namePy": "CC", "bBuy": true, "bProduce": true, "bConsign": true },
+  { "typeId": "00003", "fullName": "通止", "namePy": "TZ", "bBuy": true, "bProduce": true, "bConsign": true },
+  { "typeId": "00004", "fullName": "硬度实测值（5个）", "namePy": "YDSCZ5G", "bBuy": true, "bProduce": true, "bConsign": true },
+  { "typeId": "00005", "fullName": "拉伸检测（单号）", "namePy": "LSJCDH", "bBuy": true, "bProduce": true, "bConsign": true },
+  { "typeId": "00006", "fullName": "光谱试验（单号）", "namePy": "GPSYDH", "bBuy": true, "bProduce": true, "bConsign": true },
+  { "typeId": "00007", "fullName": "挑选工时", "namePy": "TXGS", "bBuy": true, "bProduce": true, "bConsign": true },
+  { "typeId": "00008", "fullName": "冲击试验（单号）", "namePy": "CJSYDH", "bBuy": true, "bProduce": true, "bConsign": true },
+  { "typeId": "00009", "fullName": "不良品描述", "namePy": "BLPMS", "bBuy": true, "bProduce": true, "bConsign": true }
+]

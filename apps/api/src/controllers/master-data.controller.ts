@@ -1,5 +1,5 @@
 import { SupplierSchema, CustomerSchema, MaterialSchema, WorkshopSchema, EmployeeSchema, InventoryCategorySchema } from "@letian/contracts";
-import { UpsertCompanyProfileRequestSchema } from "@letian/contracts";
+import { TestItemsQuerySchema, UpsertCompanyProfileRequestSchema } from "@letian/contracts";
 import { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { ApiContainer } from '../container';
@@ -185,37 +185,53 @@ export const masterDataController: FastifyPluginAsync<{ container: ApiContainer 
 
     return reply.status(200).send(roots);
   });
+
+  // 7. 检验项目字典（迁移 037，ERP `TestItem` 镜像）：质检方案明细「检验项目」列的选项域。
+  //    ?stage=IQC|IPQC|OQC 按环节标志过滤（bBuy / bProduce / bConsign）；
+  //    与其它主数据一致返回裸数组，不做分页包装（字典量级小，前端自行缓存）。
+  fastify.get(
+    '/test-items',
+    { schema: { querystring: TestItemsQuerySchema } },
+    async (request, reply) => {
+      const { stage } = request.query as z.infer<typeof TestItemsQuerySchema>;
+      const items = await masterData.getTestItems(
+        stage !== undefined ? { stage } : undefined
+      );
+      return reply.status(200).send(items);
+    }
+  );
+
   // 1.1 创建供应商
   fastify.post('/suppliers', { schema: { body: SupplierSchema } }, async (request, reply) => {
-    const data = request.body as any;
+    const data = request.body as z.infer<typeof SupplierSchema>;
     const created = await masterData.saveSupplier({
       supplierCode: data.supplierCode,
       supplierName: data.supplierName,
-      contactPerson: data.contactPerson,
-      phone: data.phone,
+      ...(data.contactPerson !== undefined ? { contactPerson: data.contactPerson } : {}),
+      ...(data.phone !== undefined ? { phone: data.phone } : {}),
     });
     return reply.status(201).send(created);
   });
 
   // 2.1 创建客户
   fastify.post('/customers', { schema: { body: CustomerSchema } }, async (request, reply) => {
-    const data = request.body as any;
+    const data = request.body as z.infer<typeof CustomerSchema>;
     const created = await masterData.saveCustomer({
       customerCode: data.customerCode,
       customerName: data.customerName,
-      contactPerson: data.contactPerson,
-      phone: data.phone,
+      ...(data.contactPerson !== undefined ? { contactPerson: data.contactPerson } : {}),
+      ...(data.phone !== undefined ? { phone: data.phone } : {}),
     });
     return reply.status(201).send(created);
   });
 
   // 3.1 创建物料存货档案
   fastify.post('/inventory', { schema: { body: MaterialSchema } }, async (request, reply) => {
-    const data = request.body as any;
+    const data = request.body as z.infer<typeof MaterialSchema>;
     const created = await masterData.saveMaterial({
       materialCode: data.materialCode,
       materialName: data.materialName,
-      specModel: data.specModel,
+      ...(data.specModel !== undefined ? { specModel: data.specModel } : {}),
       categoryCode: data.categoryCode,
       unit: data.unit || "个",
     });
@@ -224,7 +240,7 @@ export const masterDataController: FastifyPluginAsync<{ container: ApiContainer 
 
   // 4.1 创建生产车间
   fastify.post('/workshops', { schema: { body: WorkshopSchema } }, async (request, reply) => {
-    const data = request.body as any;
+    const data = request.body as z.infer<typeof WorkshopSchema>;
     const created = await masterData.saveWorkshop({
       workshopCode: data.workshopCode,
       workshopName: data.workshopName,
@@ -234,25 +250,25 @@ export const masterDataController: FastifyPluginAsync<{ container: ApiContainer 
 
   // 5.1 创建职员/检验员
   fastify.post('/employees', { schema: { body: EmployeeSchema } }, async (request, reply) => {
-    const data = request.body as any;
+    const data = request.body as z.infer<typeof EmployeeSchema>;
     const created = await masterData.saveEmployee({
       employeeCode: data.employeeCode,
       name: data.name,
-      department: data.department,
-      phone: data.phone,
-      email: data.email,
-      roleCode: data.roleCode,
+      ...(data.department !== undefined ? { department: data.department } : {}),
+      ...(data.phone !== undefined ? { phone: data.phone } : {}),
+      ...(data.email !== undefined ? { email: data.email } : {}),
+      ...(data.roleCode !== undefined ? { roleCode: data.roleCode } : {}),
     });
     return reply.status(201).send(created);
   });
 
   // 6.1 创建存货分类
   fastify.post('/categories', { schema: { body: InventoryCategorySchema } }, async (request, reply) => {
-    const data = request.body as any;
+    const data = request.body as z.infer<typeof InventoryCategorySchema>;
     const created = await masterData.saveInventoryCategory({
       categoryCode: data.categoryCode,
       categoryName: data.categoryName,
-      parentCode: data.parentCode,
+      ...(data.parentCode !== undefined ? { parentCode: data.parentCode } : {}),
       level: data.level ?? 1,
     });
     return reply.status(201).send(created);

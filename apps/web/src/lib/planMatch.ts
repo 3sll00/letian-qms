@@ -56,6 +56,15 @@ export interface PlanBasis {
   upperTolerance?: number | undefined;
   lowerTolerance?: number | undefined;
   unit?: string | undefined;
+  // —— ERP 检验方案明细口径字段（T_Inf_PtypeCheckingSchemeDly）——
+  /** 检验项目字典回链（ERP TITypeId） */
+  testItemCode?: string | undefined;
+  /** 公差/偏差原文（ERP Dif，如 '±0.1'）：展示时拼在标准值之后 */
+  dif?: string | undefined;
+  /** 检验方式（ERP CheckWay） */
+  checkWay?: string | undefined;
+  /** 检验设备（ERP CheckDevice） */
+  measurementTool?: string | undefined;
 }
 
 /**
@@ -158,19 +167,28 @@ export function parseStandardBounds(
   return null;
 }
 
-/** 标准要求展示文本：方案给了 standardText 就照用；缺失时由 nominalValue ± 公差回拼 */
+/**
+ * 标准要求展示文本：方案给了 standardText 就照用；缺失时由 nominalValue ± 公差回拼。
+ * ERP 方案明细的「公差」独立列 `dif` 非空时拼在标准值之后（如 `800 ±10`），
+ * 保证录入页展示与判标入参的文本同一份（parseStandardBounds 能一并解析出公差带）。
+ */
 export function standardDisplayOf(
-  item: Pick<PlanBasis, 'standardText' | 'nominalValue' | 'upperTolerance' | 'lowerTolerance' | 'unit'>
+  item: Pick<
+    PlanBasis,
+    'standardText' | 'nominalValue' | 'upperTolerance' | 'lowerTolerance' | 'unit' | 'dif'
+  >
 ): string {
+  const dif = item.dif?.trim();
+  const suffix = dif !== undefined && dif !== '' ? ` ${dif}` : '';
   const text = item.standardText?.trim();
-  if (text !== undefined && text !== '') return text;
-  if (item.nominalValue === undefined) return '—（方案未给出数值基准）';
+  if (text !== undefined && text !== '') return `${text}${suffix}`;
+  if (item.nominalValue === undefined) return suffix !== '' ? dif! : '—（方案未给出数值基准）';
   const unit = item.unit !== undefined && item.unit !== '' ? ` ${item.unit}` : '';
   const upper = item.upperTolerance ?? 0;
   const lower = item.lowerTolerance ?? 0;
-  if (upper === 0 && lower === 0) return `${item.nominalValue}${unit}`;
-  if (upper === lower) return `${item.nominalValue} ± ${upper}${unit}`;
-  return `${item.nominalValue} (+${upper} / -${lower})${unit}`;
+  if (upper === 0 && lower === 0) return `${item.nominalValue}${unit}${suffix}`;
+  if (upper === lower) return `${item.nominalValue} ± ${upper}${unit}${suffix}`;
+  return `${item.nominalValue} (+${upper} / -${lower})${unit}${suffix}`;
 }
 
 /** 从实测录入文本里抽数值："22.08" / "22.08 mm" 均可；纯文字返回 undefined */

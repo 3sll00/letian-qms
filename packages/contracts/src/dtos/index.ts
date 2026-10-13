@@ -6,6 +6,7 @@ import * as schemas from '../schemas';
 // ============================================================================
 export type Material = z.infer<typeof schemas.MaterialSchema>;
 export type InventoryCategory = z.infer<typeof schemas.InventoryCategorySchema>;
+export type TestItem = z.infer<typeof schemas.TestItemSchema>;
 export type Supplier = z.infer<typeof schemas.SupplierSchema>;
 export type Customer = z.infer<typeof schemas.CustomerSchema>;
 export type Workshop = z.infer<typeof schemas.WorkshopSchema>;
@@ -30,6 +31,8 @@ export type OverallDecision = z.infer<typeof schemas.OverallDecisionEnum>;
 export type DataType = z.infer<typeof schemas.DataTypeEnum>;
 export type MetricCategory = z.infer<typeof schemas.MetricCategoryEnum>;
 export type InspectionItemDecision = z.infer<typeof schemas.InspectionItemDecisionEnum>;
+export type CertTemplate = z.infer<typeof schemas.CertTemplateEnum>;
+export type CertFields = z.infer<typeof schemas.CertFieldsSchema>;
 
 export type InspectionPlanItem = z.infer<typeof schemas.InspectionPlanItemSchema>;
 export type PlanVersionStatus = z.infer<typeof schemas.PlanVersionStatusEnum>;
@@ -37,6 +40,10 @@ export type InspectionPlanVersion = z.infer<typeof schemas.InspectionPlanVersion
 export type InspectionPlan = z.infer<typeof schemas.InspectionPlanSchema>;
 export type PlanStatus = z.infer<typeof schemas.PlanStatusEnum>;
 export type PlanStats = z.infer<typeof schemas.PlanStatsSchema>;
+export type ImportPlanCreated = z.infer<typeof schemas.ImportPlanCreatedSchema>;
+export type ImportPlanSkipped = z.infer<typeof schemas.ImportPlanSkippedSchema>;
+export type ImportPlanFailed = z.infer<typeof schemas.ImportPlanFailedSchema>;
+export type ImportPlansResult = z.infer<typeof schemas.ImportPlansResultSchema>;
 export type BatchCreateCategoryPlanRequest = z.infer<typeof schemas.BatchCreateCategoryPlanRequestSchema>;
 
 export type InspectionItem = z.infer<typeof schemas.InspectionItemSchema>;
@@ -130,6 +137,7 @@ export type LoginResponse = z.infer<typeof schemas.LoginResponseSchema>;
 // 6. 质检报告打印与多模板引擎 DTOs
 // ============================================================================
 export type ReportSection = z.infer<typeof schemas.ReportSectionEnum>;
+export type ReportItemDecision = z.infer<typeof schemas.ReportItemDecisionEnum>;
 export type ReportTemplateScope = z.infer<typeof schemas.ReportTemplateScopeEnum>;
 export type QualityReportTemplate = z.infer<typeof schemas.QualityReportTemplateSchema>;
 export type AppearanceSectionItem = z.infer<typeof schemas.AppearanceSectionItemSchema>;

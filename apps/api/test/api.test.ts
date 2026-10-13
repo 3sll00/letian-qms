@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
+import ExcelJS from 'exceljs';
 import { buildApp } from '../src/app';
 import { createApiContainer, type ApiContainer } from '../src/container';
 import { generateTestToken } from '../src/plugins/auth';
 import { evaluateInspectionItem, InspectionStateMachine } from '@letian/domain';
-import { TraceabilityGraphResponseSchema } from '@letian/contracts';
+import { ErrorCode, ProblemDetailsSchema, TraceabilityGraphResponseSchema } from '@letian/contracts';
 
 /**
  * 看板聚合 / 领域规则 / 追溯拓扑 冒烟测试（真实 PostgreSQL 版）
@@ -181,6 +182,55 @@ async function runTests() {
   const authHeader = { authorization: `Bearer ${token}` };
 
   try {
+    const unauthenticatedRes = await app.inject({
+      method: 'GET',
+      url: '/api/v1/inspections',
+    });
+    assert.equal(unauthenticatedRes.statusCode, 401, '未认证请求必须返回 401');
+    const unauthenticatedProblem = ProblemDetailsSchema.parse(JSON.parse(unauthenticatedRes.body));
+    assert.equal(unauthenticatedProblem.code, ErrorCode.UNAUTHORIZED);
+    assert.match(String(unauthenticatedRes.headers['content-type']), /application\/problem\+json/);
+
+    const invalidQueryRes = await app.inject({
+      method: 'GET',
+      url: '/api/v1/traceability/batches?page=0',
+      headers: authHeader,
+    });
+    assert.equal(invalidQueryRes.statusCode, 400, '非法查询参数必须返回 400');
+    const invalidQueryProblem = ProblemDetailsSchema.parse(JSON.parse(invalidQueryRes.body));
+    assert.equal(invalidQueryProblem.code, ErrorCode.VALIDATION_FAILED);
+    assert.match(String(invalidQueryRes.headers['content-type']), /application\/problem\+json/);
+
+    const missingRouteRes = await app.inject({
+      method: 'GET',
+      url: '/api/v1/no-such-route-for-contract-check',
+      headers: authHeader,
+    });
+    assert.equal(missingRouteRes.statusCode, 404, '未注册路径必须返回 404');
+    const missingRouteProblem = ProblemDetailsSchema.parse(JSON.parse(missingRouteRes.body));
+    assert.equal(missingRouteProblem.code, ErrorCode.RESOURCE_NOT_FOUND);
+    assert.match(String(missingRouteRes.headers['content-type']), /application\/problem\+json/);
+
+    const permissionRepo = container.repositories.materialPermissions;
+    const findByUserId = permissionRepo.findByUserId.bind(permissionRepo);
+    let securityContextLoads = 0;
+    permissionRepo.findByUserId = async (userId: string) => {
+      securityContextLoads += 1;
+      return findByUserId(userId);
+    };
+    const traceSearchRes = await app.inject({
+      method: 'GET',
+      url: '/api/v1/traceability/batches?page=1&pageSize=1',
+      headers: authHeader,
+    });
+    permissionRepo.findByUserId = findByUserId;
+    assert.equal(traceSearchRes.statusCode, 200, `JWT 鉴权后的追溯检索必须返回 200：${traceSearchRes.body}`);
+    assert.equal(
+      securityContextLoads,
+      1,
+      'JWT 中间件必须一次性注入 PBAC 安全上下文，控制器不得重复装配'
+    );
+
     const orderRows = await queryOrders(container);
     assert.ok(orderRows.length > 0, '真实库中应存在检验单种子数据，否则看板聚合无从验证');
 
@@ -626,6 +676,17 @@ async function runTests() {
     assert.deepEqual([...aliasBody.edges].length, deepBody.edges.length, '两个追溯路径应返回相同边数');
     assert.equal(aliasBody.hasCycle, deepBody.hasCycle, '两个追溯路径应返回相同的成环结论');
 
+    const contractRes = await app.inject({
+      method: 'GET',
+      url: '/api/v1/traceability/LOT-2026-FN-01?maxDepth=10',
+      headers: authHeader,
+    });
+    assert.equal(contractRes.statusCode, 200, '契约路径 /traceability/:batchNo 必须可用');
+    const contractBody = JSON.parse(contractRes.body) as { nodes: unknown[]; edges: unknown[]; hasCycle: boolean };
+    assert.equal(contractBody.nodes.length, deepBody.nodes.length, '契约路径与历史路径应返回相同节点数');
+    assert.equal(contractBody.edges.length, deepBody.edges.length, '契约路径与历史路径应返回相同边数');
+    assert.equal(contractBody.hasCycle, deepBody.hasCycle, '契约路径与历史路径应返回相同的成环结论');
+
     // 真实闭环种子数据：所有环路关系边都必须被打标
     const cycleRes = await app.inject({
       method: 'GET',
@@ -693,34 +754,143 @@ async function runTests() {
     assert.ok(Array.isArray(tmplData.items) && tmplData.items.length >= 3, '应返回至少 3 个内置报告模板');
     console.log('✔ 质检报告模板列表 (GET /api/v1/report-templates) 验证通过，模板数:', tmplData.total);
 
-    // 四段式质检报告导出 (JSON 格式与 PDF 渲染)
+    // 四段式质检报告导出 (JSON 预览 + 真实 PDF/XLSX 文件)
+    const reportOrder = orderRows.find((row) => Array.isArray(row.items) && row.items.length > 0) ?? orderRows[0];
+    assert.ok(reportOrder, '真实库中应存在带检验项的检验单用于报告导出');
+    const reportOrderNo = reportOrder.orderNo;
+
     const exportJsonRes = await app.inject({
       method: 'POST',
       url: '/api/v1/reports/export',
       headers: authHeader,
       payload: {
-        orderNo: orderRows[0]?.orderNo || "IQC-TEST-001",
+        orderNo: reportOrderNo,
         format: 'JSON',
         sections: ['APPEARANCE', 'DIMENSION', 'MECHANICAL_PERFORMANCE', 'CHEMICAL_COMPOSITION'],
+        // 伪造成熟的报告数据也必须被服务端忽略：报告只能由持久化检验单组装。
+        reportData: { orderNo: 'FORGED-ORDER', overallDecision: 'PASSED' },
       },
     });
-    assert.equal(exportJsonRes.statusCode, 200, '四段式质检报告 JSON 预览应返回 200');
+    assert.equal(exportJsonRes.statusCode, 200, `四段式质检报告 JSON 预览应返回 200: ${exportJsonRes.body}`);
     const exportJson = JSON.parse(exportJsonRes.body);
-    assert.ok(exportJson.reportData && exportJson.reportData.appearanceSection, '四段式数据完整返回');
-    console.log('✔ 四段式质检报告预览 (POST /api/v1/reports/export format=JSON) 验证通过');
+    assert.equal(exportJson.reportData.orderNo, reportOrderNo, '客户端 reportData 不得绕过持久化检验单');
+    assert.ok(exportJson.reportData.appearanceSection?.enabled, '外观段应按选择启用');
+    assert.ok(exportJson.reportData.dimensionSection?.enabled, '尺寸段应按选择启用');
+    assert.ok(exportJson.reportData.mechanicalSection?.enabled, '机械性能段应按选择启用');
+    assert.ok(exportJson.reportData.chemicalSection?.enabled, '化学成分段应按选择启用');
+
+    const subsetJsonRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/reports/export',
+      headers: authHeader,
+      payload: {
+        orderNo: reportOrderNo,
+        format: 'JSON',
+        sections: ['DIMENSION'],
+      },
+    });
+    assert.equal(subsetJsonRes.statusCode, 200, '指定分段 JSON 预览应返回 200');
+    const subsetJson = JSON.parse(subsetJsonRes.body);
+    assert.equal(subsetJson.reportData.dimensionSection.enabled, true, '指定尺寸段应启用');
+    assert.equal(subsetJson.reportData.appearanceSection.enabled, false, '未选外观段应禁用');
+    assert.equal(subsetJson.reportData.appearanceSection.items.length, 0, '未选外观段不得导出明细');
+    console.log('✔ 四段式质检报告预览与分段筛选验证通过');
+
+    const pendingOrder = orderRows.find(
+      (row) =>
+        Array.isArray(row.items) &&
+        row.items.some((item) => (item as { result?: string }).result === 'PENDING')
+    );
+    if (pendingOrder) {
+      const pendingRes = await app.inject({
+        method: 'POST',
+        url: '/api/v1/reports/export',
+        headers: authHeader,
+        payload: { orderNo: pendingOrder.orderNo, format: 'JSON' },
+      });
+      assert.equal(pendingRes.statusCode, 200, `未录完检验单 JSON 预览应返回 200: ${pendingRes.body}`);
+      const pendingJson = JSON.parse(pendingRes.body);
+      const reportItems = [
+        ...(pendingJson.reportData.appearanceSection?.items ?? []),
+        ...(pendingJson.reportData.dimensionSection?.items ?? []),
+        ...(pendingJson.reportData.mechanicalSection?.items ?? []),
+        ...(pendingJson.reportData.chemicalSection?.elements ?? []),
+      ] as Array<{ conclusion?: string; measuredVal?: number; measuredResult?: string }>;
+      assert.ok(
+        reportItems.some((item) => item.conclusion === 'PENDING'),
+        '未录入实测值的检验项必须保留 PENDING，严禁默认合格'
+      );
+      assert.ok(
+        !reportItems.some(
+          (item) => item.conclusion === 'PENDING' && (item.measuredVal === 0 || item.measuredResult === '合格')
+        ),
+        'PENDING 项不得被伪造成 0 值或“合格”实测'
+      );
+    }
+
+    const missingIdentityRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/reports/export',
+      headers: authHeader,
+      payload: { format: 'JSON' },
+    });
+    assert.equal(missingIdentityRes.statusCode, 400, '缺少 orderId/orderNo 应返回 400');
+
+    const invalidTemplateRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/reports/export',
+      headers: authHeader,
+      payload: {
+        orderNo: reportOrderNo,
+        templateId: '00000000-0000-0000-0000-00000000ffff',
+        format: 'JSON',
+      },
+    });
+    assert.equal(invalidTemplateRes.statusCode, 404, '不存在的报告模板应返回 404');
 
     const exportPdfRes = await app.inject({
       method: 'POST',
       url: '/api/v1/reports/export',
       headers: authHeader,
       payload: {
-        orderNo: orderRows[0]?.orderNo || "IQC-TEST-001",
+        orderNo: reportOrderNo,
         format: 'PDF',
       },
     });
-    assert.equal(exportPdfRes.statusCode, 200, '质检文件 PDF 导出应返回 200');
+    assert.equal(exportPdfRes.statusCode, 200, `质检文件 PDF 导出应返回 200: ${exportPdfRes.body}`);
     assert.equal(exportPdfRes.headers['content-type'], 'application/pdf', '导出 MIME 类型应为 application/pdf');
-    console.log('✔ 质检文件 PDF 打包导出 (POST /api/v1/reports/export format=PDF) 验证通过');
+    const pdfBytes = Buffer.from(exportPdfRes.rawPayload);
+    assert.equal(pdfBytes.subarray(0, 5).toString('latin1'), '%PDF-', '导出内容必须是真实 PDF 文件');
+    assert.ok(pdfBytes.includes(Buffer.from('%%EOF')), 'PDF 文件必须包含 EOF 结构');
+
+    const exportExcelRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/reports/export',
+      headers: authHeader,
+      payload: {
+        orderNo: reportOrderNo,
+        format: 'EXCEL',
+        sections: ['DIMENSION', 'CHEMICAL_COMPOSITION'],
+      },
+    });
+    assert.equal(exportExcelRes.statusCode, 200, `质检文件 Excel 导出应返回 200: ${exportExcelRes.body}`);
+    assert.equal(
+      exportExcelRes.headers['content-type'],
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      '导出 MIME 类型应为 XLSX'
+    );
+    const excelBytes = Buffer.from(exportExcelRes.rawPayload);
+    assert.equal(excelBytes[0], 0x50, 'XLSX 必须是 ZIP 包');
+    assert.equal(excelBytes[1], 0x4b, 'XLSX 必须是 ZIP 包');
+    const reportBook = new ExcelJS.Workbook();
+    await reportBook.xlsx.load(
+      excelBytes.buffer.slice(excelBytes.byteOffset, excelBytes.byteOffset + excelBytes.byteLength) as ArrayBuffer
+    );
+    assert.ok(reportBook.getWorksheet('基本信息'), 'XLSX 应包含基本信息页');
+    assert.ok(reportBook.getWorksheet('尺寸检验'), '指定尺寸段应生成工作表');
+    assert.ok(reportBook.getWorksheet('化学成分'), '指定化学成分段应生成工作表');
+    assert.equal(reportBook.getWorksheet('外观检验'), undefined, '未选外观段不得生成工作表');
+    console.log('✔ 质检报告 PDF/XLSX 文件结构与 PENDING 防伪验证通过');
   } finally {
     await app.close();
     await container.dispose();

@@ -8,7 +8,7 @@ import {
   MatchInspectionPlanQuerySchema,
   ErrorCode,
 } from '@letian/contracts';
-import { ApplicationError, NotFoundError } from '@letian/application';
+import { ApplicationError, NotFoundError, ValidationFailedError } from '@letian/application';
 import type { ApiContainer } from '../container';
 import { operatorOf } from '../lib/operator';
 import {
@@ -16,6 +16,12 @@ import {
   buildRequestSecurityContext,
   assertPlanApprover,
 } from '../lib/permission-guard';
+import {
+  buildPlanImportTemplate,
+  parsePlanImportPdf,
+  parsePlanImportWorkbook,
+  type PlanImportMasterData,
+} from '../lib/plan-import';
 
 const PlanQuerySchema = z.object({
   inspectionType: InspectionTypeEnum.optional(),
@@ -150,6 +156,8 @@ export const plansController: FastifyPluginAsync<{ container: ApiContainer }> = 
         planVersionId,
         versionNo: version.versionNo,
         inspectionType: plan.inspectionType,
+        // 039：同时回传适用类型全集，录入页可据实展示「本方案还适用于哪些检验类型」
+        inspectionTypes: plan.inspectionTypes ?? [plan.inspectionType],
         materialCode: plan.materialCode ?? query.materialCode,
         samplingScheme: version.samplingScheme,
         aqlLevel: version.aqlLevel,
@@ -160,7 +168,7 @@ export const plansController: FastifyPluginAsync<{ container: ApiContainer }> = 
     }
   );
 
-  // 4. 创建检验方案（含首个草稿版本）。planCode 可省略：留空时由服务端按 `QP-{YYYYMMDD}-{NNN}` 取号
+  // 4. 创建检验方案（保存即启用，不再进草稿）。planCode 可省略：留空时由服务端按 `QP-{YYYYMMDD}-{NNN}` 取号
   fastify.post(
     '/',
     {
@@ -179,14 +187,16 @@ export const plansController: FastifyPluginAsync<{ container: ApiContainer }> = 
       // 方案分类归属：显式声明优先，其次回落到绑定物料的真实分类（分类级兜底匹配依据）
       const planCategoryCode = body.categoryCode ?? material?.categoryCode ?? undefined;
 
-      // 契约正文的 versions[0] 即首个草稿版本。指标项为空时由领域规则拒绝（PLAN_EMPTY_ITEMS -> 400）：
-      // 禁止放行空草稿，否则建单时方案快照给不出待检指标清单（与 /plans/match 的口径一致）
+      // 契约正文的 versions[0] 即首个版本（保存即启用）。指标项为空时由领域规则拒绝（PLAN_EMPTY_ITEMS -> 400）：
+      // 禁止放行空版本，否则建单时方案快照给不出待检指标清单（与 /plans/match 的口径一致）
       const firstVersion = body.versions?.[0];
       const initialItems = firstVersion?.items ?? [];
       const initialVersionNo = firstVersion?.versionNo;
       const samplingScheme = firstVersion?.samplingScheme;
       const aqlLevel = firstVersion?.aqlLevel;
       const strictness = firstVersion?.strictness;
+      // 生效日期为可选：前端（新建/导入弹窗）不再暴露，但契约仍允许直传，
+      // 服务端原样落 sampling_config；缺省 = 长期有效（findActivePlan 以 IS NULL 放行）。
       const effectiveStartDate = firstVersion?.effectiveStartDate;
       const effectiveEndDate = firstVersion?.effectiveEndDate;
 
@@ -197,6 +207,7 @@ export const plansController: FastifyPluginAsync<{ container: ApiContainer }> = 
           ...(body.planCode !== undefined ? { planCode: body.planCode } : {}),
           planName: body.planName,
           inspectionType: body.inspectionType,
+          ...(body.inspectionTypes !== undefined ? { inspectionTypes: body.inspectionTypes } : {}),
           materialCode: body.materialCode,
           ...(planCategoryCode !== undefined ? { categoryCode: planCategoryCode } : {}),
           materialCategory,
@@ -321,4 +332,142 @@ export const plansController: FastifyPluginAsync<{ container: ApiContainer }> = 
       return reply.status(200).send(plan);
     }
   );
+
+  // 8. Excel 导入模板下载（GET /plans/import-template）
+  //    模板列定义与解析器同源（lib/plan-import.ts 的 PLAN_IMPORT_COLUMNS），检验项目取值来自
+  //    契约包预置清单（与新建弹窗勾选清单同源），「填写说明 / 物料参照」页的分类、物料实时取主数据
+  //    —— 模板即当前可用取值域。
+  fastify.get('/import-template', async (request, reply) => {
+    const masterData = await loadPlanImportMasterData(container);
+    const buffer = await buildPlanImportTemplate(masterData);
+    reply.header(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    reply.header(
+      'Content-Disposition',
+      `attachment; filename="plan-import-template.xlsx"; filename*=UTF-8''${encodeURIComponent('质检方案导入模板.xlsx')}`
+    );
+    return reply.send(buffer);
+  });
+
+  // 9. Excel / PDF 批量导入方案（POST /plans/import）
+  //    multipart/form-data，文件字段名 file，接受 .xlsx 与表格型 .pdf（上限 10MB，超限明确拒绝）。
+  //    解析（xlsx 读单元格 / pdf 抽文字层还原表格）→ 同一套组内一致性 + 预置清单校验 →
+  //    逐组调 CreatePlanUseCase 落库（与 POST /plans 同一写路径，审计 / Outbox / 服务端取号 /
+  //    保存即启用口径完全一致），结果按 新建/跳过(判重)/失败 三态回显。
+  fastify.post('/import', async (request, reply) => {
+    const operator = operatorOf(request);
+    const securityCtx = await buildRequestSecurityContext(request, container);
+
+    const file = await request.file();
+    if (file === undefined || file.fieldname !== 'file') {
+      throw new ValidationFailedError('请求中缺少上传文件（multipart 字段名：file，格式 .xlsx / .pdf）');
+    }
+    const fileName = file.filename ?? '';
+    const isPdf = /\.pdf$/i.test(fileName);
+    if (!isPdf && !/\.xlsx$/i.test(fileName)) {
+      throw new ValidationFailedError(
+        `仅支持 .xlsx 或 .pdf 格式的导入文件，当前文件：${fileName === '' ? '(未命名)' : fileName}`
+      );
+    }
+    let buffer: Buffer;
+    try {
+      buffer = await file.toBuffer();
+    } catch {
+      throw new ValidationFailedError('文件上传不完整或超出大小上限（10MB），请压缩或拆分后重试');
+    }
+    if (file.file.truncated) {
+      throw new ValidationFailedError('文件超出大小上限（10MB），请拆分后重试');
+    }
+
+    const masterData = await loadPlanImportMasterData(container);
+    // PDF：抽文字层还原表格后走同一校验/落库链路；xlsx：照常读工作表
+    const parsed = isPdf
+      ? parsePlanImportPdf(buffer, masterData)
+      : await parsePlanImportWorkbook(buffer, masterData);
+
+    const created: {
+      planCode: string;
+      planName: string;
+      versionNo: string;
+      itemCount: number;
+      rows: number[];
+    }[] = [];
+    const skipped: { planName: string; rows: number[]; existingPlanCode: string }[] = [];
+    const failed: { planName: string; rows: number[]; reason: string }[] = [...parsed.failures];
+
+    for (const group of parsed.groups) {
+      // 重复导入保护：同「名称 + 物料 + 分类 + 主类型」的既有方案不重复创建
+      const duplicateCode = await plans.findDuplicatePlanCode({
+        planName: group.planName,
+        materialCode: group.materialCode,
+        categoryCode: group.categoryCode,
+        inspectionType: group.inspectionTypes[0] ?? 'IQC',
+      });
+      if (duplicateCode !== null) {
+        skipped.push({ planName: group.planName, rows: group.rows, existingPlanCode: duplicateCode });
+        continue;
+      }
+
+      try {
+        const plan = await container.useCases.createPlan.execute(
+          {
+            planName: group.planName,
+            inspectionType: group.inspectionTypes[0] as (typeof group.inspectionTypes)[number],
+            inspectionTypes: group.inspectionTypes,
+            ...(group.materialCode !== '' ? { materialCode: group.materialCode } : {}),
+            categoryCode: group.categoryCode,
+            materialCategory: group.materialCategory,
+            initialItems: group.items,
+            createdBy: operator.userId,
+            operatorName: operator.userName,
+            initialVersionNo: group.versionNo,
+            samplingScheme: group.samplingScheme,
+            aqlLevel: group.aqlLevel,
+            strictness: group.strictness,
+          },
+          securityCtx
+        );
+        created.push({
+          planCode: plan.planCode,
+          planName: group.planName,
+          versionNo: group.versionNo,
+          itemCount: group.items.length,
+          rows: group.rows,
+        });
+      } catch (err) {
+        failed.push({
+          planName: group.planName,
+          rows: group.rows,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    return reply.status(200).send({
+      fileName,
+      totalRows: parsed.totalRows,
+      planCount: created.length + skipped.length + failed.length,
+      created,
+      skipped,
+      failed,
+    });
+  });
 };
+
+/**
+ * 导入所需主数据快照：分类 / 物料 一次性拉取（解析与模板生成都用它）。
+ * 检验项目不再取自 ERP 检验项目字典 —— 与新建弹窗同口径，改用契约包的预置检验项目清单
+ * （plan-presets.ts）：模板说明页与解析器读同一份常量，不需要查库。
+ */
+async function loadPlanImportMasterData(container: ApiContainer): Promise<PlanImportMasterData> {
+  const [categories, materials] = await Promise.all([
+    container.repositories.masterData.getInventoryCategories(),
+    container.repositories.masterData.getMaterials(),
+  ]);
+  return {
+    categories: [...categories],
+    materials: [...materials],
+  };
+}

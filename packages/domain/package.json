@@ -3,10 +3,13 @@
   "version": "1.0.0",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b --force",
-    "test": "tsx src/__tests__/state-machine.test.ts && tsx src/__tests__/evaluate-inspection-item.test.ts && tsx src/__tests__/aql-sampling.test.ts && tsx src/__tests__/pbac-evaluator.test.ts && tsx src/__tests__/plan-code-number.test.ts && tsx src/__tests__/outsource-reference.test.ts && tsx src/__tests__/plan-version-number.test.ts && tsx src/__tests__/heat-batch-trace-service.test.ts && tsx src/__tests__/transfer-gate-service.test.ts && tsx src/domain.test.ts && tsx src/__tests__/inspection-state-machine.property.test.ts"
+    "test": "tsx src/__tests__/state-machine.test.ts && tsx src/__tests__/evaluate-inspection-item.test.ts && tsx src/__tests__/aql-sampling.test.ts && tsx src/__tests__/pbac-evaluator.test.ts && tsx src/__tests__/plan-code-number.test.ts && tsx src/__tests__/outsource-reference.test.ts && tsx src/__tests__/plan-version-number.test.ts && tsx src/__tests__/heat-batch-trace-service.test.ts && tsx src/__tests__/transfer-gate-service.test.ts && tsx src/domain.test.ts && tsx src/__tests__/inspection-state-machine.property.test.ts && tsx src/__tests__/heat-chain-progress.test.ts"
   },
   "dependencies": {
     "@letian/contracts": "workspace:*"

@@ -28,3 +28,6 @@ export * from './transfers/create-transfer-override-ticket.js';
 export * from './transfers/review-transfer-override-ticket.js';
 export * from './transfers/list-transfer-override-tickets.js';
 export * from './traceability/get-transfer-kpis.js';
+export * from './integrations/sync-erp-incoming-inspections.js';
+export * from './integrations/sync-erp-sales-dispatch.js';
+export * from './integrations/sync-erp-outsource-inspections.js';

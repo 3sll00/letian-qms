@@ -1,4 +1,10 @@
-import type { InspectionStatus, InspectionType } from '@letian/contracts';
+import type { CertTemplate, InspectionStatus, InspectionType } from '@letian/contracts';
+
+/**
+ * 证书模板种类 —— 单一来源是契约 `CertTemplateEnum`（'QUALITY' 纵向质保书 / 'MANUFACTURING' 横向制造证书）。
+ * 前端各列表/表单一律引用本别名，不再各自写字面量；契约枚举变更时此处编译期报错。
+ */
+export type CertTemplateKind = CertTemplate;
 
 /**
  * 检验类型页面映射 —— 单一来源 (single source of truth)。
@@ -89,6 +95,44 @@ export const INSPECTION_STATUS_LABELS: Record<InspectionStatus, string> = {
 };
 
 /**
+ * 台账「检验状态」派生口径（docs 16 §5.1）：由 status + overallDecision（终判记录）共同决定，
+ * 与后端 `inspectionState` / `inspectionStates` 筛选语义一一对应：
+ *   - 待检验 = PENDING / DRAFT
+ *   - 检验中 = INSPECTING / RE_INSPECTING
+ *   - 已合格 = COMPLETED / PASSED 且 overallDecision ≠ FAILED
+ *   - 不合格 = FAILED / IN_MRB_REVIEW，或 COMPLETED / PASSED 且 overallDecision = FAILED
+ * 各台账页与检验进度明细共用本函数，避免前端各自拼装导致列显示口径漂移。
+ */
+export type InspectionStateLabel = '待检验' | '检验中' | '已合格' | '不合格';
+
+export function deriveInspectionStateLabel(
+  status: InspectionStatus,
+  overallDecision?: string | null
+): InspectionStateLabel {
+  if (status === 'INSPECTING' || status === 'RE_INSPECTING') return '检验中';
+  if (status === 'COMPLETED' || status === 'PASSED') {
+    return overallDecision === 'FAILED' ? '不合格' : '已合格';
+  }
+  if (status === 'FAILED' || status === 'IN_MRB_REVIEW') return '不合格';
+  return '待检验';
+}
+
+/**
+ * 派生状态语义码（后端 inspectionState(s) 合法取值）→ 中文标签。
+ * 注意：这四个值同时也是契约原始 status 成员，但此处承载的是派生语义，
+ * 筛选走 inspectionStates 参数而不是 statuses（后者无法表达 judgment 条件）。
+ */
+export const INSPECTION_STATE_OPTIONS: readonly {
+  value: 'PENDING' | 'INSPECTING' | 'PASSED' | 'FAILED';
+  label: InspectionStateLabel;
+}[] = [
+  { value: 'PENDING', label: '待检验' },
+  { value: 'INSPECTING', label: '检验中' },
+  { value: 'PASSED', label: '已合格' },
+  { value: 'FAILED', label: '不合格' },
+];
+
+/**
  * 展示分组筛选匹配规则。
  * 页面页签 (前端) 与 mock handler 的 query 过滤 (被 mock 的后端) 共用此函数，
  * 保证「页签能看到什么」与「接口返回什么」使用同一份成员定义。
@@ -154,17 +198,29 @@ export interface CertificateCompanyProfile {
   email?: string;
   qualityStamp?: string;
 }
-// 模板一：《质量保证证书》导出模型 (用于 IQC / IPQC / OQC)
+// 模板一：《质量保证证书 CERTIFICATE OF INSPECTION》导出模型（纵向，docs/51 模板B）
+//
+// 字段口径对齐扫描件三列字段网格：
+//   客户名称/订单号/报告编号 | 客户地址/项目号/实发数量 | 产品(项目)号/标准/材质 |
+//   制造日期/品名/批号 | 抽样日期/印记/炉号 | 检测日期/规格/表面处理 | 制造商/抽样计划
 export interface QualityCertificateData {
-  certNo: string; // 证书编号
+  certNo: string; // 证书编号（扫描件「报告编号」格）
   date?: string;
   issueDate?: string; // 签发日期
   inspectionType?: 'IQC' | 'IPQC' | 'OQC' | string; // 检验类型
   inspectionTypeLabel?: string; // 来料检验 / 过程检验 / 出货检验
-  customer?: string; // 订货单位 / 客户
-  customerAddress?: string; // 客户送货/收货地址（来自 ERP）
+  customer?: string; // 订货单位 / 客户（扫描件「客户名称」格）
+  customerAddress?: string; // 客户送货/收货地址（来自 ERP；扫描件「客户地址」格）
   projectNo?: string; // 项目号（来自 ERP）
   shortProjectNo?: string; // 短项目号（来自 ERP）
+  orderNo?: string; // 订单号（扫描件「订单号」格；与 contractNo 同源时优先 contractNo）
+  shippedQty?: string; // 实发数量（扫描件「实发数量」格）
+  productNo?: string; // 产品号 / 项目号（扫描件「产品(项目)号」格）
+  samplingDate?: string; // 抽样日期
+  marking?: string; // 印记
+  inspectionDate?: string; // 检测日期（与 manufactureDate 制造日期是两格）
+  manufacturer?: string; // 制造商
+  samplingPlan?: string; // 抽样计划（如 GB/T 2828.1）
   manufactureDate?: string; // 制造日期（来自 ERP/MES）
   supplier?: string; // 供货单位 (IQC用)
   contractNo?: string; // 合同号 / 订单号
@@ -250,6 +306,27 @@ export interface OutsourceTestResult {
   };
 }
 
+/**
+ * 制造证书产品行（扫描件 14 列主表，docs/51 模板A）。
+ * 一行 = 一个产品/批次；所有列都是「该单真实录入值」，未录入即空串，模板渲染空白格。
+ */
+export interface ManufacturingCertRow {
+  customerProcessNo?: string; // 客户工序编号
+  type?: string; // 类型
+  materialGrade?: string; // 材料级别
+  specification?: string; // 规格/尺寸
+  quantity?: string; // 数量
+  coating?: string; // 涂层
+  colour?: string; // 颜色
+  appearance?: string; // 外观
+  cureTest?: string; // 固化测试
+  zincThickness?: string; // 镀锌层厚度
+  dft?: string; // 干膜厚度 DFT
+  hardness?: string; // 硬度检验
+  adhesion?: string; // 附着力测试
+  saltSpray?: string; // 盐雾测试
+}
+
 export interface ManufacturingCertData {
   certNo?: string;
   certificateNo?: string;
@@ -257,6 +334,20 @@ export interface ManufacturingCertData {
   dateOfIssue?: string;
   customerName?: string;
   purchaseOrderNo?: string;
+  /** 交货订单参考 DO ref.（扫描件表头左格） */
+  deliveryNoteNo?: string;
+  /** 工单号 / Jobcard No.（扫描件表头中格） */
+  jobcardNo?: string;
+  /** 交货点（扫描件表头右格） */
+  deliveryPoint?: string;
+  /** 产品/检验主表行（扫描件 14 列）；无行时模板渲染一行空白结构行 */
+  rows?: ManufacturingCertRow[];
+  /**
+   * 验收标准副行（扫描件表头下的判定基准行）：键 = stdAppearance / stdCureTest /
+   * stdZincThickness / stdDft / stdHardness / stdAdhesion / stdSaltSpray；
+   * 录入人按本单规范填写，未录入即空白。
+   */
+  standards?: Record<string, string>;
   orderNo?: string;
   subcontractNo?: string; // 委外工单号
   subcontractor?: string; // 委外加工商

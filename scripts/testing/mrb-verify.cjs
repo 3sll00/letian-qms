@@ -23,6 +23,8 @@ const path = require('node:path');
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const OUT_DIR = path.join(__dirname, '..', 'logs');
 const PORT = 9336;
+/** CDP 监听地址候选：先 IPv4，再 IPv6 回环（Chrome 只绑 `[::1]` 的环境见下方探测注释） */
+const CDP_HOSTS = ['127.0.0.1', '[::1]'];
 // 多会话环境下 vite dev 端口会自增（5200/5201/5202），故自动探测，避免指向无人监听的端口而卡死。
 // 但「探测到的实例是不是离线 Mock」不能靠端口猜：进入应用后由运行目标自检（mockServiceWorker）判定，
 // 不是离线 Mock 就 exit 3，绝不拿真实库的数据去满足 Mock 断言。
@@ -132,13 +134,26 @@ const check = (name, ok, detail) => {
     'about:blank',
   ], { stdio: 'ignore' });
 
-  let version = null;
-  for (let i = 0; i < 60; i++) {
-    try { version = await httpJson(`http://127.0.0.1:${PORT}/json/version`); break; } catch { await sleep(500); }
+  // CDP 主机探测：部分环境（实测 Chrome 153）下 headless Chrome 只把调试端口绑在 IPv6 `[::1]`，
+  // 只轮询 `127.0.0.1` 会误报「Chrome CDP not reachable」并把端口冲突记成业务问题。
+  // 两种地址都试，先通的先用（IPv4 可用的机器行为不变）。
+  let cdpHost = null;
+  for (const host of CDP_HOSTS) {
+    const budget = host === CDP_HOSTS[1] ? 60 : 20;
+    for (let i = 0; i < budget && cdpHost === null; i++) {
+      try {
+        await httpJson(`http://${host}:${PORT}/json/version`);
+        cdpHost = host;
+      } catch {
+        await sleep(500);
+      }
+    }
+    if (cdpHost !== null) break;
   }
-  if (!version) throw new Error('Chrome CDP not reachable');
+  if (cdpHost === null) throw new Error('Chrome CDP not reachable');
+  log('cdp host:', cdpHost);
 
-  const list = await httpJson(`http://127.0.0.1:${PORT}/json/list`);
+  const list = await httpJson(`http://${cdpHost}:${PORT}/json/list`);
   const page = list.body.find((t) => t.type === 'page');
   const cdp = await Cdp.connect(page.webSocketDebuggerUrl);
   await cdp.send('Page.enable');
@@ -324,6 +339,108 @@ const check = (name, ok, detail) => {
   check('页头无「待发起评审」计数胶囊', header.pendingCapsules === 0, header.pendingCapsules);
   check('副标题为「不合格品评审与处置 · 判定不合格自动进入评审」', header.subtitle.includes('判定不合格自动进入评审'), header.subtitle);
   check('导出报表按钮保留', header.exportButton === true);
+
+  // ---- 日期筛选占位口径（docs/09 §3）：不得再露出 Chromium 原生 `yyyy-mm-dd` ----
+  const dateFields = await evalJs(cdp, `(() => {
+    const inputs = [...document.querySelectorAll('input[type=date]')].filter((i) => i.offsetParent !== null);
+    const rules = [];
+    for (const sheet of document.styleSheets) {
+      let list = null;
+      try { list = sheet.cssRules; } catch { continue; }
+      if (!list) continue;
+      for (const rule of list) {
+        if ((rule.cssText || '').includes('lt-date-input--empty')) rules.push(rule.cssText);
+      }
+    }
+    const details = inputs.map((i) => {
+      const box = i.parentElement;
+      const hint = box
+        ? [...box.querySelectorAll('span')].find((s) => (s.className || '').includes('pointer-events-none'))
+        : null;
+      return {
+        hint: hint ? hint.innerText.trim() : null,
+        hintHiddenOnFocus: hint ? (hint.className || '').includes('peer-focus:hidden') : false,
+        // 空值输入框必须真的带上隐藏原生占位的类（否则 CSS 白写，yyyy-mm-dd 仍会露出来）
+        emptyClassApplied: i.matches('input[type=date].lt-date-input--empty'),
+      };
+    });
+    return {
+      fields: details,
+      // 样式层证据：隐藏规则存在且作用在 `::-webkit-datetime-edit` 上，聚焦时有恢复规则
+      hideRules: rules.filter((t) => t.includes('::-webkit-datetime-edit')),
+      restoresOnFocus: rules.some(
+        (t) => t.includes(':focus') && t.includes('::-webkit-datetime-edit')
+      ),
+    };
+  })()`);
+  log('date fields:', dateFields);
+  check(
+    '筛选栏两个日期框渲染中文占位（开始日期 / 结束日期）',
+    JSON.stringify(dateFields.fields.map((d) => d.hint)) === JSON.stringify(['开始日期', '结束日期']),
+    dateFields
+  );
+  check(
+    '日期框原生 `yyyy-mm-dd` 占位被隐藏（空值类命中 + `::-webkit-datetime-edit` 透明规则 + 聚焦恢复）',
+    dateFields.fields.length === 2 &&
+      dateFields.fields.every((d) => d.emptyClassApplied === true && d.hintHiddenOnFocus === true) &&
+      dateFields.hideRules.some((t) => /transparent/.test(t)) &&
+      dateFields.restoresOnFocus === true,
+    dateFields
+  );
+
+  // ---- 查询命中「别的状态」时自动跳到有数据的页签（docs/19 §7）----
+  // 当前停在「待评审」（Mock 无待评审单据 = 空态），用一条 DISPOSED 单据的单号查询，
+  // 期望页面自动落到「已评审」并渲染该行，而不是让用户以为「查不到」。
+  const autoJumpSetup = await evalJs(cdp, `(() => {
+    const setValue = (el, value) => {
+      const desc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value');
+      desc.set.call(el, value);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    const input = [...document.querySelectorAll('input')]
+      .find((i) => (i.getAttribute('placeholder') || '').includes('MRB-'));
+    if (!input) return { ok: false, reason: '未找到「MRB单号」输入框' };
+    setValue(input, 'MRB-20231011-01');
+    const btn = [...document.querySelectorAll('button')].find((b) => b.innerText.trim() === '查询');
+    if (!btn) return { ok: false, reason: '未找到【查询】按钮' };
+    btn.click();
+    return { ok: true };
+  })()`);
+  await sleep(4000);
+  await shot('mrb-filter-autojump.png');
+  const autoJumped = await evalJs(cdp, `(() => {
+    const activeTab = [...document.querySelectorAll('button')]
+      .filter((b) => (b.className || '').includes('border-blue-600')).map((b) => b.innerText.trim());
+    const mainTable = document.querySelector('table');
+    const rows = mainTable
+      ? [...mainTable.querySelectorAll('tbody tr')].map((tr) =>
+          [...tr.querySelectorAll('td')].map((td) => td.innerText.trim()))
+      : [];
+    return { activeTab, rowCount: rows.length, firstRowNo: rows[0] ? rows[0][0] : null };
+  })()`);
+  log('auto jump:', { setup: autoJumpSetup, ...autoJumped });
+  check(
+    '筛选命中「已评审」单据后自动跳到「已评审」页签并渲染该行（不再停在「待评审」空态）',
+    autoJumpSetup.ok === true &&
+      JSON.stringify(autoJumped.activeTab) === JSON.stringify(['已评审']) &&
+      autoJumped.firstRowNo === 'MRB-20231011-01',
+    autoJumped
+  );
+
+  // 复位到「评审中」页签：下面「行内评审」抽屉断言依赖该页签的首行记录
+  await evalJs(cdp, `(() => {
+    const reset = [...document.querySelectorAll('button')].find((b) => b.innerText.trim() === '重置');
+    if (reset) reset.click();
+    return true;
+  })()`);
+  await sleep(1500);
+  await evalJs(cdp, `(() => {
+    const tab = [...document.querySelectorAll('button')].find((b) => b.innerText.trim() === '评审中');
+    if (tab) tab.click();
+    return true;
+  })()`);
+  await sleep(3000);
 
   // ---- 行内「评审」抽屉 ----
   const openedReview = await evalJs(cdp, `(() => {

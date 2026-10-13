@@ -1,6 +1,8 @@
 /**
- * leftovers2 离线 Mock（MSW）冒烟：验证三条新增 Mock 路由在真实浏览器运行时可用 ——
- *   GET / PUT /api/v1/master-data/company-profile、POST /api/v1/inspections/:id/approve。
+ * leftovers2 离线 Mock（MSW）冒烟：验证 Mock 路由在真实浏览器运行时可用 ——
+ *   GET /api/v1/master-data/company-profile（证书抬头数据源）、POST /api/v1/inspections/:id/approve。
+ *   `PUT /master-data/company-profile` 的路由保留（与真实 API 同形），但其维护界面已于 2026-09-23 下线
+ *   （见 docs/实施进度 §47），故不再有页面调用方，本探针只断侧边栏菜单已消失与 GET 路由仍生效。
  *
  * 前置：`$env:VITE_API_TARGET="http://127.0.0.1:5999"; pnpm --filter @letian/web run dev:mock`
  *   （前端 :5200，不需要数据库；5999 是**未监听**端口 —— 未 mock 的接口若打到真实后端会 401，
@@ -57,15 +59,6 @@ async function evalJs(cdp, expression) {
 const results = [];
 const check = (name, ok, detail) => { results.push(ok); log(`${ok ? 'PASS' : 'FAIL'} :: ${name}${detail === undefined ? '' : ' :: ' + JSON.stringify(detail)}`); };
 
-const SETTER = `
-  const setVal = (el, v) => {
-    const proto = el.tagName === 'SELECT' ? HTMLSelectElement.prototype : el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-    Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, v);
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-  };
-`;
-
 (async () => {
   // 前置检查：dev:mock 必须在 :5200 上，否则给出明确提示，而不是让 Chrome 空等到超时
   if (!(await httpReachable(WEB))) {
@@ -86,13 +79,6 @@ const SETTER = `
   await cdp.send('Runtime.enable');
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1780, height: 1400, deviceScaleFactor: 1, mobile: false });
 
-  const clickText = (text, exact = true) => `(() => {
-    const b = [...document.querySelectorAll('button,a')].find((x) => x.innerText.trim() ${exact ? '===' : '.includes('} ${JSON.stringify(text)} ${exact ? '' : ')'});
-    if (!b) return 'no-button';
-    b.click();
-    return 'clicked';
-  })()`;
-  const click = async (text, exact = true) => evalJs(cdp, clickText(text, exact));
   const clickNav = async (label) => evalJs(cdp, `(() => {
     const ms = [...document.querySelectorAll('button,a,div,span,li')].filter((e) => e.innerText && e.innerText.trim().startsWith(${JSON.stringify(label)}));
     if (ms.length === 0) return null;
@@ -100,16 +86,6 @@ const SETTER = `
     (deep.closest('a,button') || deep).click();
     return (deep.closest('a,button') || deep).innerText.trim();
   })()`);
-  const setLabel = async (label, value) => evalJs(cdp, `(() => {
-    ${SETTER}
-    const el = [...document.querySelectorAll('label')].find((l) => l.innerText.trim().startsWith(${JSON.stringify(label)}));
-    if (!el) return 'no-label';
-    const input = el.parentElement.querySelector('input,select,textarea');
-    if (!input) return 'no-input';
-    setVal(input, ${JSON.stringify(value)});
-    return 'ok';
-  })()`);
-
   // 从「未登录」起步，理由同真实库探针：浏览器用户目录复用，残留会话会让顶栏身份串台
   try {
     await cdp.send('Storage.clearDataForOrigin', { origin: new URL(WEB).origin, storageTypes: 'all' });
@@ -127,45 +103,24 @@ const SETTER = `
     process.exit(3);
   }
 
-  // ---------- Mock GET / PUT /master-data/company-profile ----------
-  log('nav 存货档案:', await clickNav('存货档案'));
-  await sleep(4000);
-  log('tab 企业档案:', await click('企业档案', true));
-  await sleep(4000);
-  const legalName = await evalJs(cdp, `(() => {
-    const el = [...document.querySelectorAll('label')].find((l) => l.innerText.trim().startsWith('企业法定名称'));
-    if (!el) return null;
-    const input = el.parentElement.querySelector('input');
-    return input ? input.value : null;
+  // ---------- Mock GET /master-data/company-profile（维护界面已于 2026-09-23 下线） ----------
+  // 原「ERP基础档案 → 存货档案 → 企业档案页签」与【系统管理 → 企业档案】菜单均已删除（见 docs/实施进度 §47）；
+  // 证书链路仍读这条 Mock 路由，故改为「断菜单已消失 + 页内 fetch 直验 GET 路由」。
+  const navSnapshot = await evalJs(cdp, `(() => {
+    const navText = [...document.querySelectorAll('aside nav button, aside nav a')].map((e) => e.innerText.trim());
+    return { hasCompanyProfile: navText.some((t) => t.includes('企业档案')), hasErpGroup: navText.some((t) => t.includes('ERP基础档案')) };
   })()`);
-  check('Mock GET /master-data/company-profile 生效：企业档案页回显 mockCompanyProfile 法定名称',
-    legalName === '宁波乐天紧固件制造有限公司', { legalName });
+  check('侧边栏无「企业档案」菜单与「ERP基础档案」分组（维护界面已下线）',
+    navSnapshot.hasCompanyProfile === false && navSnapshot.hasErpGroup === false, navSnapshot);
 
-  log('set address:', await setLabel('企业地址（中文）', 'MOCK-探针地址'));
-  await sleep(500);
-  log('save:', await click('保存企业档案', true));
-  await sleep(3000);
-  const receipt = await evalJs(cdp, `(() => {
-    const e = [...document.querySelectorAll('div')].find((d) => String(d.className).includes('bg-emerald-50') && d.innerText.includes('此后生成的证书'));
-    return e ? e.innerText.trim() : null;
+  const mockProfile = await evalJs(cdp, `(async () => {
+    const res = await fetch('/api/v1/master-data/company-profile');
+    if (!res.ok) return { status: res.status };
+    const body = await res.json();
+    return { status: res.status, legalName: body === null ? null : body.legalName };
   })()`);
-  check('Mock PUT /master-data/company-profile 生效：保存出现绿字回执',
-    typeof receipt === 'string' && receipt.includes('已保存'), receipt);
-  // 口径：updated_by 由「服务端」按当前登录用户写入 —— 断言它与页面顶栏显示的身份一致（不硬编码姓名）
-  const identity = await evalJs(cdp, `(() => {
-    const e = [...document.querySelectorAll('div')].find((d) => d.innerText.includes('最后维护人'));
-    const text = e ? e.innerText.trim() : '';
-    const m = /最后维护人：([^（]+)/.exec(text);
-    const header = document.querySelector('header');
-    return { updatedBy: m ? m[1].trim() : null, headerText: header ? header.innerText.split(String.fromCharCode(10)).map((x) => x.trim()).filter(Boolean) : [] };
-  })()`);
-  check('Mock PUT 的 updated_by = 页面顶栏当前登录用户（服务端按会话写入，客户端不可自称）',
-    identity.updatedBy !== null && identity.updatedBy !== '' && identity.headerText.includes(identity.updatedBy), identity);
-
-  log('clear address:', await setLabel('企业地址（中文）', ''));
-  await sleep(400);
-  log('save2:', await click('保存企业档案', true));
-  await sleep(2500);
+  check('Mock GET /master-data/company-profile 仍生效：返回 mockCompanyProfile 法定名称（证书抬头数据源）',
+    mockProfile !== null && mockProfile.status === 200 && mockProfile.legalName === '宁波乐天紧固件制造有限公司', mockProfile);
 
   // ---------- Mock POST /inspections/:id/approve ----------
   log('nav 来料检验:', await clickNav('来料检验(IQC)'));

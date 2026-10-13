@@ -312,11 +312,18 @@ const errorHandlerPluginAsync: FastifyPluginAsync = async (fastify) => {
     const pathname = request.url.split('?')[0] ?? '/';
     const allowed = allowedMethodsForPath(pathname);
     if (allowed.size === 0) {
-      return reply.status(404).send({
-        statusCode: 404,
-        error: 'Not Found',
-        message: `Route ${request.method}:${pathname} not found`,
-      });
+      return reply
+        .status(404)
+        .header('Content-Type', 'application/problem+json')
+        .send({
+          type: 'https://letian-qms.com/errors/resource-not-found',
+          title: '资源不存在',
+          status: 404,
+          detail: `Route ${request.method}:${pathname} not found`,
+          instance: request.url,
+          code: ErrorCode.RESOURCE_NOT_FOUND,
+          traceId: requestTraceId(request),
+        });
     }
     return sendMethodNotAllowed(request, reply, allowed);
   });

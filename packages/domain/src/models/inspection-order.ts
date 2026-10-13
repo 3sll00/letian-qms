@@ -6,7 +6,8 @@ import {
   InspectionType,
   InspectionStatus,
   OverallDecision,
-  HeatTraceAppliedSourceType
+  HeatTraceAppliedSourceType,
+  CertTemplate
 } from '@letian/contracts';
 import { InspectionStateMachine } from '../state-machines/inspection-state-machine';
 import { evaluateInspectionItem } from '../services/tolerance-evaluator';
@@ -83,6 +84,10 @@ export class InspectionOrder {
   // 缺省时不落库、不推导 —— 避免用 sampleQty 顶替批量数造成假值（见 docs/29 §2 第 5 列）
   private totalQty?: number | undefined;
   private overallDecision?: OverallDecision | undefined;
+  // 038 证书模板与证书专用字段（docs/51）：操作员「填写检验内容前」选定的打印版式与
+  // 证书专用补充字段袋；只作证书打印与展示，不参与任何判定/权限/传递链路。
+  private certTemplate?: CertTemplate | undefined;
+  private certFields?: Record<string, string> | undefined;
   private planSnapshot?: PlanSnapshotDTO | undefined;
   private items: InspectionItemDTO[];
   private createdAt: string;
@@ -138,6 +143,8 @@ export class InspectionOrder {
     processStep?: string | undefined;
     totalQty?: number | undefined;
     overallDecision?: OverallDecision | undefined;
+    certTemplate?: CertTemplate | undefined;
+    certFields?: Record<string, string> | undefined;
     planSnapshot?: PlanSnapshotDTO | undefined;
     items?: InspectionItemDTO[] | undefined;
     createdAt?: string | undefined;
@@ -192,6 +199,8 @@ export class InspectionOrder {
     this.processStep = params.processStep;
     this.totalQty = params.totalQty;
     this.overallDecision = params.overallDecision;
+    this.certTemplate = params.certTemplate;
+    this.certFields = params.certFields ? { ...params.certFields } : undefined;
     this.planSnapshot = params.planSnapshot ? JSON.parse(JSON.stringify(params.planSnapshot)) : undefined;
     this.items = params.items ? JSON.parse(JSON.stringify(params.items)) : [];
     this.createdAt = params.createdAt ?? new Date().toISOString();
@@ -414,6 +423,14 @@ export class InspectionOrder {
     return this.overallDecision;
   }
 
+  public getCertTemplate(): CertTemplate | undefined {
+    return this.certTemplate;
+  }
+
+  public getCertFields(): Record<string, string> | undefined {
+    return this.certFields ? { ...this.certFields } : undefined;
+  }
+
   public getPlanSnapshot(): PlanSnapshotDTO | undefined {
     return this.planSnapshot ? JSON.parse(JSON.stringify(this.planSnapshot)) : undefined;
   }
@@ -456,7 +473,7 @@ export class InspectionOrder {
       snapshotAt: new Date().toISOString(),
     };
 
-    this.items = planVersion.items.map((pItem, index) => ({
+    this.items = this.planSnapshot.items.map((pItem, index) => ({
       id: crypto.randomUUID(),
       seq: index + 1,
       itemCode: pItem.itemCode,
@@ -467,7 +484,7 @@ export class InspectionOrder {
       upperTolerance: pItem.upperTolerance,
       lowerTolerance: pItem.lowerTolerance,
       standardText: pItem.standardText,
-      acceptableValues: pItem.acceptableValues,
+      acceptableValues: pItem.acceptableValues ? [...pItem.acceptableValues] : undefined,
       unit: pItem.unit,
       // InspectionItemSchema.sampleSize 声明为 int；sampleQty 契约是任意正数
       // （可按重量抽检），落到单项「抽样数」须取整，否则契约自产自销非法值
@@ -728,6 +745,8 @@ export class InspectionOrder {
       ...(this.inspectionTeam !== undefined ? { inspectionTeam: this.inspectionTeam } : {}),
       ...(this.processStep !== undefined ? { processStep: this.processStep } : {}),
       ...(this.overallDecision !== undefined ? { overallDecision: this.overallDecision } : {}),
+      ...(this.certTemplate !== undefined ? { certTemplate: this.certTemplate } : {}),
+      ...(this.certFields !== undefined ? { certFields: { ...this.certFields } } : {}),
       // 完成时间就是 completedAt：此前这里把它写进了 updatedAt，调用方拿到的「完成时间」
       // 与库列 completed_at 对不上（读侧 mapRow 用的是 completed_at）—— 口径统一
       ...(this.completedAt !== undefined ? { completedAt: this.completedAt } : {}),

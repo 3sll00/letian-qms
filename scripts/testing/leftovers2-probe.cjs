@@ -26,7 +26,7 @@ fs.mkdirSync(OUT_DIR, { recursive: true });
 const PORT = 9341;
 const WEB_CANDIDATES = ['http://127.0.0.1:5200/', 'http://127.0.0.1:5201/', 'http://127.0.0.1:5202/'];
 const API_BASE = process.env.API_BASE || 'http://127.0.0.1:3100/api/v1';
-const DB_URL = process.env.DATABASE_URL || 'postgresql://letian_user:letian_secure_pass_2026@127.0.0.1:5432/letian_qms_db';
+const DB_URL = process.env.DATABASE_URL || 'postgresql://letian_user:letian_secure_pass_2026@127.0.0.1:5433/letian_qms_db';
 
 const MAIN_USER = '11000000-0000-4000-8000-000000000001'; // 张强 · QA_MANAGER（签核授权角色）
 const INSPECTOR_USER = '11000000-0000-4000-8000-000000000008'; // 陈静 · IQC_INSPECTOR（非签核角色）
@@ -113,19 +113,6 @@ const SETTER = `
   };
 `;
 
-/** 表单全部带标签控件：{ label, value, placeholder, type } */
-const DUMP_FORM = `(() => {
-  const out = [];
-  document.querySelectorAll('input, select, textarea').forEach((el) => {
-    if (el.type === 'radio' || el.type === 'checkbox') return;
-    let label = '';
-    const box = el.closest('div,td,label');
-    if (box) { const lbl = box.querySelector('label,span'); if (lbl) label = lbl.innerText.trim(); }
-    out.push({ label, value: el.value, placeholder: el.placeholder || '', type: el.type });
-  });
-  return out;
-})()`;
-
 const clickButton = (text, exact) => `(() => {
   const btn = [...document.querySelectorAll('button,a')].find((b) => b.innerText.trim() ${exact ? '===' : '.includes('} ${JSON.stringify(text)} ${exact ? '' : ')'});
   if (!btn) return 'no-button';
@@ -142,11 +129,6 @@ const setLabelInput = (label, value) => `(() => {
   setVal(input, ${JSON.stringify(value)});
   return 'ok';
 })()`;
-
-const findByLabel = (fields, label) => {
-  const hit = fields.find((f) => f.label.includes(label));
-  return hit === undefined ? undefined : hit;
-};
 
 /** pg 依赖解析：仓库用 pnpm 隔离式 node_modules，scripts/ 不是工作区包，回退到 .pnpm 存储目录 */
 function resolvePg() {
@@ -379,46 +361,15 @@ function resolvePg() {
 
   await goto();
 
-  // ---------- M8/M4：企业档案页（读 / 写 / 回执 / 清空） ----------
-  log('nav 存货档案:', await clickNav('存货档案'));
-  await sleep(4000);
-  log('tab 企业档案:', await click('企业档案', true));
-  await sleep(4000);
-  let form = await evalJs(cdp, DUMP_FORM);
-  const legal = findByLabel(form, '企业法定名称');
-  check('M5 主数据页出现「企业档案」页签，且回显已维护的企业法定名称',
-    legal !== undefined && legal.value === '宁波乐天紧固件制造有限公司', legal);
-  const addBtnVisible = await evalJs(cdp, `(() => [...document.querySelectorAll('button')].some((b) => b.innerText.includes('新增')))()`);
-  check('M5 企业档案页签下不展示「新增」入口（单行主数据没有「新增一条」语义）',
-    addBtnVisible === false, addBtnVisible);
-  await shot('leftovers2-company-profile.png');
-
-  log('set address:', await evalJs(cdp, setLabelInput('企业地址（中文）', '探针临时地址-TEMP')));
-  await sleep(600);
-  log('save:', await click('保存企业档案', true));
-  await sleep(3500);
-  const receiptText = await evalJs(cdp, `(() => {
-    // 精确取绿字回执块（bg-emerald-50）：不能用「包含关键字的最外层 div」，那会把整页 innerText 当回执
-    const e = [...document.querySelectorAll('div')].find((d) => String(d.className).includes('bg-emerald-50') && d.innerText.includes('此后生成的证书'));
-    return e ? e.innerText.trim() : null;
+  // ---------- M5：企业档案维护界面已下线（2026-09-23，见 docs/实施进度 §47） ----------
+  // 原「ERP基础档案 → 存货档案 → 企业档案页签」与【系统管理 → 企业档案】菜单均已删除；
+  // 「读抬头供证书」的能力保留在接口层（GET /master-data/company-profile），其断言见上文 M5 接口段。
+  const profileUiGone = await evalJs(cdp, `(() => {
+    const navText = [...document.querySelectorAll('aside nav button, aside nav a')].map((e) => e.innerText.trim());
+    return { hasCompanyProfile: navText.some((t) => t.includes('企业档案')), hasErpGroup: navText.some((t) => t.includes('ERP基础档案')) };
   })()`);
-  check('M5 页面保存出现绿字回执（企业档案已保存）',
-    typeof receiptText === 'string' && receiptText.includes('已保存'), receiptText);
-  const savedProfile = (await httpJson(`${API_BASE}/master-data/company-profile`, { headers: authQa })).body;
-  check('M5 页面保存真实落库（接口回读 address = 探针临时值）',
-    savedProfile?.address === '探针临时地址-TEMP', { address: savedProfile?.address });
-  check('M5 维护人由服务端按当前登录用户写入（页面不可自称）',
-    savedProfile?.updatedBy === '张强', { updatedBy: savedProfile?.updatedBy });
-  await shot('leftovers2-company-profile-saved.png');
-
-  log('clear address:', await evalJs(cdp, setLabelInput('企业地址（中文）', '')));
-  await sleep(600);
-  log('save2:', await click('保存企业档案', true));
-  await sleep(3500);
-  const clearedProfile = (await httpJson(`${API_BASE}/master-data/company-profile`, { headers: authQa })).body;
-  check('M5 字段清空真实生效（显式空串 = 清空，探针值不残留）',
-    (clearedProfile?.address ?? '') === '', { address: clearedProfile?.address });
-
+  check('M5 企业档案维护界面已下线（侧边栏无「企业档案」菜单、「ERP基础档案」分组）',
+    profileUiGone.hasCompanyProfile === false && profileUiGone.hasErpGroup === false, profileUiGone);
   // ---------- M9：四个台账行级「证书」入口 ----------
   const entries = [
     { name: '来料检验(IQC)台账', nav: '来料检验(IQC)' },

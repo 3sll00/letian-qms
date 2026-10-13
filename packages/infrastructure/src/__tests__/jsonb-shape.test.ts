@@ -12,6 +12,7 @@
 import assert from 'node:assert';
 import { sql, type SqlBool } from 'kysely';
 import { createDatabaseConnection } from '../database/connection.js';
+import { syncMesInspectionOrders } from '../adapters/mes-sync-service.js';
 
 interface JsonShapeCheck {
   /** 检查项标签，失败信息里直接用来定位列 */
@@ -132,6 +133,57 @@ async function main(): Promise<void> {
       console.log(`✔ [${check.label}] 全表 jsonb_typeof=${check.expected}`);
     }
 
+    const rollback = new Error('ROLLBACK_MES_IMPORT_TEST');
+    try {
+      await db.transaction().execute(async (trx) => {
+        const orderNo = `TEST-MES-${crypto.randomUUID()}`;
+        const result = await syncMesInspectionOrders(trx, 1, {
+          reports: [{
+            id: crypto.randomUUID(), bill_no: orderNo,
+            bill_date: '2026-10-10T08:30:00Z', check_date: '2026-10-10T09:20:00Z',
+            check_qty: 12, qualified_qty: 11, unqualified_qty: 1, is_qualified: '0',
+            remarks: '历史实绩', task_bill_no: orderNo, heat_number: null,
+            steel_mill: null, cutting_length: null, materiel_code: 'MAT-SCR-M6-25',
+            materiel_name: null, materiel_spec: null, procedure_code: 'proc-cd',
+            procedure_name: '冷镦成型', inspector_name: '测试检验员',
+          }],
+        });
+        assert.strictEqual(result.inserted, 1);
+        const order = await trx.selectFrom('inspectionOrders').selectAll()
+          .where('orderNo', '=', orderNo).executeTakeFirstOrThrow();
+        assert.strictEqual(order.planSnapshot.planCode, 'QP-IPQC-CUT');
+        const sourcePlan = await trx.selectFrom('inspectionPlans').select(['planName', 'items'])
+          .where('id', '=', order.planVersionId).executeTakeFirstOrThrow();
+        assert.strictEqual(order.planSnapshot.planName, sourcePlan.planName);
+        assert.deepStrictEqual(order.planSnapshot.items, sourcePlan.items);
+        assert.ok(order.planSnapshot.items.length > 0);
+        assert.deepStrictEqual(order.items.map((item) => item.itemCode), order.planSnapshot.items.map((item) => item.itemCode));
+        assert.ok(order.items.every((item) => item.result === 'PENDING'));
+        assert.strictEqual(order.status, 'FAILED');
+        assert.strictEqual(order.judgment, 'FAILED');
+        assert.strictEqual(order.passQty, 11);
+        assert.strictEqual(order.failQty, 1);
+        assert.strictEqual(order.createdAt.toISOString(), '2026-10-10T09:20:00.000Z');
+        const missingPlanNo = `TEST-MES-${crypto.randomUUID()}`;
+        await assert.rejects(
+          syncMesInspectionOrders(trx, 1, {
+            reports: [{
+              id: crypto.randomUUID(), bill_no: missingPlanNo,
+              bill_date: '2026-10-10T08:30:00Z', check_date: '2026-10-10T09:20:00Z',
+              check_qty: 12, qualified_qty: 11, unqualified_qty: 1, is_qualified: '0',
+              task_bill_no: missingPlanNo, materiel_code: `MAT-NO-PLAN-${crypto.randomUUID()}`,
+              materiel_name: '无方案测试物料', procedure_name: '冷镦成型',
+            }],
+          }),
+          /未找到适用于物料/
+        );
+        assert.strictEqual(await trx.selectFrom('inspectionOrders').select('id')
+          .where('orderNo', '=', missingPlanNo).executeTakeFirst(), undefined);
+        throw rollback;
+      });
+    } catch (error) {
+      if (error !== rollback) throw error;
+    }
     console.log('=== jsonb 列形状检查全部通过 ===');
   } finally {
     await db.destroy();

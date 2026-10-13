@@ -24,6 +24,29 @@ export const InventoryCategorySchema = z.object({
   createdAt: z.string().optional(),
 });
 
+/**
+ * 检验项目字典（ERP `TestItem` 表镜像，docs/45 单向同步口径的扩展）。
+ *
+ * ERP 检验方案明细 `T_Inf_PtypeCheckingSchemeDly.TITypeId` 参照本字典；
+ * `bBuy/bProduce/bConsign` 三个环节标志决定该检验项目在哪个质检阶段可选：
+ *   bBuy -> 来料检验(IQC)，bProduce -> 过程检验(IPQC·FQC)，bConsign -> 委外/出货检验(OQC)。
+ */
+export const TestItemSchema = z.object({
+  id: z.string().uuid().optional(),
+  /** ERP `TestItem.TypeID`（如 '00001'）——方案指标行 `testItemCode` 的回链键 */
+  testItemCode: z.string().min(1, '检验项目编码不能为空'),
+  /** ERP `TestItem.FullName`（如 '外观'） */
+  name: z.string().min(1, '检验项目名称不能为空'),
+  namePy: z.string().optional(),
+  testStandard: z.string().optional(),
+  appliesToBuy: z.boolean().default(true).openapi({ description: '来料检验环节可选（ERP bBuy）' }),
+  appliesToProduce: z.boolean().default(true).openapi({ description: '生产/过程检验环节可选（ERP bProduce）' }),
+  appliesToConsign: z.boolean().default(true).openapi({ description: '委外/出货检验环节可选（ERP bConsign）' }),
+  sortNo: z.number().int().optional(),
+  createdAt: z.string().optional(),
+  updatedAt: z.string().optional(),
+});
+
 export const SupplierSchema = z.object({
   id: z.string().uuid().optional(),
   supplierCode: z.string().min(1, '供应商编码不能为空'),
@@ -69,14 +92,14 @@ export const EmployeeSchema = z.object({
  * 未维护的字段一律为空 —— 证书按空白渲染，绝不用推测值或模板硬编码常量填充（docs/35 §6）。
  */
 export const CompanyProfileSchema = z.object({
-  legalName: z.string().optional().openapi({ description: '企业法定名称（证书抬头中文）', example: '宁波乐天紧固件制造有限公司' }),
+  legalName: z.string().optional().openapi({ description: '企业法定名称（证书抬头中文）', example: '江阴乐天紧固件制造有限公司' }),
   legalNameEn: z.string().optional().openapi({ description: '企业英文名称（证书抬头英文）' }),
   shortName: z.string().optional().openapi({ description: '企业简称' }),
   address: z.string().optional().openapi({ description: '企业地址' }),
   originPlace: z.string().optional().openapi({ description: '产地（质量证书「供货单位/产地」格）' }),
   phone: z.string().optional(),
   email: z.string().email().optional(),
-  qualityStamp: z.string().optional().openapi({ description: '证书印章文字', example: '宁波乐天质检' }),
+  qualityStamp: z.string().optional().openapi({ description: '证书印章文字', example: '江阴乐天质检' }),
   updatedBy: z.string().optional().openapi({ description: '最后维护人（服务端按当前登录用户写入）' }),
   updatedAt: z.string().optional().openapi({ description: '最后维护时间 (ISO 8601)' }),
 }).openapi('CompanyProfile');
@@ -133,4 +156,45 @@ export const TriggerSyncResponseSchema = z.object({
   status: SyncStatusEnum,
   recordsCount: z.number().int(),
   message: z.string(),
+});
+
+/** ERP 源数据只读预览的限量参数 */
+export const ErpSourcePreviewQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(50000).optional(),
+});
+
+/** ERP 源数据同步请求（rows/useFixture 仅用于本地 fixture 演示源） */
+export const ErpSourceSyncRequestSchema = z.object({
+  limit: z.number().int().min(1).max(50000).optional(),
+  useFixture: z.boolean().optional(),
+  rows: z.array(z.unknown()).optional(),
+});
+
+export const ErpSalesDispatchSyncRequestSchema = ErpSourceSyncRequestSchema.extend({
+  offset: z.number().int().min(0).max(200000).optional(),
+});
+
+/** 出货检验五路数据源聚合查询条件：检验单 ID 与物料编码至少提供其一 */
+export const OqcSourcesQuerySchema = z
+  .object({
+    orderId: z.string().uuid().optional(),
+    materialCode: z.string().trim().min(1).optional(),
+    batchNo: z.string().trim().min(1).optional(),
+    customerName: z.string().trim().min(1).optional(),
+  })
+  .refine((value) => value.orderId !== undefined || value.materialCode !== undefined, {
+    message: '至少需要 orderId 或 materialCode 之一',
+    path: ['orderId'],
+  });
+
+/** MES 列表分页 / 模糊检索查询条件 */
+export const MesPagedQuerySchema = z.object({
+  search: z.string().trim().optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+});
+
+/** ERP 检验项目字典按适用环节过滤 */
+export const TestItemsQuerySchema = z.object({
+  stage: z.enum(['IQC', 'IPQC', 'OQC']).optional(),
 });

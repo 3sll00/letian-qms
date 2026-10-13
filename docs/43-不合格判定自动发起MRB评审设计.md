@@ -69,6 +69,13 @@ IQC / IPQC / 委外 / OQC 检验员终判不合格
    - 出货检验「特采」→ `CONCESSION`；其余环节缺省 `REWORK`。
 5. **不合并不写池**：台账条目仍然写入（不合格品全量留痕、追溯来源、PBAC 供应商维度换算都依赖它），只是**不再停留在 `PENDING_INITIATE`**。
 6. **保留接口**：`GET /mrb/pending-pool`、`POST /mrb/pending-pool/initiate` 与 `POST /mrb/records` 保留（历史数据与外部集成可继续读写，补发起仍可用），但**页面不再暴露发起入口**，正常链路下不会出现 `PENDING_INITIATE` 条目。
+7. **复用即对账**（2026-09-23 补，详见 `docs/21` §14）：「不合格数量」的唯一口径是源检验单 `fail_qty`
+   （= 检验员在录入弹窗填写的不合格数），但**建单与填写值落地分属两次调用** —— 录入弹窗先
+   `submit-measurements`（判定即建单）、后 `POST /status`（写数量），建单那一刻读到的可能是领域派生兜底值
+   （首次判定时 `failQty = sampleQty - passQty - exemptQty` 恒等于整批抽样数，即页面上的「检测数」）。
+   因此**复用既有单据时必须按源单 `fail_qty` 对齐**（`alignMrbDefectQtyWithSourceOrder()`），且**两个复用入口都要走**：
+   `triggerMrbReviewInTransaction` 自身的幂等分支 + `autoInitiateMrbReview` 的「先查后建」分支
+   （终判 / 录入用例的实际入口，漏掉它订正就不会发生）。源单 `fail_qty = 0` 视为检验员未填写 -> 保留现值，不回退成 0。
 
 ---
 
@@ -98,5 +105,6 @@ IQC / IPQC / 委外 / OQC 检验员终判不合格
 
 | 日期 | 版本 | 说明 |
 |:---|:---|:---|
+| 2026-09-23 | v1.1.0 | 补 §4.7「复用即对账」：复用既有 MRB 单时把「不合格数量」对齐源单 `fail_qty`。旧时序（先建单、后落填写值）会把建单那一刻的派生兜底值（= 抽样数/检测数）固化进单据，客户实测即为此现象（`docs/21` §14）。回归 `apps/api/test/integration/mrb-defect-qty-parity.test.ts`。 |
 | 2026-09-23 | v1.0.0 | 首次定稿并实施：取消人工发起闸门，判定不合格即同事务自动创建 MRB 评审单并转 `IN_MRB_REVIEW`；台账条目转 `INITIATED`；前端移除发起抽屉。 |
 | 2026-09-23 | v1.0.1 | 补齐验证证据（`pnpm -r run typecheck` / `pnpm -r run test` / web 构建 + mock 校验 / `mrb-wiring-verify` 35/35）；同步加固用例与探针的 MRB 回收（`trace-node-registration.test.ts`、`ipqc-ledger-verify.cjs` 两处），并把「列表回吐派生检验人」断言改为与库内可回溯工单对齐；清理库内 7 条历史遗留的孤儿评审工单。 |

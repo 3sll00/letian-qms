@@ -25,7 +25,11 @@ export class DeadLetterWebhookAdapter implements IDeadLetterAlertNotifier {
   private readonly headers: Record<string, string>;
 
   constructor(config?: WebhookConfig) {
-    this.webhookUrl = config?.webhookUrl || process.env.DEAD_LETTER_WEBHOOK_URL || undefined;
+    this.webhookUrl =
+      config?.webhookUrl ||
+      process.env.DEAD_LETTER_WEBHOOK_URL ||
+      process.env.ALERT_WEBHOOK_URL ||
+      undefined;
     this.timeoutMs = config?.timeoutMs ?? 5000;
     this.headers = {
       'Content-Type': 'application/json',
@@ -69,11 +73,12 @@ export class DeadLetterWebhookAdapter implements IDeadLetterAlertNotifier {
       if (!response.ok) {
         const statusText = response.statusText;
         const bodyText = await response.text().catch(() => '');
-        console.error(`[DeadLetterWebhookAdapter] Webhook failed with status ${response.status}: ${statusText} | body: ${bodyText}`);
+        throw new Error(`WEBHOOK_HTTP_${response.status}: ${statusText} | ${bodyText}`);
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[DeadLetterWebhookAdapter] Failed to send webhook alert:`, message);
+      throw err;
     } finally {
       clearTimeout(timeout);
     }

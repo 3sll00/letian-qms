@@ -7,6 +7,7 @@ export * from './trace';
 export * from './mrb';
 export * from './inspection';
 export * from './inspection-groups';
+export * from './plan-presets';
 export * from './integration';
 export * from './report';
 export * from './query-dsl';

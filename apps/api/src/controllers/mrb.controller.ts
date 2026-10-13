@@ -1,4 +1,4 @@
-import { FastifyPluginAsync, type FastifyRequest } from 'fastify';
+import { FastifyPluginAsync, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import {
   CreateMRBReviewRequestSchema,
@@ -21,6 +21,36 @@ import {
 
 /** 日期入参格式：`YYYY-MM-DD` */
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * 宽松日期字符串 schema：接受 `YYYY-MM-DD` / `YYYY/MM/DD` / `YYYY.MM.DD`
+ * （分隔符 `-` `/` `.` 均可），一律归一化为 `YYYY-MM-DD` 再向下传递。
+ * 同时校验真实日历日期，拒绝 `2026-13-01`、`2026-02-30` 之类。
+ */
+const isoDateString = (label: string) =>
+  z
+    .string()
+    .transform((s) => s.trim().replace(/[./]/g, '-'))
+    .pipe(
+      z.string().superRefine((val, ctx) => {
+        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(val);
+        if (!m) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `${label} 必须是 YYYY-MM-DD 格式（分隔符支持 - / .）`,
+          });
+          return;
+        }
+        const y = Number(m[1]);
+        const mo = Number(m[2]);
+        const d = Number(m[3]);
+        const dt = new Date(y, mo - 1, d);
+        if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${label} 不是合法日期` });
+        }
+      })
+    )
+    .optional();
 
 const MRBQuerySchema = z.object({
   categoryTab: MRBCategoryTabEnum.default('ALL'),
@@ -48,9 +78,9 @@ const MRBQuerySchema = z.object({
   /** 处置方式过滤：退货 / 返工 / 特采 / 报废 */
   disposition: MRBDispositionEnum.optional(),
   /** 发现日期下界（含） */
-  dateFrom: z.string().regex(DATE_PATTERN, '日期格式必须为 YYYY-MM-DD').optional(),
+  dateFrom: isoDateString('dateFrom'),
   /** 发现日期上界（含） */
-  dateTo: z.string().regex(DATE_PATTERN, '日期格式必须为 YYYY-MM-DD').optional(),
+  dateTo: isoDateString('dateTo'),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
 });
@@ -110,6 +140,12 @@ const SignatureRequestSchema = z.object({
  * `mrb_reviews.disposition_notes`）；`approvers` 省略时沿用会签历史。
  * 特采附件**不做任何默认兜底**：缺失即由用例抛 400 CONCESSION_NOT_SIGNED_OFF。
  */
+const CustomerSignOffBodySchema = z.object({
+  customerName: z.string().trim().min(1),
+  signOffDocumentUrl: z.string().trim().min(1),
+  agreed: z.literal(true),
+});
+
 const DispositionBodySchema = z
   .object({
     disposition: z
@@ -257,6 +293,36 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
         // 兼容别名：早期契约消费方使用 list，与 items 指向同一份当页数据
         list: result.items,
       });
+    }
+  );
+
+  fastify.get(
+    '/:id',
+    {
+      schema: {
+        params: MRBParamsSchema,
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params as z.infer<typeof MRBParamsSchema>;
+      const record = await mrbReviews.findById(id);
+      if (!record) {
+        throw new NotFoundError(`MRB记录不存在: ${id}`);
+      }
+
+      const securityCtx = await buildRequestSecurityContext(request, container);
+      const material = await container.repositories.masterData.findMaterialByCode(record.materialCode);
+      const sourceOrder = await container.repositories.orders.findByOrderNo(record.sourceOrderNo);
+      securityCtx.assertAccess({
+        targetCategory: material?.categoryCode ?? 'STANDARD_PARTS',
+        targetMaterialCode: record.materialCode,
+        ...(sourceOrder?.supplierCode !== undefined
+          ? { targetSupplierCode: sourceOrder.supplierCode }
+          : {}),
+        operationName: '查看MRB详情',
+      });
+
+      return reply.status(200).send(record);
     }
   );
 
@@ -474,8 +540,102 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
     }
   );
 
+  fastify.post(
+    '/records/:id/customer-sign-off',
+    {
+      schema: {
+        params: MRBParamsSchema,
+        body: CustomerSignOffBodySchema,
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params as z.infer<typeof MRBParamsSchema>;
+      const body = request.body as z.infer<typeof CustomerSignOffBodySchema>;
+      const operator = operatorOf(request);
+      const securityCtx = await buildRequestSecurityContext(request, container);
+      const updated = await container.useCases.customerSignOff.execute({
+        mrbId: id,
+        customerName: body.customerName,
+        signOffDocumentUrl: body.signOffDocumentUrl,
+        agreed: body.agreed,
+        operatorId: operator.userId,
+        operatorName: operator.userName,
+      }, securityCtx);
+      return reply.status(200).send(updated);
+    }
+  );
+
   // 5. 提交最终处置结论
-  // 5. 提交最终处置结论
+  const submitDisposition = async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as z.infer<typeof MRBParamsSchema>;
+    const body = request.body as z.infer<typeof DispositionBodySchema>;
+    const operator = operatorOf(request);
+    const securityCtx = await buildRequestSecurityContext(request, container);
+
+    const record = await mrbReviews.findById(id);
+    if (!record) {
+      throw new NotFoundError(`MRB记录不存在: ${id}`);
+    }
+
+    const material = await container.repositories.masterData.findMaterialByCode(record.materialCode);
+    const categoryCode = material?.categoryCode ?? 'STANDARD_PARTS';
+    const sourceOrder = await container.repositories.orders.findByOrderNo(record.sourceOrderNo);
+
+    securityCtx.assertAccess({
+      targetCategory: categoryCode,
+      targetMaterialCode: record.materialCode,
+      ...(sourceOrder?.supplierCode !== undefined ? { targetSupplierCode: sourceOrder.supplierCode } : {}),
+      operationName: '提交MRB最终处置结论',
+    });
+
+    const reason =
+      body.dispositionReason || body.dispositionNotes || body.reason || '多方会签评审确认处置方式';
+    const updated = await container.useCases.decideMrbDisposition.execute(
+      {
+        mrbId: id,
+        disposition: body.disposition,
+        dispositionReason: reason,
+        approvers: body.approvers,
+        // 特采附件只认「本次提交」或「单据已有」的客户书面签核件，绝不生成默认路径
+        ...(body.concessionAttachmentUrl !== undefined
+          ? { concessionAttachmentUrl: body.concessionAttachmentUrl }
+          : record.concessionAttachmentUrl !== undefined
+            ? { concessionAttachmentUrl: record.concessionAttachmentUrl }
+            : {}),
+        operatorId: operator.userId,
+        operatorName: operator.userName,
+      },
+      securityCtx
+    );
+
+    // 契约响应体 = MRBRecord 本体 + 处置连带产物（DisposeMRBResponse）：
+    // 返工（REWORK）处置会在同一事务内生成下一轮复检单，这里把复检单标识一并回吐，
+    // 前端无需按批次号反查即可展示「已生成复检单 {单号}」（此前用例已算出却被丢弃）。
+    // 注意：响应体仍是 MRB 单据本身（此前把用例包装对象 { mrbReview } 当 DTO 下发，
+    // 前端拿到后 status/disposition 全为 undefined，见 docs/20 §3.2 D6），
+    // 这里只是在其上追加两个可选字段，非返工处置的响应与旧版逐字段一致。
+    return reply.status(200).send({
+      ...updated.mrbReview,
+      ...(updated.reinspectionOrderId !== undefined
+        ? { reinspectionOrderId: updated.reinspectionOrderId }
+        : {}),
+      ...(updated.reinspectionOrderNo !== undefined
+        ? { reinspectionOrderNo: updated.reinspectionOrderNo }
+        : {}),
+    });
+  };
+
+  fastify.post(
+    '/:id/disposition',
+    {
+      schema: {
+        params: MRBParamsSchema,
+        body: DispositionBodySchema,
+      },
+    },
+    submitDisposition
+  );
+
   fastify.post(
     '/records/:id/disposition',
     {
@@ -484,61 +644,6 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
         body: DispositionBodySchema,
       },
     },
-    async (request, reply) => {
-      const { id } = request.params as z.infer<typeof MRBParamsSchema>;
-      const body = DispositionBodySchema.parse(request.body ?? {});
-      const operator = operatorOf(request);
-      const securityCtx = await buildRequestSecurityContext(request, container);
-
-      const record = await mrbReviews.findById(id);
-      if (!record) {
-        throw new NotFoundError(`MRB记录不存在: ${id}`);
-      }
-
-      const material = await container.repositories.masterData.findMaterialByCode(record.materialCode);
-      const categoryCode = material?.categoryCode ?? 'STANDARD_PARTS';
-
-      securityCtx.assertAccess({
-        targetCategory: categoryCode,
-        targetMaterialCode: record.materialCode,
-        operationName: '提交MRB最终处置结论',
-      });
-
-      const reason =
-        body.dispositionReason || body.dispositionNotes || body.reason || '多方会签评审确认处置方式';
-      const updated = await container.useCases.decideMrbDisposition.execute(
-        {
-          mrbId: id,
-          disposition: body.disposition,
-          dispositionReason: reason,
-          approvers: body.approvers,
-          // 特采附件只认「本次提交」或「单据已有」的客户书面签核件，绝不生成默认路径
-          ...(body.concessionAttachmentUrl !== undefined
-            ? { concessionAttachmentUrl: body.concessionAttachmentUrl }
-            : record.concessionAttachmentUrl !== undefined
-              ? { concessionAttachmentUrl: record.concessionAttachmentUrl }
-              : {}),
-          operatorId: operator.userId,
-          operatorName: operator.userName,
-        },
-        securityCtx
-      );
-
-      // 契约响应体 = MRBRecord 本体 + 处置连带产物（DisposeMRBResponse）：
-      // 返工（REWORK）处置会在同一事务内生成下一轮复检单，这里把复检单标识一并回吐，
-      // 前端无需按批次号反查即可展示「已生成复检单 {单号}」（此前用例已算出却被丢弃）。
-      // 注意：响应体仍是 MRB 单据本身（此前把用例包装对象 { mrbReview } 当 DTO 下发，
-      // 前端拿到后 status/disposition 全为 undefined，见 docs/20 §3.2 D6），
-      // 这里只是在其上追加两个可选字段，非返工处置的响应与旧版逐字段一致。
-      return reply.status(200).send({
-        ...updated.mrbReview,
-        ...(updated.reinspectionOrderId !== undefined
-          ? { reinspectionOrderId: updated.reinspectionOrderId }
-          : {}),
-        ...(updated.reinspectionOrderNo !== undefined
-          ? { reinspectionOrderNo: updated.reinspectionOrderNo }
-          : {}),
-      });
-    }
+    submitDisposition
   );
 };

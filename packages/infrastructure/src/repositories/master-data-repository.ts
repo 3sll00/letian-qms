@@ -1,4 +1,4 @@
-import { Kysely } from 'kysely';
+import { Kysely, sql } from 'kysely';
 import type { ErpPort } from '@letian/domain';
 import type {
   Customer,
@@ -7,6 +7,7 @@ import type {
   InventoryCategory,
   Material,
   Supplier,
+  TestItem,
   Workshop,
 } from '@letian/contracts';
 import type {
@@ -17,6 +18,7 @@ import type {
   InventoryCategoryRow,
   MaterialRow,
   SupplierRow,
+  TestItemRow,
   WorkshopRow,
 } from '../database/schema.js';
 
@@ -64,7 +66,39 @@ export class KyselyMasterDataRepository implements ErpPort {
       .where('materialCode', '=', materialCode)
       .executeTakeFirst();
 
-    return row ? this.mapMaterial(row) : null;
+    if (row) return this.mapMaterial(row);
+
+    // 回退：查物料编码别名（迁移 046）。ERP Ptype 存在"已废弃的重复编码"（如
+    // `GB5783-24*120-8.8-` 的 deleted=1 版本），主数据同步按 deleted=0 口径不会收录，
+    // 但历史来料检验单仍在用旧编码，故这里按别名映射到现行有效物料，避免历史单据建单失败。
+    return this.getMaterialByCodeViaAlias(materialCode);
+  }
+
+  /** 按别名表把废弃/历史编码解析到现行有效物料（查不到返回 null） */
+  private async getMaterialByCodeViaAlias(materialCode: string): Promise<Material | null> {
+    let activeCode: string | undefined;
+    try {
+      // 用别名 `code` 规避 Kysely 的 camelCase 转换（column_name 会被映射成 columnName）
+      const res = await sql<{ code: string }>`
+        SELECT active_code AS code
+          FROM qms_material_code_alias
+         WHERE legacy_code = ${materialCode}
+         LIMIT 1
+      `.execute(this.db);
+      activeCode = res.rows[0]?.code;
+    } catch {
+      // 别名表尚未建（迁移未跑）时，静默降级为"查不到"，不影响主流程
+      return null;
+    }
+    if (!activeCode) return null;
+
+    const active = await this.db
+      .selectFrom('materials')
+      .selectAll()
+      .where('materialCode', '=', activeCode)
+      .executeTakeFirst();
+
+    return active ? this.mapMaterial(active) : null;
   }
 
   public async getSuppliers(query?: { supplierCode?: string; supplierName?: string }): Promise<readonly Supplier[]> {
@@ -206,6 +240,73 @@ export class KyselyMasterDataRepository implements ErpPort {
       level: row.level,
       createdAt: row.createdAt.toISOString(),
       ...(row.parentCode !== null ? { parentCode: row.parentCode } : {}),
+    };
+  }
+
+  // --------------------------------------------------------------------------
+  // 检验项目字典（迁移 037）：ERP `TestItem` 的 QMS 镜像，质检方案明细「检验项目」列的选项域。
+  // --------------------------------------------------------------------------
+
+  /**
+   * 读取检验项目字典（可按质检环节过滤）。
+   * @param stage 'IQC' | 'IPQC' | 'OQC' 三档：分别对应 ERP bBuy / bProduce / bConsign 标志
+   */
+  public async getTestItems(query?: { stage?: 'IQC' | 'IPQC' | 'OQC' }): Promise<TestItem[]> {
+    let q = this.db.selectFrom('testItems').selectAll();
+    if (query?.stage === 'IQC') q = q.where('appliesToBuy', '=', true);
+    if (query?.stage === 'IPQC') q = q.where('appliesToProduce', '=', true);
+    if (query?.stage === 'OQC') q = q.where('appliesToConsign', '=', true);
+    const rows = await q.orderBy('sortNo', 'asc').orderBy('testItemCode', 'asc').execute();
+    return rows.map((row) => this.mapTestItem(row));
+  }
+
+  /**
+   * 写入检验项目字典（ERP -> QMS 单向同步的落点）。
+   * 按 testItemCode upsert：重复执行只刷新 ERP 侧字段，不产生新行。
+   */
+  public async upsertTestItem(data: {
+    testItemCode: string;
+    name: string;
+    namePy?: string | null;
+    testStandard?: string | null;
+    appliesToBuy?: boolean;
+    appliesToProduce?: boolean;
+    appliesToConsign?: boolean;
+    sortNo?: number;
+  }): Promise<TestItem> {
+    // 显式传入的字段才参与更新（未传入保持原值）；插入时缺省字段走列默认值
+    const patch = {
+      name: data.name,
+      ...(data.namePy !== undefined ? { namePy: data.namePy } : {}),
+      ...(data.testStandard !== undefined ? { testStandard: data.testStandard } : {}),
+      ...(data.appliesToBuy !== undefined ? { appliesToBuy: data.appliesToBuy } : {}),
+      ...(data.appliesToProduce !== undefined ? { appliesToProduce: data.appliesToProduce } : {}),
+      ...(data.appliesToConsign !== undefined ? { appliesToConsign: data.appliesToConsign } : {}),
+      ...(data.sortNo !== undefined ? { sortNo: data.sortNo } : {}),
+      updatedAt: new Date(),
+    };
+    const row = await this.db
+      .insertInto('testItems')
+      .values({ id: crypto.randomUUID(), testItemCode: data.testItemCode, ...patch, createdAt: new Date() })
+      .onConflict((oc) => oc.column('testItemCode').doUpdateSet(patch))
+      .returningAll()
+      .executeTakeFirstOrThrow();
+    return this.mapTestItem(row);
+  }
+
+  private mapTestItem(row: TestItemRow): TestItem {
+    return {
+      id: row.id,
+      testItemCode: row.testItemCode,
+      name: row.name,
+      appliesToBuy: row.appliesToBuy,
+      appliesToProduce: row.appliesToProduce,
+      appliesToConsign: row.appliesToConsign,
+      sortNo: row.sortNo,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+      ...(row.namePy !== null ? { namePy: row.namePy } : {}),
+      ...(row.testStandard !== null ? { testStandard: row.testStandard } : {}),
     };
   }
 

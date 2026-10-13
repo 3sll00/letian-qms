@@ -6,7 +6,7 @@ info:
 servers:
   - url: /api/v1
     description: 默认 API 网关基础路径
-# 全站默认要求 Bearer 鉴权：本 spec 登记的 29 条路径**全部**落在受保护作用域内
+# 全站默认要求 Bearer 鉴权：本 spec 登记的 39 条路径**全部**落在受保护作用域内
 # （根 /health 探针与开发态 /auth/** 均不登记在册，故无需逐路径声明 security: []）。
 security:
   - bearerAuth: []
@@ -28,7 +28,7 @@ paths:
 
   /release-gates/{batchNo}:
     get:
-      summary: 成品检强制关卡放行状态纯读校验（MES过站前调用，纯读幂等无副作用）
+      summary: 过程成品检与出货检验强制放行关卡（判定同时写审计与 Outbox）
       operationId: checkReleaseGate
       parameters:
         - name: batchNo
@@ -37,9 +37,17 @@ paths:
           schema:
             type: string
             minLength: 1
+        - name: gateType
+          in: query
+          required: false
+          description: 默认 OUTBOUND_SHIPMENT 检查 OQC_SH；PROCESS_TRANSFER 检查 IPQC_FN
+          schema:
+            type: string
+            enum: [PROCESS_TRANSFER, OUTBOUND_SHIPMENT]
+            default: OUTBOUND_SHIPMENT
       responses:
         '200':
-          description: 批次已完成成品检且合格，允许放行过站
+          description: 对应关卡检验单已判定合格或获 MRB 受限放行
           content:
             application/json:
               schema:
@@ -1897,6 +1905,102 @@ paths:
         '401':
           $ref: '#/components/responses/ProblemDetails401'
 
+  /report-templates:
+    get:
+      summary: 获取质检报告模板列表（四段式打印/导出模板）
+      operationId: listQualityReportTemplates
+      parameters:
+        - name: scope
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [STANDARD, OUTSOURCE, CUSTOM]
+        - name: applicableType
+          in: query
+          required: false
+          description: 适用检验类型；ALL 或不传表示不过滤
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 可用报告模板列表；items 与 list 为同一份数据的兼容别名
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportTemplateListResponse'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
+
+  /reports/templates:
+    get:
+      summary: 获取质检报告模板列表（兼容别名，语义同 /report-templates）
+      operationId: listQualityReportTemplatesAlias
+      parameters:
+        - name: scope
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [STANDARD, OUTSOURCE, CUSTOM]
+        - name: applicableType
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 可用报告模板列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportTemplateListResponse'
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
+
+  /reports/export:
+    post:
+      summary: 按四段式导出质检报告（PDF / XLSX / JSON 预览）
+      description: >-
+        服务端以持久化检验单及其方案快照/检验项为唯一数据源组装报告；
+        `orderId` 与 `orderNo` 至少提供一项，二者同时提供时必须指向同一检验单。
+        未录入实测值的指标按 PENDING/未检 导出，不会伪造成 0 或合格。
+        `sections` 未传时导出外观、尺寸、机械性能、化学成分四段；未选中的段不落明细。
+      operationId: exportQualityReport
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerateReportRequest'
+      responses:
+        '200':
+          description: >-
+            导出成功。format=JSON 时返回 application/json；
+            format=PDF 时返回真实 PDF 二进制；format=EXCEL 时返回真实 XLSX 工作簿。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QualityReportPreviewResponse'
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/ProblemDetails400'
+        '401':
+          $ref: '#/components/responses/ProblemDetails401'
+        '404':
+          $ref: '#/components/responses/ProblemDetails404'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -2198,7 +2302,7 @@ components:
               type: string
             requiredGate:
               type: string
-              enum: [OQC]
+              enum: [OQC, IPQC_FN]
             gateCode:
               type: string
               description: 传递判定理由码（TransferGateCode，如 UPSTREAM_FAILED / UPSTREAM_UNDER_MRB）
@@ -3842,3 +3946,261 @@ components:
         createdAt:
           type: string
           format: date-time
+
+    ReportTemplate:
+      type: object
+      required: [id, templateCode, templateName, scope, isDefault, enabledSections]
+      properties:
+        id:
+          type: string
+          format: uuid
+        templateCode:
+          type: string
+        templateName:
+          type: string
+        scope:
+          type: string
+          enum: [STANDARD, OUTSOURCE, CUSTOM]
+        isDefault:
+          type: boolean
+        enabledSections:
+          type: array
+          items:
+            type: string
+            enum: [APPEARANCE, DIMENSION, MECHANICAL_PERFORMANCE, CHEMICAL_COMPOSITION]
+        headerConfig:
+          type: object
+        footerConfig:
+          type: object
+        styleConfig:
+          type: object
+        description:
+          type: string
+
+    ReportTemplateListResponse:
+      type: object
+      required: [items, list, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReportTemplate'
+        list:
+          type: array
+          description: 兼容别名，与 items 指向同一份模板列表
+          items:
+            $ref: '#/components/schemas/ReportTemplate'
+        total:
+          type: integer
+
+    GenerateReportRequest:
+      type: object
+      description: orderId 与 orderNo 至少提供一项；同时提供时必须指向同一检验单
+      properties:
+        orderId:
+          type: string
+          format: uuid
+        orderNo:
+          type: string
+          minLength: 1
+        templateId:
+          type: string
+          format: uuid
+          description: 不传时使用 isDefault=true 的模板；传入不存在的 UUID 返回 404
+        sections:
+          type: array
+          description: 指定导出分段；缺省导出全部四段
+          items:
+            type: string
+            enum: [APPEARANCE, DIMENSION, MECHANICAL_PERFORMANCE, CHEMICAL_COMPOSITION]
+        format:
+          type: string
+          enum: [PDF, EXCEL, JSON]
+          default: PDF
+
+    QualityReportPreviewResponse:
+      type: object
+      required: [success, reportData]
+      properties:
+        success:
+          type: boolean
+        reportData:
+          $ref: '#/components/schemas/QualityReportData'
+
+    QualityReportData:
+      type: object
+      required:
+        - reportNo
+        - orderNo
+        - materialCode
+        - materialName
+        - batchNo
+        - inspectionDate
+        - overallDecision
+        - appearanceSection
+        - dimensionSection
+        - mechanicalSection
+        - chemicalSection
+      properties:
+        reportNo:
+          type: string
+        orderNo:
+          type: string
+        templateId:
+          type: string
+          format: uuid
+        templateCode:
+          type: string
+        materialCode:
+          type: string
+        materialName:
+          type: string
+        materialSpec:
+          type: string
+        batchNo:
+          type: string
+        furnaceHeatNo:
+          type: string
+        supplierName:
+          type: string
+        customerName:
+          type: string
+        inspectionDate:
+          type: string
+        inspectorName:
+          type: string
+        overallDecision:
+          type: string
+          enum: [PENDING, PASSED, FAILED, CONCESSION]
+          description: PENDING 只用于 JSON 预览中的未完结检验单，不会被改写为 PASSED
+        appearanceSection:
+          type: object
+          required: [enabled, items]
+          properties:
+            enabled:
+              type: boolean
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/AppearanceReportItem'
+        dimensionSection:
+          type: object
+          required: [enabled, items]
+          properties:
+            enabled:
+              type: boolean
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/DimensionReportItem'
+        mechanicalSection:
+          type: object
+          required: [enabled, items]
+          properties:
+            enabled:
+              type: boolean
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/MechanicalReportItem'
+        chemicalSection:
+          type: object
+          required: [enabled, elements]
+          properties:
+            enabled:
+              type: boolean
+            elements:
+              type: array
+              items:
+                $ref: '#/components/schemas/ChemicalReportElement'
+
+    AppearanceReportItem:
+      type: object
+      required: [itemCode, name, standardText, measuredResult, conclusion]
+      properties:
+        itemCode:
+          type: string
+        name:
+          type: string
+        standardText:
+          type: string
+        measuredResult:
+          type: string
+          description: 未录入时为“未检”，不使用“合格”占位
+        conclusion:
+          type: string
+          enum: [PENDING, PASSED, FAILED, EXEMPT]
+        defectDescription:
+          type: string
+
+    DimensionReportItem:
+      type: object
+      required: [itemCode, name, conclusion]
+      properties:
+        itemCode:
+          type: string
+        name:
+          type: string
+        nominalValue:
+          type: number
+        upperTolerance:
+          type: number
+        lowerTolerance:
+          type: number
+        unit:
+          type: string
+        measuredVal:
+          type: number
+          description: 未录入时缺省，不以 0 冒充实测值
+        sampleSize:
+          type: integer
+        conclusion:
+          type: string
+          enum: [PENDING, PASSED, FAILED, EXEMPT]
+
+    MechanicalReportItem:
+      type: object
+      required: [itemCode, name, standardRequirement, isManuallyModified, conclusion]
+      properties:
+        itemCode:
+          type: string
+        name:
+          type: string
+        standardRequirement:
+          type: string
+        nominalValue:
+          type: number
+        measuredVal:
+          type: number
+          description: 未录入时缺省，不以 0 冒充实测值
+        unit:
+          type: string
+        inheritedFrom:
+          type: string
+          enum: [OUTSOURCE_HEAT_TREATMENT, IQC_RAW_MATERIAL, MANUAL_ENTRY]
+        isManuallyModified:
+          type: boolean
+        conclusion:
+          type: string
+          enum: [PENDING, PASSED, FAILED, EXEMPT]
+
+    ChemicalReportElement:
+      type: object
+      required: [element, elementName, conclusion]
+      properties:
+        element:
+          type: string
+        elementName:
+          type: string
+        standardText:
+          type: string
+        standardMin:
+          type: number
+        standardMax:
+          type: number
+        measuredVal:
+          type: number
+          description: 未录入时缺省，不以 0 冒充化学实测值
+        conclusion:
+          type: string
+          enum: [PENDING, PASSED, FAILED, EXEMPT]

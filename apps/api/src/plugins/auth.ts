@@ -1,7 +1,14 @@
 import { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify';
 import fp from 'fastify-plugin';
 import jwt from 'jsonwebtoken';
-import { UnauthorizedError, ForbiddenError } from '@letian/application';
+import {
+  ForbiddenError,
+  SecurityContextFactory,
+  UnauthorizedError,
+  type ISecurityContext,
+} from '@letian/application';
+import type { ApiContainer } from '../container';
+import { requestTraceId } from '../lib/trace';
 
 export interface CurrentUser {
   userId: string;
@@ -16,6 +23,7 @@ export interface CurrentUser {
 declare module 'fastify' {
   interface FastifyRequest {
     user?: CurrentUser;
+    securityContext?: ISecurityContext;
   }
   interface FastifyInstance {
     /** 校验 Authorization: Bearer <token>，失败抛出 RFC 7807 401 */
@@ -46,7 +54,15 @@ export function generateTestToken(payload: Partial<CurrentUser>): string {
   return jwt.sign({ ...defaultUser, ...payload }, jwtSecret(), { expiresIn: '1d' });
 }
 
-const authPluginAsync: FastifyPluginAsync = async (fastify) => {
+interface AuthPluginOptions {
+  container: ApiContainer;
+}
+
+const authPluginAsync: FastifyPluginAsync<AuthPluginOptions> = async (fastify, options) => {
+  const securityContextFactory = new SecurityContextFactory(
+    options.container.repositories.materialPermissions
+  );
+
   fastify.decorate('authenticate', async (request: FastifyRequest, _reply: FastifyReply) => {
     const authHeader = request.headers.authorization;
     if (!authHeader) {
@@ -59,12 +75,13 @@ const authPluginAsync: FastifyPluginAsync = async (fastify) => {
     }
 
     const token = parts[1] as string;
+    let user: CurrentUser;
     try {
       const decoded = jwt.verify(token, jwtSecret()) as Record<string, unknown>;
 
       // 可选字段在缺失时必须整体省略，而不是赋 undefined
       // （tsconfig 开启了 exactOptionalPropertyTypes）
-      const user: CurrentUser = {
+      user = {
         userId: (decoded.userId as string) || (decoded.sub as string) || 'unknown-user',
         userName: (decoded.userName as string) || (decoded.name as string) || '系统用户',
         role: (decoded.role as string) || 'USER',
@@ -75,11 +92,20 @@ const authPluginAsync: FastifyPluginAsync = async (fastify) => {
       if (typeof decoded.productionLineId === 'string') {
         user.productionLineId = decoded.productionLineId;
       }
-      request.user = user;
     } catch (err: unknown) {
       const reason = err instanceof Error ? err.message : String(err);
       throw new UnauthorizedError(`凭据校验无效或已过期: ${reason}`);
     }
+
+    request.user = user;
+    request.securityContext = await securityContextFactory.createContext(
+      {
+        id: user.userId,
+        name: user.userName,
+        role: user.role,
+      },
+      requestTraceId(request)
+    );
   });
 
   fastify.decorate('requirePermission', (requiredPermission: string) => {

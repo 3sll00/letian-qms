@@ -79,6 +79,7 @@ export async function triggerMrbReviewInTransaction(
     securityCtx.assertAccess({
       targetCategory: material?.categoryCode ?? 'UNKNOWN',
       targetMaterialCode: orderDTO.materialCode,
+      ...(orderDTO.supplierCode !== undefined ? { targetSupplierCode: orderDTO.supplierCode } : {}),
     });
   }
 

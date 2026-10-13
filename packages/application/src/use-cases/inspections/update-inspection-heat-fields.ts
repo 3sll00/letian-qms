@@ -1,3 +1,4 @@
+import type { CertTemplate } from '@letian/contracts';
 import { HeatBatchTraceService, type HeatTraceSourceType } from '@letian/domain';
 import { NotFoundError } from '../../errors/application-error.js';
 import type { ISecurityContext } from '../../security/security-context.js';
@@ -17,6 +18,10 @@ export interface UpdateInspectionHeatFieldsCommand {
   materialGrade?: string;
   techStandard?: string;
   inspectedDate?: string;
+  /** 证书模板（docs/51）：操作员建单前选定的打印版式；缺省 = 不改动该列 */
+  certTemplate?: CertTemplate;
+  /** 证书专用补充字段袋（docs/51）；缺省 = 不改动，传对象则整袋覆盖（含空对象清空） */
+  certFields?: Record<string, string>;
   operatorId: string;
   operatorName: string;
 }
@@ -90,6 +95,8 @@ export class UpdateInspectionHeatFieldsUseCase {
         ...(cmd.materialGrade !== undefined ? { materialGrade: cmd.materialGrade } : {}),
         ...(cmd.techStandard !== undefined ? { techStandard: cmd.techStandard } : {}),
         ...(cmd.inspectedDate !== undefined ? { inspectedDate: cmd.inspectedDate } : {}),
+        ...(cmd.certTemplate !== undefined ? { certTemplate: cmd.certTemplate } : {}),
+        ...(cmd.certFields !== undefined ? { certFields: cmd.certFields } : {}),
         // 炉批号被显式写入（含清空）时，溯源留痕随之一起落库 / 清空：
         // 空串在仓储侧落 NULL，避免「新炉号 + 旧源单号」错配（docs/47 §4.4）。
         ...(cmd.furnaceHeatNo !== undefined
@@ -116,6 +123,8 @@ export class UpdateInspectionHeatFieldsUseCase {
           ...(cmd.materialGrade !== undefined ? { materialGrade: cmd.materialGrade } : {}),
           ...(cmd.techStandard !== undefined ? { techStandard: cmd.techStandard } : {}),
           ...(cmd.inspectedDate !== undefined ? { inspectedDate: cmd.inspectedDate } : {}),
+          ...(cmd.certTemplate !== undefined ? { certTemplate: cmd.certTemplate } : {}),
+          ...(cmd.certFields !== undefined ? { certFields: cmd.certFields } : {}),
           heatSourceType: sourceType,
           heatSourceOrderNo: sourceOrderNo,
           matchScope,

@@ -1,235 +1,299 @@
 import React from 'react';
 import type { QualityCertificateData } from '../../lib/inspectionTypes';
+import letianWordmark from '../../assets/certificate/letian-wordmark.png';
+import letianTriangle from '../../assets/certificate/letian-triangle.png';
 
 interface QualityCertificateTemplateProps {
   data: QualityCertificateData;
 }
 
+/** 信息网格单元格：CN 标签 + 值 一行，EN 标签下一行（扫描件三列字段区版式） */
+const GridCell: React.FC<{ cn: string; en: string; value?: string }> = ({ cn, en, value }) => (
+  <div className="min-h-[26px] break-words">
+    <div className="break-words">
+      <span className="font-semibold">{cn}：</span>
+      <span className="break-words">{value ?? ''}</span>
+    </div>
+    <div className="font-semibold break-words">{en}</div>
+  </div>
+);
+
+/** 判定字样 → 扫描件双语写法：合格 → 合格(Qualified)；未判定即空串留白 */
+function qualifiedText(result: string | undefined): string {
+  if (result === '合格') return '合格(Qualified)';
+  if (result === '不合格') return '不合格(Unqualified)';
+  return '';
+}
+
+/** 尺寸 / 机械性能分段（扫描件同构：分段标题行 + 四列子表头 + 数据行） */
+const SectionTable: React.FC<{
+  title: string;
+  standard: string;
+  rows: readonly { name: string; standard: string; actual: string; result?: string }[];
+  /** 与上一段内容的间距（让表尾双线与下一段分开，不重叠） */
+  topGap?: number;
+}> = ({ title, standard, rows, topGap = 0 }) => (
+  <div className="break-words" style={{ marginTop: topGap }}>
+    <div className="flex flex-wrap justify-between items-baseline gap-x-4 gap-y-1 pb-0.5">
+      <span className="font-bold break-words">{title}</span>
+      <span className="font-semibold break-words">
+        测试方法(SAMPLE STANDARD)：{standard}
+      </span>
+    </div>
+    <table className="w-full border-collapse mt-0.5 break-words">
+      <thead>
+        <tr className="font-semibold text-center">
+          <td className="text-left pl-2 break-words">测试项目</td>
+          <td className="break-words">标准值</td>
+          <td className="break-words">实测值</td>
+          <td className="break-words">测试判定</td>
+        </tr>
+        <tr className="font-semibold text-center border-b-2 border-gray-300">
+          <td className="text-left pl-2 break-words">(CHARACTERISTICS)</td>
+          <td className="break-words">(SPECIFICATION)</td>
+          <td className="break-words">(ACTUAL RESULT)</td>
+          <td className="break-words">(SAMPLE DETERMINANT)</td>
+        </tr>
+      </thead>
+      <tbody>
+        {/* 末行底线加在 td 上（tr 边框在 html2canvas/打印路径下不可靠） */}
+        {rows.map((row, idx) => {
+          const isLast = idx === rows.length - 1;
+          const lastCls = isLast ? 'border-b border-black' : '';
+          return (
+            <tr key={idx}>
+              <td className={`pl-2 py-0.5 break-words ${lastCls}`}>{row.name}</td>
+              <td className={`text-center py-0.5 break-words ${lastCls}`}>{row.standard}</td>
+              <td className={`text-center py-0.5 break-words ${lastCls}`}>{row.actual}</td>
+              <td className={`text-center py-0.5 break-words ${lastCls}`}>{qualifiedText(row.result)}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+    {/* 表尾第二条横线：与表格底线（td border-b）留出间距，形成清晰双线 */}
+    <div style={{ borderTop: '1px solid black', marginTop: '3px' }} />
+  </div>
+);
+
 /**
- * 模板一：《质量保证证书》
- * 1:1 精确复刻标准工业质量证明书排版
- * 适用场景：来料检验 (IQC)、过程检验 (IPQC)、出货检验 (OQC)
+ * 模板B：《质量保证书 CERTIFICATE OF INSPECTION》纵向检验证书（docs/51）
+ *
+ * 1:1 复刻扫描件版式（浙江东明检测实验室式样）：
+ *   居中实验室抬头 → 双语标题 → 三列无边框字段网格（客户/订单/报告/地址/项目号/实发数量/
+ *   产品号/标准/材质/制造日期/品名/批号/抽样日期/印记/炉号/检测日期/规格/表面处理/制造商/
+ *   抽样计划）→ 尺寸检验 / 机械性能 / 化学成分 三段落表 → 授权/验证/盖章/日期签字行 →
+ *   EN10204 声明与备注 → Tel/Fax/Web/E-mail/ADD 联系页脚。
+ *
+ * 企业抬头 / 联系方式取自企业档案主数据；所有内容格未录入即留白，绝不放演示值。
  */
 export const QualityCertificateTemplate: React.FC<QualityCertificateTemplateProps> = ({ data }) => {
+  const profile = data.companyProfile;
   const elements = data.chemicalComposition?.elements || [];
   const mechanicalItems = data.mechanicalProperties?.items || [];
   const dimensions = data.dimensions || [];
 
   return (
-    <div className="bg-white text-black p-8 font-sans w-full max-w-[800px] mx-auto text-xs leading-tight print:p-0 print:max-w-none print:w-full print:text-[11px] select-text">
-      {/* 头部公司信息与标题 */}
-      <div className="border-b-2 border-black pb-3 mb-3 text-center relative">
-        <h1 className="text-xl font-bold tracking-wider mb-1">{data.companyProfile?.legalName ?? ''}</h1>
-        <h2 className="text-sm font-semibold tracking-wide text-gray-700 uppercase mb-2">
-          {data.companyProfile?.legalNameEn ?? ''}
-        </h2>
-        <div className="inline-block bg-slate-900 text-white px-4 py-1 rounded text-sm font-bold tracking-widest uppercase">
-          {data.inspectionTypeLabel || '质量保证证书 QUALITY CERTIFICATE'}
+    <div
+      className="bg-white text-black mx-auto font-sans select-text print:w-full"
+      style={{ width: '794px', maxWidth: '100%', fontSize: '10px', lineHeight: 1.75, padding: '10mm', position: 'relative' }}
+    >
+      {/* 左上角：三角图标 + 字标（纵向排列，文字抬头下方） */}
+      <div style={{ position: 'absolute', top: '8mm', left: '10mm', width: '90px' }}>
+        <img
+          src={letianTriangle}
+          alt="LETIAN FASTENERS logo"
+          style={{ width: '64px', height: '64px', objectFit: 'contain', display: 'block' }}
+        />
+        <img
+          src={letianWordmark}
+          alt="LETIAN FASTENERS"
+          style={{ height: '12px', width: 'auto', marginTop: '4px', display: 'block' }}
+        />
+      </div>
+      {/* 实验室抬头（企业档案；未维护即留白） */}
+      <div className="text-center">
+        <div className="font-bold" style={{ fontSize: '13px' }}>
+          {profile?.legalName !== undefined && profile.legalName !== ''
+            ? `${profile.legalName}检测实验室`
+            : ''}
         </div>
-        <div className="absolute right-0 top-0 text-right text-[11px] text-gray-600 space-y-0.5">
-          <div><span className="font-semibold text-black">编号/No:</span> {data.certNo}</div>
-          <div><span className="font-semibold text-black">日期/Date:</span> {data.issueDate}</div>
+        <div
+          className="font-bold inline-block border-b border-black px-4"
+          style={{ fontSize: '11.5px' }}
+        >
+          {profile?.legalNameEn !== undefined && profile.legalNameEn !== ''
+            ? `${profile.legalNameEn} TEST LABORATORY`
+            : ''}
+        </div>
+        <div className="font-bold mt-0.5" style={{ fontSize: '12.5px' }}>
+          质量保证书
+        </div>
+        <div className="font-semibold" style={{ fontSize: '10.5px' }}>
+          (CERTIFICATE OF INSPECTION)
         </div>
       </div>
 
-      {/* 第一部分：基本信息表格 */}
-      <table className="w-full border-collapse border border-black mb-3">
-        <tbody>
-          <tr>
-            <td className="border border-black bg-gray-100 p-1.5 font-bold w-24">订货单位/客户</td>
-            <td className="border border-black p-1.5">{data.customer}</td>
-            <td className="border border-black bg-gray-100 p-1.5 font-bold w-24">供货单位/产地</td>
-            <td className="border border-black p-1.5">{data.supplier}</td>
-          </tr>
-          <tr>
-            <td className="border border-black bg-gray-100 p-1.5 font-bold">合同/订单号</td>
-            <td className="border border-black p-1.5">{data.contractNo}</td>
-            <td className="border border-black bg-gray-100 p-1.5 font-bold">执行标准</td>
-            <td className="border border-black p-1.5">{data.standard}</td>
-          </tr>
-          <tr>
-            <td className="border border-black bg-gray-100 p-1.5 font-bold">产品名称</td>
-            <td className="border border-black p-1.5 font-semibold">{data.productName}</td>
-            <td className="border border-black bg-gray-100 p-1.5 font-bold">规格型号</td>
-            <td className="border border-black p-1.5 font-mono font-semibold">{data.specification}</td>
-          </tr>
-          <tr>
-            <td className="border border-black bg-gray-100 p-1.5 font-bold">材质/钢号</td>
-            <td className="border border-black p-1.5 font-mono">{data.steelGrade}</td>
-            <td className="border border-black bg-gray-100 p-1.5 font-bold">性能等级</td>
-            <td className="border border-black p-1.5">{data.performanceGrade}</td>
-          </tr>
-          <tr>
-            <td className="border border-black bg-gray-100 p-1.5 font-bold">炉号 / 批号</td>
-            <td className="border border-black p-1.5 font-mono">
-              {[data.heatNo, data.batchNo].filter((text) => text !== undefined && text !== '').join(' / ')}
-            </td>
-            <td className="border border-black bg-gray-100 p-1.5 font-bold">数量 / 重量</td>
-            <td className="border border-black p-1.5">{data.quantity}</td>
-          </tr>
-          <tr>
-            <td className="border border-black bg-gray-100 p-1.5 font-bold">表面处理</td>
-            <td className="border border-black p-1.5">{data.surfaceFinish}</td>
-            <td className="border border-black bg-gray-100 p-1.5 font-bold">检验类别</td>
-            <td className="border border-black p-1.5">
-              <span className="inline-block px-2 py-0.5 rounded bg-blue-50 text-blue-700 font-semibold border border-blue-200">
-                {data.inspectionType}
-              </span>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-
-      {/* 第二部分：化学成分分析表格（无真实实测项即整段不渲染，docs/34 §5.1） */}
-      {elements.length > 0 && (
-      <div className="mb-3">
-        <div className="font-bold text-xs bg-gray-800 text-white px-2 py-1 flex justify-between items-center">
-          <span>一、化学成分分析 (Chemical Composition %)</span>
-          <span className="text-[10px] font-normal text-gray-300">光谱直读仪分析检测</span>
+      {/* 三列字段网格（无边框，CN 标签 + 值 / EN 标签） */}
+      <div className="grid grid-cols-3 gap-x-6 mt-2 px-2 break-words">
+        <div className="space-y-0.5 min-w-0">
+          <GridCell cn="客户名称" en="PURCHASER" value={data.customer} />
+          <GridCell cn="客户地址" en="ADDRESS" value={data.customerAddress} />
+          <GridCell cn="项目号" en="CUST P/N" value={data.projectNo} />
+          <GridCell cn="制造日期" en="MFR. DATE" value={data.manufactureDate} />
+          <GridCell cn="抽样日期" en="Sampling Date" value={data.samplingDate} />
+          <GridCell cn="检测日期" en="Test Date" value={data.inspectionDate} />
+          <GridCell cn="制造商" en="MFR" value={data.manufacturer ?? profile?.legalName ?? ''} />
         </div>
-        <table className="w-full border-collapse border border-black text-center text-[11px]">
-          <thead>
-            <tr className="bg-gray-100">
-              <th className="border border-black p-1 w-20">元素 Element</th>
-              {elements.map((e) => (
-                <th key={e.element} className="border border-black p-1 font-bold font-mono">
-                  {e.element}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td className="border border-black p-1 font-bold bg-gray-50">标准值 Standard</td>
-              {elements.map((e) => (
-                <td key={e.element} className="border border-black p-1 font-mono text-[10px]">
-                  {e.standard}
-                </td>
-              ))}
-            </tr>
-            <tr className="font-semibold bg-white">
-              <td className="border border-black p-1 font-bold bg-gray-50">实测值 Actual</td>
-              {elements.map((e) => (
-                <td key={e.element} className="border border-black p-1 font-mono text-blue-900">
-                  {e.actual}
-                </td>
-              ))}
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      )}
-
-      {/* 第三部分：机械物理性能（无真实实测项即整段不渲染） */}
-      {mechanicalItems.length > 0 && (
-      <div className="mb-3">
-        <div className="font-bold text-xs bg-gray-800 text-white px-2 py-1 flex justify-between items-center">
-          <span>二、机械及物理力学性能 (Mechanical & Physical Properties)</span>
-          <span className="text-[10px] font-normal text-gray-300">万能材料试验机 / 洛氏硬度计</span>
+        <div className="space-y-0.5 min-w-0">
+          <GridCell cn="订单号码" en="PO#NO" value={data.orderNo ?? data.contractNo} />
+          <GridCell cn="短项目号" en="ITEM NO" value={data.shortProjectNo} />
+          <GridCell cn="标准" en="COMMODITY" value={data.standard} />
+          <GridCell cn="品名" en="Product Name" value={data.productName} />
+          <GridCell cn="印记" en="MARKING" value={data.marking} />
+          <GridCell cn="规格" en="SIZE" value={data.specification ?? data.spec} />
+          <GridCell cn="抽样计划" en="Sample Plan spec" value={data.samplingPlan} />
         </div>
-        <table className="w-full border-collapse border border-black text-[11px]">
-          <thead>
-            <tr className="bg-gray-100 text-center">
-              <th className="border border-black p-1.5 w-1/3">检验项目 (Test Item)</th>
-              <th className="border border-black p-1.5 w-1/4">标准要求 (Standard)</th>
-              <th className="border border-black p-1.5 w-1/4">实测结果 (Actual Result)</th>
-              <th className="border border-black p-1.5 w-16">判定 (Decision)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {mechanicalItems.map((item, idx) => (
-              <tr key={idx} className="text-center hover:bg-gray-50">
-                <td className="border border-black p-1.5 text-left font-medium">{item.name}</td>
-                <td className="border border-black p-1.5 font-mono">{item.standard}</td>
-                <td className="border border-black p-1.5 font-mono font-semibold text-blue-900">{item.actual}</td>
-                <td className="border border-black p-1.5">
-                  <span className="text-green-700 font-bold">{item.result}</span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="space-y-0.5 min-w-0">
+          <GridCell cn="报告编号" en="Report Code" value={data.certNo} />
+          <GridCell cn="实发数量" en="SHIP QTY" value={data.shippedQty ?? data.quantity} />
+          <GridCell cn="材质" en="MATERIAL TYPE" value={data.steelGrade ?? data.materialGrade} />
+          <GridCell cn="批号" en="LOT NO" value={data.batchNo} />
+          <GridCell cn="炉号" en="HEAT NO" value={data.heatNo} />
+          <GridCell cn="表面处理" en="Surface" value={data.surfaceFinish} />
+        </div>
       </div>
-      )}
 
-      {/* 第四部分：尺寸公差与几何特征检验（无真实实测项即整段不渲染） */}
+      {/* 双横线分隔（两条线留出间距，不重叠） */}
+      <div className="mt-2" style={{ height: '4px', borderTop: '1px solid black', borderBottom: '1px solid black' }} />
+
+      {/* 尺寸检验（无数据则不显示整段） */}
       {dimensions.length > 0 && (
-      <div className="mb-3">
-        <div className="font-bold text-xs bg-gray-800 text-white px-2 py-1 flex justify-between items-center">
-          <span>三、尺寸公差与几何特征检验 (Dimensional & Visual Inspection)</span>
-          <span className="text-[10px] font-normal text-gray-300">游标卡尺 / 螺纹量规 / 影像仪</span>
-        </div>
-        <table className="w-full border-collapse border border-black text-[11px]">
-          <thead>
-            <tr className="bg-gray-100 text-center">
-              <th className="border border-black p-1.5 w-1/3">测量项目 (Dimension)</th>
-              <th className="border border-black p-1.5 w-1/4">技术规范 (Tolerance)</th>
-              <th className="border border-black p-1.5 w-1/4">实测数据 (Measured)</th>
-              <th className="border border-black p-1.5 w-16">判定 (Decision)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {dimensions.map((dim, idx) => (
-              <tr key={idx} className="text-center hover:bg-gray-50">
-                <td className="border border-black p-1.5 text-left font-medium">{dim.name}</td>
-                <td className="border border-black p-1.5 font-mono">{dim.standard}</td>
-                <td className="border border-black p-1.5 font-mono font-semibold text-blue-900">{dim.actual}</td>
-                <td className="border border-black p-1.5">
-                  <span className="text-green-700 font-bold">{dim.result}</span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+        <SectionTable
+          title="尺寸检验 DIMENSIONAL INSPECTIONS 单位(mm)"
+          standard={data.standard ?? ''}
+          rows={dimensions.map((d) => ({ name: d.name, standard: d.standard, actual: d.actual, result: d.result }))}
+        />
       )}
 
-      {/* 第五部分：综合判定与签发签署 */}
-      <div className="border border-black p-2.5 bg-gray-50 mb-3 relative">
-        <div className="flex justify-between items-start">
-          <div className="space-y-1 w-2/3">
-            <div className="font-bold text-xs flex items-center gap-2">
-              <span>综合检验判定结论 / Conclusion:</span>
-              <span className="px-3 py-0.5 bg-green-600 text-white font-bold rounded text-xs tracking-wider">
-                {data.overallDecision}
-              </span>
-            </div>
-            <div className="text-[10px] text-gray-700 leading-normal">
-              {data.notes}
-            </div>
-          </div>
+      {/* 机械性能（无数据则不显示整段） */}
+      {mechanicalItems.length > 0 && (
+        <SectionTable
+          title="机械性能 MECHANICAL PROPERTIES"
+          standard={data.standard ?? ''}
+          rows={mechanicalItems}
+          topGap={6}
+        />
+      )}
 
-          {/* 检验印章模拟 */}
-          <div className="border-2 border-red-600 rounded-full w-24 h-24 flex flex-col items-center justify-center text-red-600 font-bold text-[9px] leading-tight rotate-[-12deg] opacity-85 select-none pointer-events-none absolute right-6 -top-2">
-            <div className="text-[10px] border-b border-red-500 pb-0.5">{data.companyProfile?.qualityStamp ?? ''}</div>
-            <div>{data.overallDecision}</div>
-            <div className="text-[8px] font-mono mt-0.5">{data.issueDate}</div>
+      {/* 化学成分（无元素数据则不显示整段） */}
+      {elements.length > 0 && (
+        <div className="break-words" style={{ marginTop: 6 }}>
+          <div className="flex flex-wrap justify-between items-baseline gap-x-4 border-b border-gray-400 py-0.5">
+            <span className="font-bold break-words">
+              化学成分 CHEMICAL COMPOSITION%{' '}
+              <span className="font-normal">(除标明范围外，其余均为最大值. Maximum Value Or Range.)</span>
+            </span>
           </div>
+          <table className="w-full border-collapse mt-0.5 break-words">
+            <thead>
+              {/* 单行表头：炉号HeatNumber | C Si Mn P S Ni Cr... | 测试判定/(SAMPLE DETERMINANT) 两行 */}
+              <tr className="font-semibold text-center">
+                <td className="text-left pl-2 break-words">炉号HeatNumber</td>
+                {elements.map((e) => (
+                  <td key={e.element} className="break-words">{e.element}</td>
+                ))}
+                <td className="break-words">
+                  测试判定
+                  <br />
+                  (SAMPLE DETERMINANT)
+                </td>
+              </tr>
+            </thead>
+            <tbody>
+              {/* 第二行：标准值Specification + 各元素标准值；第三行：炉号 + 各元素实测值；判定列纵向合并 */}
+              <tr>
+                <td className="pl-2 py-0.5 break-words">标准值Specification</td>
+                {elements.map((e) => (
+                  <td key={e.element} className="text-center py-0.5 break-words">
+                    {e.standard}
+                  </td>
+                ))}
+                <td rowSpan={2} className="text-center py-0.5 border-b border-black align-middle break-words">
+                  合格(Qualified)
+                </td>
+              </tr>
+              <tr>
+                <td className="pl-2 py-0.5 border-b border-black break-words">{data.heatNo}</td>
+                {elements.map((e) => (
+                  <td key={e.element} className="text-center py-0.5 border-b border-black break-words">
+                    {e.actual}
+                  </td>
+                ))}
+              </tr>
+            </tbody>
+          </table>
+          {/* 表尾第二条横线：与表格底线（td border-b）留出间距，形成清晰双线 */}
+          <div style={{ borderTop: '1px solid black', marginTop: '3px' }} />
+        </div>
+      )}
+
+      {/* 签字行：Authorization / Verification / Sample Stamp / Date */}
+      <div className="grid grid-cols-4 gap-4 mt-8 px-6 text-center">
+        <div>
+          <div className="border-b border-black h-9 pb-1 font-semibold flex items-end justify-center">
+            {data.approver ?? ''}
+          </div>
+          <div className="mt-1">Authorization</div>
+        </div>
+        <div>
+          <div className="border-b border-black h-9 pb-1 font-semibold flex items-end justify-center">
+            {data.reviewer ?? data.inspector ?? ''}
+          </div>
+          <div className="mt-1">Verification</div>
+        </div>
+        <div>
+          <div className="border-b border-black h-9 pb-1 font-semibold flex items-end justify-center">
+            {profile?.qualityStamp ?? ''}
+          </div>
+          <div className="mt-1">Sample Stamp</div>
+        </div>
+        <div>
+          <div className="border-b border-black h-9 pb-1 font-semibold flex items-end justify-center">
+            {data.issueDate ?? ''}
+          </div>
+          <div className="mt-1">Date</div>
         </div>
       </div>
 
-      {/* 签字栏 */}
-      <div className="grid grid-cols-4 gap-2 pt-2 border-t border-black text-center text-[11px]">
+      {/* 声明与备注（扫描件固定条款原文保留） */}
+      <div className="mt-2 px-2 break-words" style={{ fontSize: '9.5px' }}>
+        <div>This Lot fit the demands of EN10204 3.1</div>
+        <div>声明：该报告除非获得实验室书面同意，证书或报告不得摘录、复制，但全部复制除外</div>
         <div>
-          <span className="text-gray-600 block">检验员 / Inspector:</span>
-          <span className="font-semibold text-black mt-1 block">{data.inspector}</span>
+          INSPECTION RESULT: SAMPLES TESTED CONFORM TO ALL OF SPECIFICATION AS ABOVE THIS REPORT
+          MUST NOT BE REPRODUCED EXCEPT IN FULL. WHENEVER TESTING DISCREPANCIES ARE DETECTED OR
+          DEPARTURES FROM DOCUMENTED POLICIES AND PROCEDURES OCCUR, THEY WILL BE SHOWN IN REMARK.
         </div>
-        <div>
-          <span className="text-gray-600 block">校对复核 / Reviewer:</span>
-          <span className="font-semibold text-black mt-1 block">{data.reviewer}</span>
-        </div>
-        <div>
-          <span className="text-gray-600 block">批准人 / Approver:</span>
-          <span className="font-semibold text-black mt-1 block">{data.approver}</span>
-        </div>
-        <div>
-          <span className="text-gray-600 block">签发盖章 / Seal:</span>
-          <span className="text-gray-400 mt-1 block">【检验专用章】</span>
+        <div className="mt-1">
+          <span className="font-semibold">备注 IN REMARK.</span>
+          {/* 备注内容 = 检验单填写的备注（inspectionNotes / cert_fields.remarks），不预置任何固定文案 */}
+          {data.remarks ?? data.notes ?? ''}
         </div>
       </div>
 
-      <div className="text-center text-[9px] text-gray-500 mt-3 print:mt-2">
-        * 本证书为工厂质量保证凭证，复印件未经本公司书面盖章确认无效。 (Page 1 of 1)
+      {/* 联系页脚（企业档案主数据；无值即留白） */}
+      <div className="border-t border-black mt-2 pt-1 px-2 break-words" style={{ fontSize: '9.5px' }}>
+        <div>
+          <span className="font-semibold">Tel: </span>
+          {profile?.phone ?? ''}
+          <span className="font-semibold ml-6">E-mail: </span>
+          {profile?.email ?? ''}
+        </div>
+        <div>
+          <span className="font-semibold">ADD: </span>
+          {profile?.address ?? ''}
+        </div>
       </div>
     </div>
   );

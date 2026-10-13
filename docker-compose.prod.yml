@@ -1,0 +1,139 @@
+# ==============================================================================
+# 乐天 QMS 生产部署编排（docs/08 §2 落地实现；与开发用 docker-compose.yml 互补）
+#
+# 使用方式：
+#   cp .env.example .env   # 填写 JWT_SECRET / DEFAULT_LOGIN_PASSWORD / DB_* 等
+#   docker compose -f docker-compose.prod.yml --env-file .env up -d --build
+#
+# 拓扑：
+#   浏览器 -> web(nginx:80) -> /api -> api(fastify:3100) -> postgres:5432
+#   桌面客户端(服务器设置) -------------------------> api:3100
+#   postgres 不对外发布端口，仅 compose 内网可达
+#
+# 首次启动顺序：postgres(healthy) -> migrate(一次性跑完 runner 登记的全部迁移) -> api -> web
+# ==============================================================================
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: letian-qms-postgres-prod
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-letian_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set}
+      POSTGRES_DB: ${DB_NAME:-letian_qms_db}
+      TZ: Asia/Shanghai
+    volumes:
+      # 独立卷名：与开发编排的 postgres_data（PG 14 实例）隔离，避免大版本数据目录混用
+      - postgres_prod_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-letian_user} -d ${DB_NAME:-letian_qms_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+      - letian
+
+  # 一次性迁移服务：与 api 同一镜像，跑完 runner.ts 登记的全部迁移后退出；
+  # api 以 service_completed_successfully 等待，保证启动时库结构已就绪
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    image: letian-qms-api:latest
+    container_name: letian-qms-migrate
+    restart: "no"
+    environment:
+      # 使用独立 DB_* 而不是 DATABASE_URL：生产密码含 @:#/? 等字符时无需 URL 编码
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME:-letian_qms_db}
+      DB_USER: ${DB_USER:-letian_user}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set}
+      # UAT/演示库初始化显式开关；默认关闭，防止误清空生产业务表
+      SEED_DEMO: ${SEED_DEMO:-false}
+    command:
+      - sh
+      - -c
+      - >
+        node node_modules/@letian/infrastructure/dist/migrations/runner.js up &&
+        if [ "$$SEED_DEMO" = "true" ]; then
+          node node_modules/@letian/infrastructure/dist/seeds/runner.js;
+        fi
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - letian
+
+  # 可选演示/验收数据由 migrate 服务的 SEED_DEMO=true 显式开启，确保 API 启动前完成初始化；
+  # 默认关闭，防止误执行会 TRUNCATE 业务表的种子 runner。
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    image: letian-qms-api:latest
+    container_name: letian-qms-api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3100
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME:-letian_qms_db}
+      DB_USER: ${DB_USER:-letian_user}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set}
+      # 必填：JWT 签名密钥，生产必须换成高强度随机值
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      # 过渡措施：接入企业 SSO 前，显式开启本地「用户名+口令」登录
+      # （auth.controller 在生产环境只注册 /login 的口令通道；
+      #   /users 名单、userId 直签、缺省演示身份均不放开）。
+      # 置为 false 后所有登录入口关闭，等待统一身份认证接入。
+      ENABLE_LOCAL_AUTH: ${ENABLE_LOCAL_AUTH:-false}
+      # ENABLE_LOCAL_AUTH=true 时的全员登录口令：生产必填，禁止使用默认值 123456
+      DEFAULT_LOGIN_PASSWORD: ${DEFAULT_LOGIN_PASSWORD:?DEFAULT_LOGIN_PASSWORD must be set}
+      # MES / ERP 集成（可选）：未配置 MES_DB_* 时保持同步关闭
+      MES_SYNC_ENABLED: ${MES_SYNC_ENABLED:-false}
+      MES_DB_HOST: ${MES_DB_HOST:-}
+      MES_DB_PORT: ${MES_DB_PORT:-3306}
+      MES_DB_NAME: ${MES_DB_NAME:-}
+      MES_DB_USER: ${MES_DB_USER:-}
+      MES_DB_PASSWORD: ${MES_DB_PASSWORD:-}
+      ERP_DB_HOST: ${ERP_DB_HOST:-}
+      ERP_DB_PORT: ${ERP_DB_PORT:-1433}
+      ERP_DB_NAME: ${ERP_DB_NAME:-}
+      ERP_DB_USER: ${ERP_DB_USER:-}
+      ERP_DB_PASSWORD: ${ERP_DB_PASSWORD:-}
+    ports:
+      # 桌面客户端「服务器设置」直连此端口；仅暴露 /api，不建议对公网开放
+      - "${API_PORT:-3100}:3100"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - letian
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    image: letian-qms-web:latest
+    container_name: letian-qms-web
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-80}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - letian
+
+volumes:
+  postgres_prod_data:
+    driver: local
+
+networks:
+  letian:
+    driver: bridge

@@ -19,17 +19,17 @@ import {
   mockAuthUsers,
   mockCategoryTree,
   mockPlans,
+  mockTestItems,
   withPlanDisplayFields,
   allocateMockPlanCode,
   mockEquipmentMappings,
   mockInterceptionRules,
   type MesEquipmentMapping,
 } from './data';
-// 计划版本号升位规则直接复用领域唯一口径（不复制第二份实现，避免离线演示与真实后端分叉）
-import { nextInspectionPlanVersionNo } from '@letian/domain';
 import {
   InspectionOrderSchema,
   CreateInspectionOrderRequestSchema,
+  UpdateInspectionHeaderRequestSchema,
   MRBReviewSchema,
   DisposeMRBResponseSchema,
   PendingDefectItemSchema,
@@ -45,7 +45,6 @@ import {
   LoginResponseSchema,
   type InspectionOrder,
   type InspectionPlan,
-  type InspectionPlanVersion,
   type MRBReview,
   type MRBDisposition,
   type PendingDefectItem,
@@ -55,7 +54,11 @@ import {
   // 检验环节 → 不合格来源分类的唯一口径（后端同源复用，docs/44 §1）
   inspectionTypeToFailCategory,
 } from '@letian/contracts';
-import { inspectionTypeMatchesGroup } from '../lib/inspectionTypes';
+import {
+  deriveInspectionStateLabel,
+  INSPECTION_STATE_OPTIONS,
+  inspectionTypeMatchesGroup,
+} from '../lib/inspectionTypes';
 
 // In-memory working copies for live updates
 const inspectionOrdersList: InspectionOrder[] = [...mockInspectionOrders];
@@ -296,8 +299,11 @@ export const handlers = [
     const inspectionTypes = url.searchParams.get('inspectionTypes');
     const status = url.searchParams.get('status');
     const statuses = url.searchParams.get('statuses');
+    const inspectionState = url.searchParams.get('inspectionState');
+    const inspectionStates = url.searchParams.get('inspectionStates');
     const inspectors = url.searchParams.get('inspectors');
     const supplierCodes = url.searchParams.get('supplierCodes');
+    const materialCodes = url.searchParams.get('materialCodes');
     const dateFrom = url.searchParams.get('dateFrom');
     const dateTo = url.searchParams.get('dateTo');
     const partner = url.searchParams.get('partner');
@@ -340,6 +346,29 @@ export const handlers = [
       filtered = filtered.filter((r) => r.status === status);
     }
 
+    // 「检验状态」派生语义筛选（inspectionState 单值 / inspectionStates 多选，两参数间为 AND），
+    // 与后端 toInspectionStateWhere 同一口径（docs 16 §5.1）：先按 status+overallDecision 派生
+    // 再比对 —— 不能按原始 status IN 过滤（「不合格」包含 COMPLETED + judgment=FAILED 等形态）。
+    const stateCodeToLabel: ReadonlyMap<string, string> = new Map(
+      INSPECTION_STATE_OPTIONS.map((o) => [o.value, o.label])
+    );
+    const singleState = (inspectionState ?? '').trim();
+    if (singleState !== '') {
+      const label = stateCodeToLabel.get(singleState);
+      filtered = filtered.filter(
+        (r) => label !== undefined && deriveInspectionStateLabel(r.status, r.overallDecision) === label
+      );
+    }
+    const multiStates = multi(inspectionStates);
+    if (multiStates.length > 0) {
+      const labels = multiStates
+        .map((s) => stateCodeToLabel.get(s))
+        .filter((v) => v !== undefined);
+      filtered = filtered.filter((r) =>
+        labels.includes(deriveInspectionStateLabel(r.status, r.overallDecision))
+      );
+    }
+
     // 检验人 / 供应商：多值 IN（按 id / 编码精确匹配）
     const multiInspectors = multi(inspectors);
     if (multiInspectors.length > 0) {
@@ -352,6 +381,11 @@ export const handlers = [
       filtered = filtered.filter(
         (r) => r.supplierCode !== undefined && multiSuppliers.includes(r.supplierCode)
       );
+    }
+    // 「物料」多选：material_code IN 精确匹配，与真实后端 materialCodes 参数同口径
+    const multiMaterials = multi(materialCodes);
+    if (multiMaterials.length > 0) {
+      filtered = filtered.filter((r) => multiMaterials.includes(r.materialCode));
     }
 
     // 日期范围：与真实后端一致按 createdAt 过滤（含起止当日）
@@ -455,6 +489,37 @@ export const handlers = [
     return HttpResponse.json(validated);
   }),
 
+  // 表头业务事实更新（`PATCH /inspections/{id}/header`，docs/47 §4.6 + docs/51 证书字段）：
+  // 与真实后端同口径 —— 显式下发的键才改写，certFields 整袋覆盖（空对象 = 清空为未设置）
+  http.patch('/api/v1/inspections/:id/header', async ({ params, request }) => {
+    const index = inspectionOrdersList.findIndex((r) => r.id === params.id);
+    if (index < 0) {
+      return problemResponse(404, 'NotFound', `检验单不存在: ${String(params.id)}`);
+    }
+    const parsed = UpdateInspectionHeaderRequestSchema.safeParse(await request.json());
+    if (!parsed.success) {
+      return problemResponse(400, 'ValidationError', '检验单表头更新请求体不合契约');
+    }
+    const body = parsed.data;
+    const record = inspectionOrdersList[index]!;
+    const updated = InspectionOrderSchema.parse({
+      ...record,
+      ...(body.furnaceHeatNo !== undefined
+        ? { furnaceHeatNo: body.furnaceHeatNo === '' ? undefined : body.furnaceHeatNo }
+        : {}),
+      ...(body.materialGrade !== undefined ? { materialGrade: body.materialGrade } : {}),
+      ...(body.techStandard !== undefined ? { techStandard: body.techStandard } : {}),
+      ...(body.inspectedDate !== undefined ? { inspectedDate: body.inspectedDate } : {}),
+      ...(body.certTemplate !== undefined ? { certTemplate: body.certTemplate } : {}),
+      ...(body.certFields !== undefined
+        ? { certFields: Object.keys(body.certFields).length === 0 ? undefined : body.certFields }
+        : {}),
+      updatedAt: new Date().toISOString(),
+    });
+    inspectionOrdersList[index] = updated;
+    return HttpResponse.json(updated);
+  }),
+
   http.post('/api/v1/inspections', async ({ request }) => {
     const body = await request.json();
     const validatedDto = CreateInspectionOrderRequestSchema.parse(body);
@@ -497,6 +562,9 @@ export const handlers = [
       ...(validatedDto.materialGrade !== undefined ? { materialGrade: validatedDto.materialGrade } : {}),
       ...(validatedDto.techStandard !== undefined ? { techStandard: validatedDto.techStandard } : {}),
       ...(validatedDto.inspectedDate !== undefined ? { inspectedDate: validatedDto.inspectedDate } : {}),
+      // 038 证书模板与字段袋（docs/51）：建单即落库，离线 Mock 同口径透传
+      ...(validatedDto.certTemplate !== undefined ? { certTemplate: validatedDto.certTemplate } : {}),
+      ...(validatedDto.certFields !== undefined ? { certFields: validatedDto.certFields } : {}),
       sampleQty: validatedDto.sampleQty,
       passQty: 0,
       failQty: 0,
@@ -532,8 +600,17 @@ export const handlers = [
   // 录入链路；判标复算仍在服务端领域层，Mock 只搬数据，不在这里替服务端下结论。
   http.post('/api/v1/inspections/:id/submit-measurements', async ({ params, request }) => {
     const body = (await request.json()) as {
-      items?: Array<{ itemCode: string; measuredVal?: number; measuredText?: string }>;
+      items?: Array<{
+        itemCode: string;
+        measuredVal?: number;
+        measuredText?: string;
+        isExempt?: boolean;
+        exemptReason?: string;
+      }>;
       isDraft?: boolean;
+      /** 检验员填写的合格 / 不合格数量（docs/21 §14）：与真实后端同口径随判定落库 */
+      passQty?: number;
+      failQty?: number;
     };
     const index = inspectionOrdersList.findIndex((r) => r.id === params.id);
     if (index < 0) {
@@ -544,8 +621,13 @@ export const handlers = [
     const items = (record.items ?? []).map((item) => {
       const hit = submitted.find((candidate) => candidate.itemCode === item.itemCode);
       if (hit === undefined) return item;
+      // 不解检（EXEMPT）：与领域 evaluateInspectionItem 的免检特例同口径 ——
+      // isExempt=true 单项恒判 EXEMPT，不计入合格率分母（v2.6.0 未结模块）
       return {
         ...item,
+        ...(hit.isExempt !== undefined ? { isExempt: hit.isExempt } : {}),
+        ...(hit.exemptReason !== undefined ? { exemptReason: hit.exemptReason } : {}),
+        ...(hit.isExempt === true ? { result: 'EXEMPT' as const } : {}),
         ...(hit.measuredVal !== undefined ? { measuredVal: hit.measuredVal } : {}),
         ...(hit.measuredText !== undefined ? { measuredText: hit.measuredText } : {}),
       };
@@ -553,8 +635,21 @@ export const handlers = [
     const updated = InspectionOrderSchema.parse({
       ...record,
       items,
-      // 首次录入实测值即进入检验中（与真实后端 recordMeasurementsAndJudge 的 PENDING -> INSPECTING 同口径）
-      status: record.status === 'PENDING' ? 'INSPECTING' : record.status,
+      // 首次录入实测值即进入检验中（与真实后端 recordMeasurementsAndJudge 同口径）：
+      // PENDING（新建单）与 RE_INSPECTING（MRB 返工回边后的复检轮次）都按状态机允许的边推进到 INSPECTING，
+      // 否则离线演示能续录、真实库报 ORDER_NOT_EDITABLE（见 docs/17 §7.9）。
+      status:
+        record.status === 'PENDING' || record.status === 'RE_INSPECTING'
+          ? 'INSPECTING'
+          : record.status,
+      // 检验员填写的合格 / 不合格数量随判定落库（与真实后端 recordMeasurementsAndJudge 同口径，docs/21 §14）；
+      // 草稿只暂存实测值、不做判定，也就不落数量。
+      ...(body.isDraft === true
+        ? {}
+        : {
+            ...(body.passQty !== undefined ? { passQty: body.passQty } : {}),
+            ...(body.failQty !== undefined ? { failQty: body.failQty } : {}),
+          }),
       updatedAt: new Date().toISOString(),
     });
     inspectionOrdersList[index] = updated;
@@ -632,6 +727,19 @@ export const handlers = [
       if (poolItem !== undefined) {
         poolItem.status = 'INITIATED';
         poolItem.mrbId = created.id;
+      }
+    } else {
+      // 幂等复用：按口径把「不合格数量」对齐源单 fail_qty（真实后端 triggerMrbReviewInTransaction 同口径，
+      // docs/21 §14）—— 建单与终判分属两次调用，数量不得停留在建单那一刻的中间态（那正是「显示成检测数」的来路）；
+      // fail_qty = 0 视为检验员未填写，保留现值，绝不回退成 0。
+      const failQty = updated.failQty ?? 0;
+      const existingIndex = mrbList.findIndex((m) => m.sourceOrderNo === updated.orderNo);
+      if (existingIndex >= 0 && failQty > 0 && mrbList[existingIndex]!.defectQty !== failQty) {
+        mrbList[existingIndex] = {
+          ...mrbList[existingIndex]!,
+          defectQty: failQty,
+          updatedAt: new Date().toISOString(),
+        };
       }
     }
 
@@ -873,6 +981,25 @@ export const handlers = [
     );
   }),
 
+  http.post('/api/v1/mrb/records/:id/customer-sign-off', async ({ params, request }) => {
+    const body = (await request.json().catch(() => ({}))) as {
+      customerName?: string;
+      signOffDocumentUrl?: string;
+      agreed?: boolean;
+    };
+    const target = mrbList.find((m) => m.id === params.id);
+    if (!target) return problemResponse(404, 'NotFoundError', `MRB记录不存在: ${String(params.id)}`);
+    if (target.status === 'DISPOSED' || target.status === 'REJECTED') {
+      return problemResponse(400, 'MRB_ALREADY_FINISHED', 'MRB评审已结束');
+    }
+    if (!body.agreed || !body.customerName?.trim() || !body.signOffDocumentUrl?.trim()) {
+      return problemResponse(400, 'CONCESSION_DOCUMENT_REQUIRED', '客户同意特采必须提交书面签核凭证');
+    }
+    target.concessionAttachmentUrl = body.signOffDocumentUrl.trim();
+    target.updatedAt = new Date().toISOString();
+    return HttpResponse.json(MRBReviewSchema.parse(withDerivedMrbFields(target, inspectorNameByOrderNo())));
+  }),
+
   // 2.5 提交最终处置结论（特采让步接收必须提供客户书面签核凭证）
   http.post('/api/v1/mrb/records/:id/disposition', async ({ params, request }) => {
     const body = (await request.json().catch(() => ({}))) as {
@@ -895,11 +1022,9 @@ export const handlers = [
         `处置方式非法: ${body.disposition ?? ''}（可选 ${MRB_DISPOSITIONS.join(' / ')}）`
       );
     }
-    const attachment = (body.concessionAttachmentUrl ?? '').trim();
     if (
       rawDisposition === 'CONCESSION' &&
-      attachment === '' &&
-      target.concessionAttachmentUrl === undefined
+      !target.concessionAttachmentUrl?.trim()
     ) {
       return problemResponse(400, 'ValidationError', '特采（让步接收）必须提供客户书面签核凭证');
     }
@@ -912,7 +1037,6 @@ export const handlers = [
 
     target.disposition = rawDisposition;
     if (reason !== '') target.dispositionNotes = reason;
-    if (attachment !== '') target.concessionAttachmentUrl = attachment;
     target.status = 'DISPOSED';
     target.disposedAt = now;
     target.disposedBy = '张强';
@@ -1053,6 +1177,33 @@ export const handlers = [
     return HttpResponse.json(validated);
   }),
 
+  // MES 外部追溯（生产任务 / 过程检验）：只读参考，离线 Mock 兜底
+  http.get('/api/v1/integration/mes/tasks', ({ request }) => {
+    const url = new URL(request.url);
+    const search = url.searchParams.get('search') || '';
+    const all = [
+      { id: 1, bill_no: 'SC-2026-0001', heat_number: 'HN-20260518-03', steel_mill: '沙钢', cutting_length: 1000, production_num: 5000, bill_date: '2026-05-18', materiel_code: 'MAT-BLT-109-M10', materiel_name: '全螺纹螺柱', materiel_spec: 'M10x50' },
+      { id: 2, bill_no: 'SC-2026-0002', heat_number: 'HN-20260601-07', steel_mill: '宝钢', cutting_length: 800, production_num: 3200, bill_date: '2026-06-01', materiel_code: 'MAT-BLT-109-M12', materiel_name: '全螺纹螺柱', materiel_spec: 'M12x60' },
+    ];
+    const items = all.filter(
+      (t) => search === '' || t.bill_no.includes(search) || t.heat_number.includes(search) || t.materiel_code.includes(search)
+    );
+    return HttpResponse.json({ page: 1, pageSize: 20, items });
+  }),
+
+  http.get('/api/v1/integration/mes/check-reports', ({ request }) => {
+    const url = new URL(request.url);
+    const search = url.searchParams.get('search') || '';
+    const all = [
+      { id: 1, bill_no: 'JC-2026-0001', bill_date: '2026-05-18', check_date: '2026-05-18', check_qty: 50, qualified_qty: 50, unqualified_qty: 0, is_qualified: 1, remarks: '', task_bill_no: 'SC-2026-0001', heat_number: 'HN-20260518-03', steel_mill: '沙钢', materiel_code: 'MAT-BLT-109-M10', materiel_name: '全螺纹螺柱', procedure_name: '冷镦', inspector_name: '李工' },
+      { id: 2, bill_no: 'JC-2026-0002', bill_date: '2026-06-01', check_date: '2026-06-01', check_qty: 30, qualified_qty: 28, unqualified_qty: 2, is_qualified: 0, remarks: '2件外观瑕疵', task_bill_no: 'SC-2026-0002', heat_number: 'HN-20260601-07', steel_mill: '宝钢', materiel_code: 'MAT-BLT-109-M12', materiel_name: '全螺纹螺柱', procedure_name: '滚丝', inspector_name: '王工' },
+    ];
+    const items = all.filter(
+      (r) => search === '' || r.bill_no.includes(search) || r.heat_number.includes(search) || (r.materiel_name || '').includes(search)
+    );
+    return HttpResponse.json({ page: 1, pageSize: 20, items });
+  }),
+
   // ==========================================
   // 5. MASTER DATA API
   // ==========================================
@@ -1078,6 +1229,17 @@ export const handlers = [
 
   http.get('/api/v1/master-data/categories', () => {
     return HttpResponse.json(mockCategoryTree);
+  }),
+
+  // 检验项目字典（ERP TestItem 镜像，迁移 037）：与真实后端同口径，
+  // ?stage=IQC|IPQC|OQC 按环节标志过滤（bBuy / bProduce / bConsign）
+  http.get('/api/v1/master-data/test-items', ({ request }) => {
+    const stage = new URL(request.url).searchParams.get('stage');
+    const flag =
+      stage === 'IQC' ? 'appliesToBuy' : stage === 'IPQC' ? 'appliesToProduce' : stage === 'OQC' ? 'appliesToConsign' : null;
+    return HttpResponse.json(
+      flag === null ? mockTestItems : mockTestItems.filter((item) => item[flag as keyof typeof item] === true)
+    );
   }),
 
   // 企业档案主数据（company_profile 单行，docs/35 §6）：
@@ -1129,9 +1291,11 @@ export const handlers = [
     const materialCategory =
       mockMaterials.find((material) => material.materialCode === materialCode)?.categoryCode ?? '';
 
-    const candidates = plansList.filter(
-      (plan) => plan.inspectionType === inspectionType && hasActiveVersion(plan)
-    );
+    // 039：质检类型多选 —— 命中条件为「请求类型 ∈ 方案适用类型全集」，
+    // inspectionTypes 缺省（老数据）时按 [inspectionType] 等价回落，与真实后端同口径
+    const coversType = (plan: InspectionPlan): boolean =>
+      (plan.inspectionTypes ?? [plan.inspectionType]).includes(inspectionType as typeof plan.inspectionType);
+    const candidates = plansList.filter((plan) => coversType(plan) && hasActiveVersion(plan));
     const plan =
       candidates.find((candidate) => candidate.materialCode === materialCode) ??
       candidates.find(
@@ -1165,6 +1329,7 @@ export const handlers = [
       planVersionId: version.id,
       versionNo: version.versionNo,
       inspectionType: plan.inspectionType,
+      inspectionTypes: plan.inspectionTypes ?? [plan.inspectionType],
       materialCode: plan.materialCode ?? materialCode,
       samplingScheme: version.samplingScheme,
       aqlLevel: version.aqlLevel,
@@ -1217,7 +1382,14 @@ export const handlers = [
       ) {
         return false;
       }
-      if (inspectionType !== '' && plan.inspectionType !== inspectionType) return false;
+      if (
+        inspectionType !== '' &&
+        !(plan.inspectionTypes ?? [plan.inspectionType]).includes(
+          inspectionType as typeof plan.inspectionType
+        )
+      ) {
+        return false;
+      }
       if (categoryCode !== '' && categoryByMaterial.get(plan.materialCode ?? '') !== categoryCode) {
         return false;
       }
@@ -1232,7 +1404,8 @@ export const handlers = [
     return HttpResponse.json({ total: filtered.length, page, pageSize, items, list: items });
   }),
 
-  // 新建方案：与后端一致，首个版本一律以草稿（DRAFT）落库，待审批后启用
+  // 新建方案：与后端一致（已删除「草稿 → 审批」链路）—— 首个版本直接以 ACTIVE 落库，
+  // 不再需要的方案由用户在方案列表「停用」
   http.post('/api/v1/plans', async ({ request }) => {
     const body = (await request.json().catch(() => ({}))) as Partial<InspectionPlan>;
     const planId = crypto.randomUUID();
@@ -1246,6 +1419,8 @@ export const handlers = [
       planCode,
       planName: body.planName ?? '未命名质检方案',
       inspectionType: body.inspectionType ?? 'IQC',
+      // 039：适用类型全集；缺省回落 [主类型]，与仓储 save 同口径
+      inspectionTypes: body.inspectionTypes ?? [body.inspectionType ?? 'IQC'],
       ...(body.materialCode != null && body.materialCode !== ''
         ? { materialCode: body.materialCode }
         : {}),
@@ -1254,7 +1429,8 @@ export const handlers = [
           id: crypto.randomUUID(),
           planId,
           versionNo: firstVersion?.versionNo ?? 'V1.0',
-          status: 'DRAFT',
+          // 保存即启用（产品口径：不再有待审批草稿）
+          status: 'ACTIVE',
           samplingScheme: firstVersion?.samplingScheme ?? 'GB_T_2828',
           aqlLevel: firstVersion?.aqlLevel ?? 'II',
           strictness: firstVersion?.strictness ?? 'NORMAL',
@@ -1278,10 +1454,9 @@ export const handlers = [
     return HttpResponse.json(withPlanDisplayFields(created), { status: 201 });
   }),
 
-  // 方案版本启停（审批）：与后端 TogglePlanVersionUseCase + 领域状态机同口径
-  //   1. ACTIVATE：目标版本转 ACTIVE，同方案其它 ACTIVE 版本自动转 INACTIVE（单激活态保证）；
-  //   2. 目标版本没有指标项时拒绝启用（避免建单时拿不到待检清单）；
-  //   3. DEACTIVATE 只接受当前为 ACTIVE 的版本，其余状态拒绝。
+  // 方案版本停用：与后端 TogglePlanVersionUseCase + 领域状态机同口径
+  //   1. DEACTIVATE 只接受当前为 ACTIVE 的版本，其余状态拒绝；
+  //   2. ACTIVATE 保留仅为兼容后端接口语义，前端「审批 / 启用」入口已删除。
   http.post('/api/v1/plans/versions/:versionId/status', async ({ request, params }) => {
     const versionId = String(params.versionId ?? '');
     const body = (await request.json().catch(() => ({}))) as { action?: string };
@@ -1323,58 +1498,119 @@ export const handlers = [
     return HttpResponse.json(withPlanDisplayFields(plan));
   }),
 
-  // 方案版本升版：与后端 UpgradePlanVersionUseCase 同口径 ——
-  //   1. 版本号省略时由服务端升位（直接复用领域规则 nextInspectionPlanVersionNo，不复制第二份实现）；
-  //   2. 指标项 / 抽样参数省略即沿用 URL 版本行；生效周期**不继承**（省略即长期有效）；
-  //   3. 领域守门：同一方案已有草稿时拒绝再造草稿（PLAN_DRAFT_ALREADY_EXISTS）、指标项为空拒绝。
-  http.post('/api/v1/plans/versions/:versionId/upgrade', async ({ request, params }) => {
-    const versionId = String(params.versionId ?? '');
-    const body = (await request.json().catch(() => ({}))) as Partial<InspectionPlanVersion>;
-    const plan = plansList.find((candidate) =>
-      (candidate.versions ?? []).some((version) => version.id === versionId)
+  // 方案 Excel 导入：离线 Mock 无法解析 xlsx 二进制（真实解析在服务端 lib/plan-import.ts），
+  // 按"不可用"如实返回 501，不伪造导入成功；与后端 EXPORTER_NOT_CONFIGURED 的诚实降级口径一致。
+  http.get('/api/v1/plans/import-template', () => {
+    return problemResponse(
+      501,
+      'NotImplemented',
+      '离线演示环境不提供导入模板下载，请连接真实后端（模板由服务端按当前主数据实时生成）'
     );
-    const source = plan?.versions?.find((version) => version.id === versionId);
-    if (plan === undefined || source === undefined) {
-      return problemResponse(404, 'NotFoundError', `未找到质检方案版本: ${versionId}`);
-    }
-    const existingDraft = (plan.versions ?? []).find((version) => version.status === 'DRAFT');
-    if (existingDraft !== undefined) {
-      return problemResponse(
-        400,
-        'ValidationFailed',
-        `PLAN_DRAFT_ALREADY_EXISTS: 方案 [${plan.planCode}] 已存在草稿版本 [${existingDraft.versionNo}]，禁止重复创建`
-      );
-    }
-    const items = body.items ?? source.items ?? [];
-    if (items.length === 0) {
-      return problemResponse(
-        400,
-        'ValidationFailed',
-        'PLAN_EMPTY_ITEMS: 创建草稿必须包含至少一个有效指标项'
-      );
-    }
-    const now = new Date().toISOString();
-    const draft: InspectionPlanVersion = {
-      id: crypto.randomUUID(),
-      planId: source.planId,
-      versionNo:
-        body.versionNo ??
-        nextInspectionPlanVersionNo((plan.versions ?? []).map((version) => version.versionNo)),
-      status: 'DRAFT',
-      samplingScheme: body.samplingScheme ?? source.samplingScheme,
-      aqlLevel: body.aqlLevel ?? source.aqlLevel,
-      strictness: body.strictness ?? source.strictness,
-      ...(body.effectiveStartDate !== undefined
-        ? { effectiveStartDate: body.effectiveStartDate }
-        : {}),
-      ...(body.effectiveEndDate !== undefined ? { effectiveEndDate: body.effectiveEndDate } : {}),
-      items,
-      createdBy: 'b2c3d4e5-f6a1-4b2c-9d3e-4f5a6b7c8d9e',
-      createdAt: now,
+  }),
+  http.post('/api/v1/plans/import', () => {
+    return problemResponse(
+      501,
+      'NotImplemented',
+      '离线演示环境不支持方案 Excel 导入（需要服务端解析并落库），请连接真实后端后重试'
+    );
+  }),
+
+  // ==========================================
+  // 6. DASHBOARD OVERVIEW (与真实 dashboard.getOverview 同结构)
+  // ==========================================
+  http.get('/api/v1/dashboard/overview', () => {
+    const stageOf = (type: string): 'iqc' | 'ipqc' | 'oqc' | null => {
+      const value = type.toUpperCase();
+      if (value === 'IQC') return 'iqc';
+      if (value.startsWith('IPQC')) return 'ipqc';
+      if (value.startsWith('OQC')) return 'oqc';
+      return null;
     };
-    plan.versions = [...(plan.versions ?? []), draft];
-    plan.updatedAt = now;
-    return HttpResponse.json(withPlanDisplayFields(plan), { status: 201 });
+
+    const statusCounts: Record<string, number> = {};
+    for (const order of inspectionOrdersList) {
+      statusCounts[order.status] = (statusCounts[order.status] ?? 0) + 1;
+    }
+
+    const totalInspections = inspectionOrdersList.length;
+    const passedCount = (statusCounts.PASSED ?? 0) + (statusCounts.COMPLETED ?? 0);
+    const passRate = totalInspections > 0 ? Number(((passedCount / totalInspections) * 100).toFixed(2)) : 0;
+    const stageDistribution = { iqcCount: 0, ipqcCount: 0, oqcCount: 0 };
+    for (const order of inspectionOrdersList) {
+      const stage = stageOf(order.inspectionType);
+      if (stage === 'iqc') stageDistribution.iqcCount += 1;
+      else if (stage === 'ipqc') stageDistribution.ipqcCount += 1;
+      else if (stage === 'oqc') stageDistribution.oqcCount += 1;
+    }
+
+    const dateKey = (value: string | undefined): string => {
+      if (value === undefined || value === '') return '';
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? value.slice(0, 10) : date.toISOString().slice(0, 10);
+    };
+    const shiftDate = (value: string, offset: number): string => {
+      const date = new Date(`${value}T00:00:00Z`);
+      date.setUTCDate(date.getUTCDate() + offset);
+      return date.toISOString().slice(0, 10);
+    };
+    const orderDates = inspectionOrdersList.map((order) => dateKey(order.createdAt)).filter(Boolean).sort();
+    const todayKey = new Date().toISOString().slice(0, 10);
+    const endDate = orderDates.length > 0 && orderDates[orderDates.length - 1] < todayKey
+      ? orderDates[orderDates.length - 1]
+      : todayKey;
+    const trendDates = Array.from({ length: 7 }, (_, index) => shiftDate(endDate, index - 6));
+    const trendSeries = trendDates.map((date) => {
+      const dayOrders = inspectionOrdersList.filter((order) => dateKey(order.createdAt) === date);
+      const dayPassed = dayOrders.filter((order) => order.status === 'PASSED' || order.status === 'COMPLETED').length;
+      const dayIqc = dayOrders.filter((order) => stageOf(order.inspectionType) === 'iqc').length;
+      const dayIpqc = dayOrders.filter((order) => stageOf(order.inspectionType) === 'ipqc').length;
+      const dayOqc = dayOrders.filter((order) => stageOf(order.inspectionType) === 'oqc').length;
+      return {
+        date,
+        iqcCount: dayIqc,
+        ipqcCount: dayIpqc,
+        oqcCount: dayOqc,
+        passRate: dayOrders.length > 0 ? Number(((dayPassed / dayOrders.length) * 100).toFixed(2)) : 0,
+      };
+    });
+
+    const defectCounts = new Map<string, { category: string; count: number }>();
+    for (const order of inspectionOrdersList) {
+      for (const item of order.items ?? []) {
+        if (item.result !== 'FAILED') continue;
+        const defectName = item.name || item.itemCode || '未命名缺陷';
+        const current = defectCounts.get(defectName) ?? { category: item.metricCategory ?? 'DIMENSION', count: 0 };
+        defectCounts.set(defectName, { ...current, count: current.count + 1 });
+      }
+    }
+    const topDefects = Array.from(defectCounts.entries())
+      .map(([defectName, value]) => ({ defectName, category: value.category, count: value.count }))
+      .sort((a, b) => b.count - a.count || a.defectName.localeCompare(b.defectName))
+      .slice(0, 8);
+
+    const recentActivities = [...inspectionOrdersList]
+      .sort((a, b) => new Date(b.updatedAt ?? b.createdAt ?? 0).getTime() - new Date(a.updatedAt ?? a.createdAt ?? 0).getTime())
+      .slice(0, 8)
+      .map((order) => ({
+        id: order.id,
+        type: 'INSPECTION',
+        title: `${order.orderNo} · ${order.materialName}`,
+        status: order.status,
+        timestamp: order.updatedAt ?? order.createdAt ?? new Date(0).toISOString(),
+      }));
+
+    return HttpResponse.json({
+      totalInspections,
+      passRate,
+      pendingCount: statusCounts.PENDING ?? 0,
+      inspectingCount: statusCounts.INSPECTING ?? 0,
+      failedCount: statusCounts.FAILED ?? 0,
+      inMRBCount: mrbList.filter((record) => record.status === 'PENDING_REVIEW' || record.status === 'UNDER_REVIEW').length,
+      stageDistribution,
+      trendSeries,
+      topDefects,
+      recentActivities,
+    });
   }),
 
   // ==========================================

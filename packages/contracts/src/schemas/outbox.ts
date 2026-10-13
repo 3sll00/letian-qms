@@ -4,7 +4,7 @@ import { extendZodWithOpenApi } from '@asteasolutions/zod-to-openapi';
 extendZodWithOpenApi(z);
 
 export const OutboxStatusEnum = z
-  .enum(['PENDING', 'PUBLISHED', 'FAILED'])
+  .enum(['PENDING', 'PUBLISHED', 'FAILED', 'DEAD_LETTER'])
   .openapi('OutboxStatus');
 
 export const OutboxEventSchema = z

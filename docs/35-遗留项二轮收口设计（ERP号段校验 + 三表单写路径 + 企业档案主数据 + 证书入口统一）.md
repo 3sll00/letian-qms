@@ -14,7 +14,7 @@
 | **M2** | 2023 两条历史行是否补号 | **口径固化 + 守门**：仍不补号（`NULL`），台账渲染 `—`（探针已守）；把「拿到对账单后如何回填」写成**可执行步骤**（复用留痕表，无需新迁移），并纳入扫库校验脚本的「允许为 NULL 的说明」白名单 | 本设计 §3 |
 | **M3** | IQC / 过程检 / 出货检三个录入表单写路径仍是 `alert` | **改（范围核实后收窄）**：过程检三视图**早已真写**（`IpqcViews.handleSubmitInspect` → `submit-measurements` + `status`）；本轮打通 **IQC 与 OQC** 两个表单的写路径，并撤除父页 `alert` 假成功 | 本设计 §4 |
 | **M4** | 制造证书「质量负责人签核」无数据源 | **改**：新增**签核动作本身**（迁移 029 三列 `approver_id / approver_name / approved_at` + `POST /inspections/{id}/approve` + 表单页头「质量负责人签核」按钮）→ 证书读真实签核人，未签核才留白 | 本设计 §5 |
-| **M5** | 质量证书「签发主体 / 供货单位 / 产地」无企业档案主数据（现为模板硬编码常量） | **改**：迁移 029 建 **`company_profile` 单行表**，把两处模板里已存在的硬编码抬头常量**迁入**主数据（种子初始行，值不变），新增 `GET/PUT /master-data/company-profile` + 主数据页「企业档案」Tab；模板抬头 / 印章 / 供货单位·产地一律读主数据 | 本设计 §6 |
+| **M5** | 质量证书「签发主体 / 供货单位 / 产地」无企业档案主数据（现为模板硬编码常量） | **改**：迁移 029 建 **`company_profile` 单行表**，把两处模板里已存在的硬编码抬头常量**迁入**主数据（种子初始行，值不变），新增 `GET/PUT /master-data/company-profile` + 企业档案维护页（**该页已于 2026-09-23 随【ERP基础档案】模块一并无条件下线**：接口与主数据保留、证书读取口径不变，调整须经运维 / 种子，见 `docs/实施进度` §47）；模板抬头 / 印章 / 供货单位·产地一律读主数据 | 本设计 §6 |
 | **M6** | 证书实测分段可见性依赖工单实测值（现状：静默不渲染） | **改（改为显式解释）**：证书弹窗新增非打印提示条，列出「本单未录入实测值、故不打印」的分段；打印区口径不变（绝不打印未发生的检验结果） | 本设计 §7 |
 | **M7** | 委外表单「新建」路径 UI 不可达 | **改**：`OutsourceList` 顶部新增「新建委外检验单」入口；表单内新增**物料编码选择器**（`GET /master-data/inventory`），物料编码由只读派生改为可维护状态 | 本设计 §8 |
 | **M8** | IQC / OQC 录入表单自建证书对象仍用旧键名 | **改**：两个表单的 `handleOpenCert` 一律改走 `certificateDataService.buildIqcCertificateData` / `buildOqcCertificateData`，删除手搓对象（键名与模板读取口径由服务统一） | 本设计 §9 |
@@ -93,7 +93,7 @@
 | 表结构 | 单行表（`profile_id boolean PRIMARY KEY DEFAULT true CHECK (profile_id)`）：`legal_name` / `legal_name_en` / `short_name` / `address` / `origin_place` / `phone` / `email` / `quality_stamp` / `updated_by` / `updated_at` |
 | 初始值 | 由**现有模板里的硬编码常量迁移而来**（`宁波乐天紧固件制造有限公司` / `NINGBO LETIAN FASTENERS MANUFACTURING CO., LTD.` / 印章 `宁波乐天质检`），不新增任何未经确认的信息；`address` / `origin_place` / `phone` / `email` 留空等业务填写 |
 | API | `GET /master-data/company-profile`（无行返回 `null`）、`PUT /master-data/company-profile`（upsert，`updated_by` = 当前登录用户） |
-| Web | 主数据页新增「企业档案」Tab（表单读写 + 保存回执）；证书调用侧统一经 `loadCompanyProfile()`（模块级缓存）取一次 |
+| Web | 新增企业档案维护页（表单读写 + 保存回执；**该页已于 2026-09-23 随【ERP基础档案】模块下线删除**，见 `docs/实施进度` §47）；证书调用侧统一经 `loadCompanyProfile()`（模块级缓存）取一次 |
 | 证书口径 | 质量证书：抬头中文/英文、印章文字、`供货单位/产地` 单元格 = 主数据 `legal_name` + `origin_place`（OQC 出厂场景的供货单位即本企业）；IQC 的供货单位仍取**供应商主数据**（真实来源不同，不混用）；制造证书：抬头中文/英文读主数据 |
 | 缺失行为 | 主数据为空 → 单元格留白（**不回落硬编码常量**），界面提示「企业档案未维护」 |
 
@@ -182,6 +182,10 @@
 - **M9 证书入口**：来料 / 过程检 / 委外 / 出货**四个台账**操作列均含「证书」，点击可开证书且弹窗含本行单号；弹窗出现非打印提示条「提示：本单未录入实测值：化学成分、力学性能、尺寸与外观 —— 证书不打印该分段」
 
 **离线 Mock 同步实测 4/4**（`pnpm verify:leftovers2:mock` → MSW 浏览器冒烟 `scripts/testing/leftovers2-mock-probe.cjs`，本轮已从 `scripts/logs/` 提升为仓库内门禁）
+
+> **2026-09-23 说明**：下列前两条 UI 断言随**企业档案维护页下线**而失效（页面 / 菜单已删除，见 `docs/实施进度` §47）；
+> Mock 路由本身仍在（`mocks/handlers.ts` 与真实 API 同形）—— `leftovers2-mock-probe.cjs` 改为断言「侧边栏无该入口 + `GET` 路由仍返回 `mockCompanyProfile`」，
+> `PUT` 路由保留但暂无调用方；真实库探针保留企业档案的**接口级**断言（GET 已维护行 / 非法邮箱 400 / 收尾种子值复核）。
 
 - `GET /master-data/company-profile`：企业档案页回显 `mockCompanyProfile` 法定名称（值与种子同源）
 - `PUT /master-data/company-profile`：保存出现绿字回执；`updated_by` = 页面顶栏当前 Mock 登录身份（服务端会话口径，客户端不可自称）；清空字段再保存生效

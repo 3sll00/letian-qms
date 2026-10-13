@@ -11,16 +11,14 @@ import { api, errorMessage } from '../../lib/api';
 import { INSPECTION_TYPES } from '../../lib/inspectionTypes';
 import { planPeriodHint, planPeriodLabel } from '../../lib/planMatch';
 import {
-  approvalTargetVersion,
+  canDeactivatePlan,
   effectiveVersion,
-  planVersionActionVisibility,
-  type PlanVersionActionVisibility,
 } from '../../lib/planVersionActions';
 import { CreatePlanModal } from './CreatePlanModal';
+import { ImportPlanModal } from './ImportPlanModal';
 
 import planKpiTotal from '../../assets/plan_kpi_total.png';
 import planKpiEnabled from '../../assets/plan_kpi_enabled.png';
-import planKpiPending from '../../assets/plan_kpi_pending.png';
 import planKpiProducts from '../../assets/plan_kpi_products.png';
 import planImportIcon from '../../assets/plan_import_icon.png';
 
@@ -54,6 +52,8 @@ interface PlanRow {
   /** 适用产品：物料专属方案取接口派生的 materialName（缺失回退物料编码），分类通用方案取 categoryName */
   applicableProduct: string;
   inspectionType: InspectionType;
+  /** 适用检验类型全集（039 多选）：主类型居首；缺省数据按 [inspectionType] 回落 */
+  inspectionTypes: InspectionType[];
   itemCount: number;
   status: PlanStatus;
   /** 生效周期提示：空串 = 周期覆盖今天；非空时在状态徽标下补一行小字（未生效 / 已过期） */
@@ -61,8 +61,8 @@ interface PlanRow {
   creator: string;
   updatedAt: string;
   raw: InspectionPlan;
-  /** 操作列按钮可见性：由版本集合推导，与「审批 / 停用 / 启用」实际作用的目标版本同源（见 lib/planVersionActions） */
-  actions: PlanVersionActionVisibility;
+  /** 操作列【停用】是否可点：存在 ACTIVE 版本才可停用（口径见 lib/planVersionActions） */
+  canDeactivate: boolean;
 }
 
 /** 界面筛选条件（草稿态与已提交态共用同一结构） */
@@ -204,6 +204,7 @@ function toPlanRow(plan: InspectionPlan): PlanRow {
     planName: plan.planName,
     applicableProduct: applicableProductOf(plan),
     inspectionType: plan.inspectionType,
+    inspectionTypes: plan.inspectionTypes ?? [plan.inspectionType],
     itemCount: version?.items?.length ?? 0,
     // 方案状态由接口按 versions[].status 派生（契约 PlanStatusEnum）；字段缺失时按已停用兜底
     status: plan.status ?? 'DISABLED',
@@ -213,7 +214,7 @@ function toPlanRow(plan: InspectionPlan): PlanRow {
     creator: version?.createdByName ?? '-',
     updatedAt: formatDateTime(plan.updatedAt ?? version?.createdAt),
     raw: plan,
-    actions: planVersionActionVisibility(plan),
+    canDeactivate: canDeactivatePlan(plan),
   };
 }
 
@@ -235,6 +236,7 @@ export function PlansPage() {
 
   const [detailPlan, setDetailPlan] = useState<InspectionPlan | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
 
   // 参照数据（存货分类）：只用于「产品分类」筛选下拉的取值域。
   // 表格里的物料名 / 分类名 / 创建人姓名一律由接口读时派生，前端不再拉主数据做名称映射。
@@ -321,58 +323,20 @@ export function PlansPage() {
   };
 
   /**
-   * 复制方案：以当前生效版本的指标项为模板，通过 POST /plans 生成新方案副本。
-   *
-   * 方案编码**不在这里拼**（原实现是 `{原编码}-C{时间戳后 6 位}`：既不是当日流水、又可能撞号），
-   * 一律交给服务端按 `QP-{YYYYMMDD}-{NNN}` 取号（TBD-11），并把服务端真正落库的编码回显给用户。
-   */
-  const handleCopy = async (row: PlanRow) => {
-    const version = effectiveVersion(row.raw);
-    if (!version || version.items.length === 0) {
-      alert(`方案 [${row.planCode}] 当前版本没有可复制的指标项，请先在方案详情中配置`);
-      return;
-    }
-    try {
-      const copied = await api.post<InspectionPlan>('/plans', {
-        planName: `${row.planName}-副本`,
-        inspectionType: row.inspectionType,
-        ...(row.raw.materialCode != null && row.raw.materialCode !== ''
-          ? { materialCode: row.raw.materialCode }
-          : {}),
-        versions: [
-          {
-            versionNo: 'V1.0',
-            samplingScheme: version.samplingScheme,
-            aqlLevel: version.aqlLevel,
-            strictness: version.strictness,
-            items: version.items,
-          },
-        ],
-      });
-      alert(`已复制质检方案：${copied.planCode}（草稿态，待审批后启用）`);
-      setRefreshToken((token) => token + 1);
-    } catch (err) {
-      alert(`复制方案失败：${errorMessage(err)}`);
-    }
-  };
-
-  /**
-   * 方案版本启停（POST /plans/versions/:versionId/status）：
-   * 审批 = 启用草稿版本（ACTIVATE），停用 = 下架当前生效版本（DEACTIVATE）。
+   * 停用方案（POST /plans/versions/:versionId/status，action=DEACTIVATE）：
+   * 把当前生效（ACTIVE）版本置为 INACTIVE —— 方案库不再走「草稿 → 审批」，
+   * 新建/导入的方案即启用，不合适时在这里直接停用，停用后不再参与检验录入的自动匹配。
    *
    * 一律等真实接口返回后再刷新列表与 KPI，不做本地假改状态 ——
-   * 界面上的「已启用 / 待审批 / 已停用」必须始终等于库中的 version_status 派生结果。
+   * 界面上的「已启用 / 已停用」必须始终等于库中的 version_status 派生结果。
    */
-  const toggleVersion = async (row: PlanRow, action: 'ACTIVATE' | 'DEACTIVATE') => {
-    // 审批必须打到待审批草稿（见 approvalTargetVersion）；停用只打当前生效版本
-    const version = action === 'ACTIVATE' ? approvalTargetVersion(row.raw) : effectiveVersion(row.raw);
+  const deactivatePlan = async (row: PlanRow) => {
+    const version = effectiveVersion(row.raw);
     if (version === undefined || version.id === undefined) {
-      alert(`方案 [${row.planCode}] 缺少版本行标识，无法启停，请刷新页面后重试`);
+      alert(`方案 [${row.planCode}] 缺少版本行标识，无法停用，请刷新页面后重试`);
       return;
     }
-    const versionId = version.id;
     if (
-      action === 'DEACTIVATE' &&
       !window.confirm(
         `确认停用方案 [${row.planCode}] 的版本 ${version.versionNo}？停用后该方案不再参与检验录入的自动匹配。`
       )
@@ -380,39 +344,11 @@ export function PlansPage() {
       return;
     }
     try {
-      await api.post(`/plans/versions/${versionId}/status`, { action });
-      alert(
-        action === 'ACTIVATE'
-          ? `方案 [${row.planCode}] 版本 ${version.versionNo} 已启用，现可参与检验录入的自动匹配`
-          : `方案 [${row.planCode}] 版本 ${version.versionNo} 已停用，不再参与自动匹配`
-      );
+      await api.post(`/plans/versions/${version.id}/status`, { action: 'DEACTIVATE' });
+      alert(`方案 [${row.planCode}] 版本 ${version.versionNo} 已停用，不再参与自动匹配`);
       setRefreshToken((token) => token + 1);
     } catch (err) {
-      alert(`${action === 'ACTIVATE' ? '启用' : '停用'}方案版本失败：${errorMessage(err)}`);
-    }
-  };
-
-  /**
-   * 升级版本（POST /plans/versions/:versionId/upgrade）：
-   * 以当前生效版本为模板，给该方案再产出一个草稿版本 ——
-   * 版本号由服务端升位（如 v2.5 → v2.6）、指标项与抽样参数沿用当前版本、生效周期不继承（默认长期有效）。
-   * 与启停同一口径：等接口真实返回后再刷新列表与 KPI，不做本地假改状态。
-   */
-  const upgradeVersion = async (row: PlanRow) => {
-    const version = effectiveVersion(row.raw);
-    if (version?.id === undefined) {
-      alert(`方案 [${row.planCode}] 缺少版本行标识，无法升级版本，请刷新页面后重试`);
-      return;
-    }
-    try {
-      const updated = await api.post<InspectionPlan>(`/plans/versions/${version.id}/upgrade`, {});
-      const draft = (updated.versions ?? []).find((candidate) => candidate.status === 'DRAFT');
-      alert(
-        `方案 [${row.planCode}] 已生成草稿版本 ${draft?.versionNo ?? ''}（继承当前版本的指标项与抽样参数，生效周期未设置＝长期有效），待质量主管审批后启用`
-      );
-      setRefreshToken((token) => token + 1);
-    } catch (err) {
-      alert(`升级方案版本失败：${errorMessage(err)}`);
+      alert(`停用方案失败：${errorMessage(err)}`);
     }
   };
 
@@ -428,7 +364,7 @@ export function PlansPage() {
         </div>
         <div className="flex items-center gap-3">
           <button
-            onClick={() => alert('请选择要导入的质检方案文件 (.xlsx, .json)')}
+            onClick={() => setIsImportModalOpen(true)}
             className="h-11 flex items-center gap-2 px-5 bg-white border border-[#E2E8F0] rounded-[10px] text-[14px] font-medium text-[#1E293B] hover:bg-slate-50 transition-colors"
           >
             <img src={planImportIcon} alt="" className="w-[18px] h-[18px] object-contain" />
@@ -532,8 +468,8 @@ export function PlansPage() {
         </div>
       </div>
 
-      {/* KPI 指标卡 */}
-      <div className="grid grid-cols-4 gap-4">
+      {/* KPI 指标卡（方案不再有「草稿 → 审批」链路，待审批指标同步下线） */}
+      <div className="grid grid-cols-3 gap-4">
         <div className="bg-white rounded-xl border border-[#F1F5F9] p-5 flex items-center gap-4">
           <img src={planKpiTotal} alt="质检方案总数" className="w-[54px] h-[54px] object-contain shrink-0" />
           <div className="flex flex-col justify-center">
@@ -550,16 +486,6 @@ export function PlansPage() {
             <span className="text-[14px] text-[#64748B]">已启用</span>
             <span className="text-2xl font-bold text-[#1E293B] tracking-tight mt-0.5">
               {stats === null ? '-' : stats.enabled}
-            </span>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-xl border border-[#F1F5F9] p-5 flex items-center gap-4">
-          <img src={planKpiPending} alt="待审批" className="w-[54px] h-[54px] object-contain shrink-0" />
-          <div className="flex flex-col justify-center">
-            <span className="text-[14px] text-[#64748B]">待审批</span>
-            <span className="text-2xl font-bold text-[#1E293B] tracking-tight mt-0.5">
-              {stats === null ? '-' : stats.pending}
             </span>
           </div>
         </div>
@@ -642,8 +568,12 @@ export function PlansPage() {
                         <span
                           className="inline-block px-2.5 py-1 rounded-md"
                           style={{ backgroundColor: typeBadge.bg, color: typeBadge.text }}
+                          title={row.inspectionTypes
+                            .map((type) => TYPE_BADGES[type]?.label ?? type)
+                            .join('、')}
                         >
                           {typeBadge.label}
+                          {row.inspectionTypes.length > 1 ? ` +${row.inspectionTypes.length - 1}` : ''}
                         </span>
                       </td>
 
@@ -692,50 +622,16 @@ export function PlansPage() {
                           >
                             编辑
                           </button>
-                          {/* 操作列可见性统一取 row.actions（lib/planVersionActions），
-                              保证「按钮出现 ⟺ 动作真能执行」：已有草稿时隐藏【升级版本】，
-                              存在 ACTIVE 版本时才给【停用】，全部停用才给【启用】 */}
-                          {row.actions.upgrade && (
+                          {/* 操作列只保留「编辑」与「停用」：【停用】存在 ACTIVE 版本才给出，
+                              与 row.canDeactivate（lib/planVersionActions）同口径，保证按钮点了真能生效 */}
+                          {row.canDeactivate && (
                             <button
-                              onClick={() => void upgradeVersion(row)}
-                              className="text-[#2B5AED] hover:underline"
-                            >
-                              升级版本
-                            </button>
-                          )}
-                          {/* 审批入口：只要存在待审批草稿就给按钮 —— 含「已启用 + 有新草稿」这一升版后的常态
-                              （方案级状态仍是已启用，但草稿必须能被批掉，否则升版链路在界面上走不通） */}
-                          {row.actions.approve && (
-                            <button
-                              onClick={() => void toggleVersion(row, 'ACTIVATE')}
-                              className="text-[#2B5AED] hover:underline"
-                            >
-                              审批
-                            </button>
-                          )}
-                          {row.actions.deactivate && (
-                            <button
-                              onClick={() => void toggleVersion(row, 'DEACTIVATE')}
+                              onClick={() => void deactivatePlan(row)}
                               className="text-[#2B5AED] hover:underline"
                             >
                               停用
                             </button>
                           )}
-                          {/* 已停用行没有 ACTIVE 版本，但版本行仍可重新启用（接口语义支持） */}
-                          {row.actions.reactivate && (
-                            <button
-                              onClick={() => void toggleVersion(row, 'ACTIVATE')}
-                              className="text-[#2B5AED] hover:underline"
-                            >
-                              启用
-                            </button>
-                          )}
-                          <button
-                            onClick={() => void handleCopy(row)}
-                            className="text-[#2B5AED] hover:underline"
-                          >
-                            复制
-                          </button>
                         </div>
                       </td>
                     </tr>
@@ -803,7 +699,9 @@ export function PlansPage() {
               <div>
                 质检类型：
                 <span className="font-semibold text-slate-900">
-                  {TYPE_BADGES[detailPlan.inspectionType]?.label ?? detailPlan.inspectionType}
+                  {(detailPlan.inspectionTypes ?? [detailPlan.inspectionType])
+                    .map((type) => TYPE_BADGES[type]?.label ?? type)
+                    .join('、')}
                 </span>
               </div>
               <div>
@@ -860,6 +758,16 @@ export function PlansPage() {
       <CreatePlanModal
         isOpen={isCreateModalOpen}
         onClose={() => setIsCreateModalOpen(false)}
+        onSuccess={() => {
+          setPage(1);
+          setRefreshToken((token) => token + 1);
+        }}
+      />
+
+      {/* 导入成功后回第 1 页并刷新列表与 KPI（与新建同口径） */}
+      <ImportPlanModal
+        isOpen={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
         onSuccess={() => {
           setPage(1);
           setRefreshToken((token) => token + 1);

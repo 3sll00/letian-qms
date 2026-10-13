@@ -5,11 +5,14 @@ import {
 } from 'lucide-react';
 import { CertificatePrintModal } from '../../../components/certificate/CertificatePrintModal';
 import { DateInput } from '../../../components/common/DateInput';
-import { QualityCertificateData } from '../../../lib/inspectionTypes';
-import { buildOqcCertificateData } from '../../../lib/certificateDataService';
+import type {
+  CertTemplateKind,
+  ManufacturingCertData,
+  QualityCertificateData,
+} from '../../../lib/inspectionTypes';
+import { buildOqcCertificateData, buildManufacturingCertData } from '../../../lib/certificateDataService';
 import { loadCompanyProfile } from '../../../lib/companyProfile';
 import { api } from '../../../lib/api';
-import { TransferGateBadge } from '../../../components/common/TransferGateBadge';
 import type { TransferStateFields } from '../../../lib/transferGateFormat';
 
 export interface OqcItem {
@@ -42,6 +45,12 @@ export interface OqcItem {
   approvedAt?: string;
   rawStatus?: string;
   judgment?: string | null;
+  /** 证书模板（docs/51）：建单前选定的版式；历史单无值即按本模块缺省出证 */
+  certTemplate?: CertTemplateKind;
+  /** 证书专用补充字段袋（cert_fields） */
+  certFields?: Record<string, string>;
+  /** 终判备注（inspection_orders.inspection_notes）：质保书「备注 IN REMARK」栏的真实来源 */
+  inspectionNotes?: string;
   /**
    * 「合格后传递」派生字段（docs/48 §4.6，服务端 `withTransferState` 回填）：
    * canTransfer / transferCode / blockedBy / predecessorOrderNo / chainKey。
@@ -75,6 +84,20 @@ const CN_TO_INSPECTION_STATE: Record<string, string> = {
   不合格: 'FAILED',
 };
 
+/** 当前月份的起止日期（YYYY-MM-DD）：1 日 ~ 月末最后一日，用于「默认显示本月筛选内容」 */
+function currentMonthRange(): { from: string; to: string } {
+  const now = new Date();
+  const first = new Date(now.getFullYear(), now.getMonth(), 1);
+  const last = new Date(now.getFullYear(), now.getMonth() + 1, 0); // 当月最后一日
+  const fmt = (d: Date) => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  };
+  return { from: fmt(first), to: fmt(last) };
+}
+
 export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
   const [items, setItems] = useState<OqcItem[]>([]);
   const [total, setTotal] = useState<number>(0);
@@ -90,7 +113,15 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
   const [orderNoQuery, setOrderNoQuery] = useState('');
   const [heatNoQuery, setHeatNoQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('全部');
-  const [dateFilter, setDateFilter] = useState('');
+  // 出库日期区间（单据日期）：默认当前月份，满足「默认显示本月筛选内容」
+  const [dispatchDateFromQuery, setDispatchDateFromQuery] = useState(() => currentMonthRange().from);
+  const [dispatchDateToQuery, setDispatchDateToQuery] = useState(() => currentMonthRange().to);
+
+  // 分页状态：每页 100 行，配合万条上限真正可呈现最多 1 万条
+  const PAGE_SIZE = 100;
+  const [page, setPage] = useState(1);
+  /** 命中数超过万条上限被截断时为 true（后端 capped 透传） */
+  const [capped, setCapped] = useState(false);
 
   // 已提交查询条件：驱动后端 /inspections 查询（输入框为草稿态，点击「查询」后提交）
   const [appliedFilters, setAppliedFilters] = useState<{
@@ -98,28 +129,38 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
     customerName: string;
     salesOrderPoNo: string;
     furnaceHeatNo: string;
-    dispatchDate: string;
+    dispatchDateFrom: string;
+    dispatchDateTo: string;
     status: string;
-  }>({
-    salesOrderNo: '',
-    customerName: '',
-    salesOrderPoNo: '',
-    furnaceHeatNo: '',
-    dispatchDate: '',
-    status: '全部',
+  }>(() => {
+    const { from, to } = currentMonthRange();
+    return {
+      salesOrderNo: '',
+      customerName: '',
+      salesOrderPoNo: '',
+      furnaceHeatNo: '',
+      dispatchDateFrom: from,
+      dispatchDateTo: to,
+      status: '全部',
+    };
   });
 
-  // 证书与放行卡控弹窗状态
+  // 证书与放行卡控弹窗状态（版式按本单 cert_template，docs/51）
   const [certModalOpen, setCertModalOpen] = useState(false);
+  const [certKind, setCertKind] = useState<CertTemplateKind>('QUALITY');
   const [certData, setCertData] = useState<QualityCertificateData | null>(null);
+  const [mfgData, setMfgData] = useState<ManufacturingCertData | null>(null);
 
   // 加载数据
   const loadData = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
     try {
-      const res = await api.get<{ list?: any[]; items?: any[]; total: number }>('/inspections', {
+      const res = await api.get<{ list?: any[]; items?: any[]; total: number; capped?: boolean }>('/inspections', {
         type: 'OQC_SH',
+        // 分页：每页 100 行，配合万条上限真正可呈现最多 1 万条（需求「最大呈现上限万条数据」）
+        page,
+        pageSize: PAGE_SIZE,
         ...(appliedFilters.status !== '全部' &&
         CN_TO_INSPECTION_STATE[appliedFilters.status] !== undefined
           ? { inspectionState: CN_TO_INSPECTION_STATE[appliedFilters.status] }
@@ -129,12 +170,15 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
         salesOrderPoNo: appliedFilters.salesOrderPoNo || undefined,
         // 炉批号筛选（docs/47 §4.2⑤ / P2）：后端按 furnace_heat_batch_no 模糊匹配
         furnaceHeatNo: appliedFilters.furnaceHeatNo || undefined,
-        dispatchDate: appliedFilters.dispatchDate || undefined,
+        // 出库日期区间筛选（单据日期）：与后端 dispatchDateFrom/To 对应；任一为空即不限制日期
+        dispatchDateFrom: appliedFilters.dispatchDateFrom || undefined,
+        dispatchDateTo: appliedFilters.dispatchDateTo || undefined,
       });
 
-      // 真实后端 GET /inspections 的响应信封为 { total, list, statusCounts }；
+      // 真实后端 GET /inspections 的响应信封为 { total, list, statusCounts, capped }；
       // 离线 Mock（MSW）为 { items, total, page, pageSize }，两种信封都兼容。
       const rows = Array.isArray(res?.list) ? res.list : Array.isArray(res?.items) ? res.items : [];
+      setCapped(res?.capped === true);
 
       if (rows.length > 0) {
         const mapped: OqcItem[] = rows.map((item: any, idx: number) => {
@@ -182,6 +226,10 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
             steelGrade: item.steelGrade || '',
             heatNo: item.furnaceHeatNo || '',
             items: Array.isArray(item.items) ? item.items : undefined,
+            // 038 证书模板与字段袋：只取库中真实列，列为空即不输出该键
+            certTemplate: item.certTemplate,
+            certFields: item.certFields ?? undefined,
+            inspectionNotes: item.inspectionNotes || '',
             approverName: item.approverName || '',
             approvedAt: item.approvedAt || '',
             rawStatus: item.status,
@@ -210,7 +258,7 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
     } finally {
       setLoading(false);
     }
-  }, [appliedFilters]);
+  }, [appliedFilters, page]);
 
   useEffect(() => {
     loadData();
@@ -222,29 +270,35 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
 
   // 查询与重置
   const handleSearch = () => {
+    setPage(1);
     setAppliedFilters({
       salesOrderNo: salesOrderNoQuery.trim(),
       customerName: customerQuery.trim(),
       salesOrderPoNo: orderNoQuery.trim(),
       furnaceHeatNo: heatNoQuery.trim(),
-      dispatchDate: dateFilter,
+      dispatchDateFrom: dispatchDateFromQuery,
+      dispatchDateTo: dispatchDateToQuery,
       status: statusFilter,
     });
   };
 
   const handleReset = () => {
+    const m = currentMonthRange();
     setSalesOrderNoQuery('');
     setCustomerQuery('');
     setOrderNoQuery('');
     setHeatNoQuery('');
     setStatusFilter('全部');
-    setDateFilter('');
+    setDispatchDateFromQuery(m.from);
+    setDispatchDateToQuery(m.to);
+    setPage(1);
     setAppliedFilters({
       salesOrderNo: '',
       customerName: '',
       salesOrderPoNo: '',
       furnaceHeatNo: '',
-      dispatchDate: '',
+      dispatchDateFrom: m.from,
+      dispatchDateTo: m.to,
       status: '全部',
     });
   };
@@ -296,30 +350,49 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
   const handleOpenCert = (item: OqcItem) => {
     void (async () => {
       const companyProfile = await loadCompanyProfile();
-      setCertData(
-        buildOqcCertificateData({
-          orderNo: item.docNo,
-          customer: item.customer,
-          contractNo: item.orderNo,
-          deliveryNo: item.salesOrderNo,
-          productName: item.productName,
-          spec: item.spec,
-          steelGrade: item.steelGrade,
-          heatNo: item.heatNo,
-          batchNo: item.batchNo,
-          quantity: item.qty,
-          // 检验人必须是真实承担人，未录入时留空，绝不用示例姓名代替（证书为对外交付物）
-          inspector: item.inspectorName !== '-' ? item.inspectorName : '',
-          ...(item.approverName !== undefined && item.approverName !== '' ? { approverName: item.approverName } : {}),
-          ...(item.judgment === 'PASSED'
-            ? { judgment: 'PASSED' }
-            : item.judgment === 'FAILED'
-            ? { judgment: 'FAILED' }
-            : {}),
-          items: item.items,
-          ...(companyProfile !== null ? { companyProfile } : {}),
-        })
-      );
+      // 版式取本单建单时选定的 cert_template（docs/51）；历史单无值按本模块缺省 QUALITY 出证
+      const kind: CertTemplateKind = item.certTemplate ?? 'QUALITY';
+      const shared = {
+        orderNo: item.docNo,
+        docNo: item.docNo,
+        customer: item.customer,
+        customerName: item.customer,
+        contractNo: item.orderNo,
+        salesOrderPoNo: item.orderNo,
+        deliveryNo: item.salesOrderNo,
+        salesOrderNo: item.salesOrderNo,
+        productName: item.productName,
+        materialName: item.productName,
+        spec: item.spec,
+        specification: item.spec,
+        steelGrade: item.steelGrade,
+        heatNo: item.heatNo,
+        batchNo: item.batchNo,
+        quantity: item.qty,
+        // 检验人必须是真实承担人，未录入时留空，绝不用示例姓名代替（证书为对外交付物）
+        inspector: item.inspectorName !== '-' ? item.inspectorName : '',
+        ...(item.approverName !== undefined && item.approverName !== ''
+          ? { approverName: item.approverName }
+          : {}),
+        ...(item.judgment === 'PASSED'
+          ? { judgment: 'PASSED' }
+          : item.judgment === 'FAILED'
+          ? { judgment: 'FAILED' }
+          : {}),
+        items: item.items,
+        certFields: item.certFields,
+        // 终判备注：质保书「备注 IN REMARK」只打印检验单填写的真实内容
+        inspectionNotes: item.inspectionNotes,
+        ...(companyProfile !== null ? { companyProfile } : {}),
+      };
+      if (kind === 'MANUFACTURING') {
+        setMfgData(buildManufacturingCertData(shared));
+        setCertData(null);
+      } else {
+        setCertData(buildOqcCertificateData(shared));
+        setMfgData(null);
+      }
+      setCertKind(kind);
       setCertModalOpen(true);
     })();
   };
@@ -362,6 +435,12 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
       {loadError && (
         <div className="px-4 py-2.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-700">
           出货检验台账加载失败，已清空列表（不展示演示数据）: <span className="font-mono">{loadError}</span>
+        </div>
+      )}
+
+      {capped && !loadError && (
+        <div className="px-4 py-2.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-700">
+          当前筛选命中数据已超过 <span className="font-semibold">1 万条</span> 上限，仅展示前 1 万条（页码已截断）。请缩小「出库日期」区间或增加其它筛选条件以查看完整数据。
         </div>
       )}
 
@@ -425,13 +504,22 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
           </select>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-slate-600 font-medium whitespace-nowrap">单据日期</span>
+          <span className="text-slate-600 font-medium whitespace-nowrap">出库日期</span>
           <DateInput
             wrapClassName="w-36"
             placeholderClassName="text-sm"
-            placeholder="选择单据日期"
-            value={dateFilter}
-            onChange={(e) => setDateFilter(e.target.value)}
+            placeholder="起始日期"
+            value={dispatchDateFromQuery}
+            onChange={(e) => setDispatchDateFromQuery(e.target.value)}
+            className="px-3 py-1.5 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 text-slate-700 text-sm bg-white"
+          />
+          <span className="text-slate-400">~</span>
+          <DateInput
+            wrapClassName="w-36"
+            placeholderClassName="text-sm"
+            placeholder="结束日期"
+            value={dispatchDateToQuery}
+            onChange={(e) => setDispatchDateToQuery(e.target.value)}
             className="px-3 py-1.5 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 text-slate-700 text-sm bg-white"
           />
         </div>
@@ -467,7 +555,6 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
                 <th className="py-4 px-4 text-left whitespace-nowrap">数量</th>
                 <th className="py-4 px-4 text-left whitespace-nowrap">ERP状态</th>
                 <th className="py-4 px-4 text-left whitespace-nowrap">检验状态</th>
-                <th className="py-4 px-4 text-left whitespace-nowrap">传递</th>
                 <th className="py-4 px-4 text-left whitespace-nowrap">检验人</th>
                 <th className="py-4 px-6 text-left whitespace-nowrap">操作</th>
               </tr>
@@ -581,11 +668,6 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
                       )}
                     </td>
 
-                    {/* 传递（docs/48 §4.6）：本环节的上游是否已放行；文案与色板只翻译服务端判定码 */}
-                    <td className="py-5 px-4 whitespace-nowrap">
-                      <TransferGateBadge state={item} />
-                    </td>
-
                     {/* 检验人 */}
                     <td className="py-5 px-4 whitespace-nowrap text-slate-700 text-[13px]">
                       {item.inspectorName}
@@ -647,31 +729,39 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
 
         {/* 底栏分页 */}
         <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-100 text-xs text-slate-400">
-          <span className="mr-1">共{total}条</span>
+          <span className="mr-1">
+            共 {total} 条{capped ? '（已达 1 万条上限）' : ''}
+          </span>
           <button
-            className="w-8 h-8 rounded border border-slate-200 text-slate-300 flex items-center justify-center bg-white hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            disabled
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={page <= 1}
+            className="w-8 h-8 rounded border border-slate-200 text-slate-500 flex items-center justify-center bg-white hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
             &lt;
           </button>
-          <button className="w-8 h-8 rounded bg-blue-600 text-white font-medium flex items-center justify-center text-xs shadow-sm">
-            1
-          </button>
+          <span className="text-slate-600 tabular-nums">
+            {page} / {Math.max(1, Math.ceil(total / PAGE_SIZE))}
+          </span>
           <button
-            className="w-8 h-8 rounded border border-slate-200 text-slate-400 flex items-center justify-center bg-white hover:bg-slate-50 transition-colors"
+            onClick={() =>
+              setPage((p) => Math.min(Math.max(1, Math.ceil(total / PAGE_SIZE)), p + 1))
+            }
+            disabled={page >= Math.ceil(total / PAGE_SIZE)}
+            className="w-8 h-8 rounded border border-slate-200 text-slate-500 flex items-center justify-center bg-white hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
             &gt;
           </button>
         </div>
       </div>
 
-      {/* 质检证书弹窗 */}
-      {certModalOpen && certData && (
+      {/* 质检证书弹窗（版式按本单 cert_template，docs/51） */}
+      {certModalOpen && (certData || mfgData) && (
         <CertificatePrintModal
           isOpen={certModalOpen}
           onClose={() => setCertModalOpen(false)}
-          type="quality"
+          type={certKind === 'MANUFACTURING' ? 'manufacturing' : 'quality'}
           qualityData={certData}
+          manufacturingData={mfgData}
         />
       )}
     </div>

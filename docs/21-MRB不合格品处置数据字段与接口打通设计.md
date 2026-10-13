@@ -1,7 +1,7 @@
 # MRB 不合格品处置数据字段与接口打通技术方案
 
-> **版本**：v1.1
-> **更新时间**：2026-09-21
+> **版本**：v1.2
+> **更新时间**：2026-09-23
 > **对应原型**：WPS图片(13)
 > **对应页面**：不合格品处置 → MRB不合格品处置（`apps/web/src/pages/mrb/index.tsx` + 两个抽屉）
 > **对应迁移**：`015_mrb_pool_and_flow_wiring.ts`
@@ -439,3 +439,271 @@ PRD（`01-PRD.md` §3.6）与原型 `prototypes/WPS图片(13).png` 要求 MRB �
 | 真实前后端浏览器走查 | 临时 Vite（`VITE_API_TARGET=http://127.0.0.1:3121`，不占用户常驻端口）+ CDP 驱动 Chromium | ✅ 页头显示「待发起评审 2 条」、按钮文案带数量角标、抽屉内可见已判定不合格单（不良率 100%、供应商「江苏大明不锈钢特钢有限公司」），控制台异常 0 条 |
 | 走查截图 | `logs/ui-probe-01-mrb-header.png`、`logs/ui-probe-02-pool-drawer.png` | ✅ 页头计数与抽屉内容各一张（临时探针产物，正式固化为 `scripts/testing/` 断言见 `docs/39` §7 遗留 R1） |
 | 库回基线 | 探针单 / 池条目 / MRB 单清理 | ✅ `pending_mrb_items` 6 -> 4、`mrb_reviews` 7 -> 6、`INS-20260923-%` 残留 0（`audit_logs` 为 append-only 红线，探针审计留痕按设计**保留**） |
+
+---
+
+## 13. 不合格数量口径一致性（2026-09-23 第六轮）
+
+### 13.1 现象（用户实测）
+
+一张单，三个页面三个数字 —— 用户报的就是第三个对不上：
+
+| 页面 | 列 | 显示 | 来源（物理列） | 是否合规 |
+|:---|:---|:---:|:---|:---:|
+| 出货检验 | 数量 | **200** | `inspection_orders.sample_qty`（抽样数量） | ✅ 合规（`docs/16` §1.8：数量 = `qty` / `sampleQty`） |
+| 质量追溯看板 | 出货数量 | **42000** | `inspection_orders.total_qty`（报检总数） | ✅ 合规（`docs/24`：`TraceOrderChainResponse.totalQty`） |
+| MRB 不合格品处置 | 不合格数量 | **5000** | `mrb_reviews.defect_qty` | ❌ **本口径下应为 25** |
+
+订单 `OQC-SH-20231013-0002`（`MRB-20231013-02` 的来源单）实际数据：报检 42000 / 抽样 200 / 合格 175 / **不合格 25**。
+
+> 结论先说：前两个数字是**两个不同的合法口径**（抽样数 vs 报检数），命名太像容易被当成"打架"；
+> 真正错的是 MRB 的 `defect_qty = 5000` —— 它既不是抽样数、也不是报检数、更不是不合格数。
+
+### 13.2 唯一口径（本节起为权威口径）
+
+**MRB / 待审核池的「不合格数量」= 源检验单的 `fail_qty`**，全链路已一致：
+
+| 链路 | 证据 | 取值 |
+|:---|:---|:---|
+| 池条款映射 | 本文件 §4.1「不合格数量 ← 检验单 `fail_qty`」 | `fail_qty` |
+| 运行时入池 | `packages/application/src/use-cases/mrb/collect-pending-defect.ts` | `Number(order.failQty ?? 0)` |
+| 运行时建 MRB | `packages/application/src/use-cases/mrb/trigger-mrb-review.ts` | `cmd.defectQty ?? orderDTO.failQty`（自动建单即 `failQty`） |
+| 离线 Mock 建 MRB | `apps/web/src/mocks/handlers.ts` | `defectQty: updated.failQty ?? 0` |
+| 集成测试 | `apps/api/test/integration/inspection-finalize-pool-link.test.ts` | 断言「台账条目的不合格数取检验单不合格数」 |
+| **种子** | `packages/infrastructure/src/seeds/{data,runner}.ts` | 本轮改造后同口径派生（见 §13.3） |
+
+「出货检验数量 = 抽样数量」与「追溯看板 出货数量 = 报检数量」**不属本口径**，两者各自合规，不改。
+
+> 第七轮补充（§14）：上面这张表只覆盖了「谁取哪个字段」，漏了**取数的时点** —— 录入弹窗先
+> `submit-measurements`（判定即建 MRB 单）后 `POST /status`（写填写值），建单那一刻 `fail_qty` 还在派生兜底态，
+> 单据便把抽样数固化成了「不合格数量」。§14 已把时点与自愈口径一并定稿。
+
+### 13.3 根因
+
+`seeds/data.ts` §7 的 MRB 种子**手写了 `defectQty`**，而 `seeds/runner.ts` §2.7 用 `...review` 原样落库，
+于是它与同一文件 §2.6（池条目按源检验单派生 `failQty`）**分裂成两套口径**。六条种子 MRB 全部偏离：
+
+| MRB | 来源检验单 | 手写值 | 源单 `fail_qty` |
+|:---|:---|:---:|:---:|
+| `MRB-20231011-01` | `INS-20231011-0001` | 15000 | 4 |
+| `MRB-20231012-01` | `INS-20231012-0002` | 3000 | 4 |
+| `MRB-20231012-02` | `INS-20231012-0003` | 10000 | 10 |
+| `MRB-20231013-01` | `OQC-SF-20231013-0001` | 800 | （源单未终判，无口径） |
+| `MRB-20231013-02` | `OQC-SH-20231013-0002` | 5000 | **25**（用户报的就是这条） |
+| `MRB-20231013-03` | `INS-20231013-0001` | 1200 | 50 |
+
+> **后续（第八轮）**：上表末行的「无口径」已消解 —— 库内 `MRB-20231013-01`（800）在**真实终判**后归位为 **3**，见 §14.7.2。
+
+**连带发现**：`MRB-20231013-01` / `MRB-20231013-03` 的来源单在种子里是 **`PENDING`（待检验）**，
+即「一张从未终判的单据上挂了一张已驳回 / 评审中的 MRB」。这违反 `docs/43`（只有终判不合格才建单），
+也是这两条 MRB 的不合格数量"无从派生"的原因 —— 已按 MRB 自身描述（脱碳层超标 / 盘条划伤）把两张源单
+补成**终判不合格**。
+
+### 13.4 改造清单
+
+| 层 | 文件 | 改造内容 |
+|:---|:---|:---|
+| 种子编排 | `packages/infrastructure/src/seeds/runner.ts` §2.7 | `defectQty` 改为按来源检验单派生（`deriveQty(sampleQty, itemKind).failQty`），与 §2.6 池条目同源；并加 **fail-closed 守卫**：来源单不存在 → `SEED_MRB_SOURCE_ORDER_MISSING`，来源单未终判为不合格 → `SEED_MRB_SOURCE_ORDER_NOT_FAILED`（宁可播种失败，不再落一张对不上数的 MRB） |
+| 种子数据 | `packages/infrastructure/src/seeds/data.ts` §7 | 删除 6 处手写 `defectQty`；数组类型收紧为 `Omit<MRBReview, 'defectQty'>`，**从类型上禁止**再手写该值；`OQC-SF-20231013-0001` / `INS-20231013-0001` 两张源单改为终判不合格（含台账备注） |
+| 存量库 | `mrb_reviews`（5 行） | 一次性订正（幂等，见 §13.5） |
+
+### 13.5 存量库订正（幂等 SQL）
+
+```sql
+-- 口径：MRB 不合格数量 = 源检验单 fail_qty；仅订正「源单已终判不合格」的行
+BEGIN;
+UPDATE mrb_reviews m
+SET defect_qty = o.fail_qty
+FROM inspection_orders o
+WHERE o.order_no = m.source_order_no
+  AND o.judgment = 'FAILED'
+  AND m.defect_qty <> o.fail_qty
+  AND m.id IN (  -- 仅本轮种子 MRB，避免误改他人演示 / 探针数据
+    '40000000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000002',
+    '40000000-0000-4000-8000-000000000003', '40000000-0000-4000-8000-000000000005',
+    '40000000-0000-4000-8000-000000000006'
+  );
+COMMIT;
+```
+
+实测（2026-09-23）：`UPDATE 5`，订正后 `MRB-20231013-02` 的 `defect_qty` = **25**，与源单 `fail_qty` 一致；
+`MRB-20231011-01` / `-20231012-01` / `-20231012-02` / `-20231013-03` 分别归位 4 / 4 / 10 / 50。
+
+### 13.6 遗留与闭环
+
+1. ~~**库内 `MRB-20231013-01` 仍为 800**~~ → **已订正为 3（2026-09-23 第八轮）**：来源单
+   `OQC-SF-20231013-0001` 未用 SQL 硬改，而是走**真实终判入口**（`POST /inspections/:id/status`）判定不合格，
+   MRB 与台账按口径自动归位，链路同时得到验证。明细见 §14.7.2。
+2. ~~**离线 Mock 同类漂移**~~ → **已订正（2026-09-23 第八轮）**：`apps/web/src/mocks/data.ts` 的
+   `MRB-20231012-01`(3000→**8**)、`MRB-20231012-02`(10000→**1**)、`MRB-20231011-01`(15000→**4**)，
+   池条目 `INS-20231012-0002` 的 `defectQty`(3000→**8**) 与 `totalQty`(5000→**32**，改用抽样数) 全部归位。
+   明细见 §14.7.3。
+3. **演示文案与派生实测项不自洽（同类观察）**：如 `OQC-SH-20231013-0002` 的备注写「通规不止」，
+   而种子派生的实测项把第 1 项「包装重量」判为超差（`order-builders.toOrderItem` 固定让 `seq=1` 超标）。
+   不影响任何数量口径，但同一屏里的"原因"与"实测"会对不上，建议后续按派生项回写文案。
+
+---
+
+## 14. 「不合格数量」在 MRB 上显示成检测数（2026-09-23 第七轮）
+
+### 14.1 现象（客户实测）
+
+【MRB不合格品处置】列表的「不合格数量」列显示成了**检测数**（= 检验单的抽样数量），
+而不是检验员在录入弹窗里填写的「不合格数量」。库内证据（本次复现留痕）：
+
+| 对象 | 值 | 是否合规 |
+| :--- | :--- | :---: |
+| 检验单 `INS-20231013-0003`（抽样 80 / 合格 20 / **不合格 60**） | 60 | ✅ 终判调用 `POST /status` 落的就是**填写值** |
+| 不合格台账 `pending_mrb_items`（同单） | 60 | ✅ 入池 upsert 后被终判口径覆盖 |
+| MRB 单 `MRB-1790149199492-085`（同单） | **80** | ❌ 等于抽样数量 —— 建单那一刻的派生兜底值被固化 |
+
+审计留痕（同一秒内两次写）复现了时序：`MRBReviewTriggered` + `INSPECTION_ORDER{itemCount:4}`
+（录入判定路径，先）-> `INSPECTION_ORDER{failQty:60, passQty:20}`（终判路径，后）。
+
+### 14.2 根因：建单在前、填写值在后，且复用分支不做口径对齐
+
+| 步骤 | 调用 | 该时刻 `fail_qty` 的来路 |
+| :--- | :--- | :--- |
+| ① | `POST /inspections/:id/submit-measurements` | 判定即建 MRB 单（docs/43）。数量栏此前未下发，服务端只能取领域派生兜底 `failQty = sampleQty - passQty - exemptQty`；首次判定时 `pass_qty` 恒 0 => 该值**恒等于抽样数** |
+| ② | `POST /inspections/:id/status` | 才把弹窗里填写的数量写进检验单 |
+
+而 MRB 的复用分支（`autoInitiateMrbReview` 的「先查后建」）直接返回既有单据、不与源单对账，
+于是 ② 的订正永远传不到单据上 —— 单据自此长期显示 ① 那一刻的检测数。
+
+### 14.3 定稿口径（强化 §13.2 的「唯一口径」，不改变它）
+
+| 项 | 口径 |
+| :--- | :--- |
+| 数量作者 | 检验员填写的「合格数量 / 不合格数量」是**权威值**；服务端按抽样数派生的值只是**未填写时的兜底** |
+| 落库时点 | 填写值随判定**同事务**落 `inspection_orders.pass_qty / fail_qty`（第 ① 步就下发） |
+| MRB / 台账 | 「不合格数量」恒取源检验单 `fail_qty`；**复用既有单据时按源单对齐**（自愈），`fail_qty = 0` 视为未填写 -> 保留现值、不回退成 0 |
+| 非法值 | 负数 / 非有限数抛 `ORDER_DECLARED_QTY_INVALID`（400），**绝不静默改数** |
+
+### 14.4 改造清单
+
+| 层 | 文件 | 改造内容 |
+| :--- | :--- | :--- |
+| 聚合根 | `packages/domain/src/models/inspection-order.ts` | `submitAndEvaluate(declared?)`：先派生、再由填写值覆盖（两栏各自独立覆盖，缺省不动） |
+| 契约 | `packages/contracts/src/schemas/inspection.ts` | `BatchRecordInspectionItemsRequestSchema` 补可选 `passQty` / `failQty`（与终判请求同字段名、同语义） |
+| 用例 | `packages/application/src/use-cases/inspections/record-measurements-and-judge.ts` | 把 `cmd.passQty / cmd.failQty` 传入判定，随判定同事务落库 |
+| 控制器 | `apps/api/src/controllers/inspections.controller.ts` | `submit-measurements` 透传两栏（此前被丢弃） |
+| 建单口径 | `packages/application/src/use-cases/mrb/{trigger-mrb-review,auto-initiate-mrb-review}.ts` | 新增 `alignMrbDefectQtyWithSourceOrder()`；**两个复用入口都要走**（trigger 自身的幂等分支 + autoInitiate 的「先查后建」分支） |
+| 前端 | `IpqcViews.tsx` / `IqcRecordForm.tsx` / `OqcRecordForm.tsx` / `OutsourceInspectionForm.tsx` | 四个录入表单把表单里的数量随判定下发（草稿不下发 —— 无判定即无数量口径） |
+| 离线 Mock | `apps/web/src/mocks/handlers.ts` | `submit-measurements` 接收并落两栏；`/status` 复用分支同口径对齐 |
+| 契约文档 | `docs/api/letian-qms-openapi.yaml` | `/inspections/{id}/submit-measurements` 与 `SubmitMeasurementsRequest` 补 `passQty` / `failQty` |
+| 回归 | `apps/api/test/integration/mrb-defect-qty-parity.test.ts` | 3 组断言（填写值落库 / 旧时序对齐自愈 / `fail_qty = 0` 不回退），已挂 `@letian/api test` |
+
+### 14.5 实测验收（2026-09-23）
+
+- 回归用例 3/3 通过（真实 PostgreSQL）；`@letian/api test` 全绿；`@letian/web test` 全绿；`pnpm typecheck` 7/7。
+- 库内订正：`MRB-1790149199492-085` 的 `defect_qty` 80 -> 60（= 源单 `fail_qty`，SQL 见 §14.6）。
+- **真实 HTTP + 真实库探针**（常驻 `:3100`，临建单跑完即清）：
+  A. 弹窗两步（下发 `passQty: 7 / failQty: 3`）-> `submit-measurements` **200**（返回体 `failQty = 3`）
+  → `/status` **200** → `GET /mrb/records` 命中 `MRB-1790150768206-698`，`defectQty = 3`（**不是抽样数 10**）；
+  B. 旧时序（第 ① 步未传填写值，模拟浏览器里仍是旧前端）-> 建单时 `defectQty = 10`（= 抽样数，复现缺陷）
+  → `/status` 落 `failQty: 4` → 复用分支对齐为 **4**（自愈）。
+  探针建的 2 单 / 2 MRB 单 / 2 台账条目 / 2 追溯节点已清理，`mrb_reviews` 回 19 行基线。
+- 客户可见复核（`GET /mrb/records?pageSize=5`）：`MRB-1790149199492-085`（来源单 `INS-20231013-0003`）的
+  「不合格数量」= **60**，与源单 `fail_qty` 一致（订正前为 80）。
+
+### 14.6 存量库订正（幂等 SQL）
+
+```sql
+-- 口径：MRB 不合格数量 = 源检验单 fail_qty；仅订正「源单已终判不合格且 fail_qty > 0」的行
+BEGIN;
+UPDATE mrb_reviews m
+SET defect_qty = o.fail_qty
+FROM inspection_orders o
+WHERE o.order_no = m.source_order_no
+  AND o.judgment = 'FAILED'
+  AND o.fail_qty > 0
+  AND m.defect_qty <> o.fail_qty
+  AND m.mrb_no = 'MRB-1790149199492-085';
+COMMIT;
+```
+
+### 14.7 演示 / 探针存量数据订正（2026-09-23 第八轮，已执行）
+
+§14.6 只覆盖本会话探针建出的那一条。本节把**同一口径**推平到全库演示数据与离线 Mock，
+收口 §13.6 的遗留 1、2。**口径未变**（仍是 §13.2 / §14.3 的「MRB 不合格数量 = 源检验单 `fail_qty`」），
+本节只做存量数据与 Mock 的对账。
+
+#### 14.7.1 一次性口径推平（幂等 SQL，2026-09-23 执行）
+
+```sql
+-- ① 评审单：来源单已终判不合格 → defect_qty 归位到源单 fail_qty
+UPDATE mrb_reviews m
+SET defect_qty = o.fail_qty
+FROM inspection_orders o
+WHERE o.order_no = m.source_order_no
+  AND m.mrb_no LIKE 'MRB-TEST2609-%'
+  AND o.judgment = 'FAILED'
+  AND m.defect_qty <> o.fail_qty;
+-- UPDATE 12
+
+-- ② 台账：不合格数量同源；分母由报检总数改为抽样数（docs/03 §2.3 分母口径），比率随之重算
+UPDATE pending_mrb_items p
+SET defect_qty = o.fail_qty,
+    total_qty  = o.sample_qty,
+    defect_rate = ROUND(o.fail_qty::numeric / NULLIF(o.sample_qty, 0) * 100, 4)
+FROM inspection_orders o
+WHERE o.id = p.source_order_id
+  AND o.batch_no LIKE 'TEST2609-%'
+  AND (p.defect_qty <> o.fail_qty OR p.total_qty <> o.sample_qty);
+-- UPDATE 12
+```
+
+订正前 12 条演示 MRB 的 `defect_qty` 是 4~15（写死的演示值），订正后**全部归 1**（其来源单 `fail_qty` 均为 1）；
+台账 12 条的 `total_qty` 由**报检总数**（600 / 700 / 800 / 900 / 1050 / 1100 / 1150 / 1200 / 1250 / 1400 / 1450 / 1500）
+改为**抽样数**（7 / 9 / 11 / 6 / 9 / 10 / 11 / 5 / 6 / 9 / 10 / 11），`defect_rate` 随之重算为 **9.09% ~ 20%**
+（分母虚高会把不良率显著压低：同为 1 件不合格，分母 1500 时只有 0.067%、分母 11 时是 9.09% ——
+偏低的那个在页面上"看起来几乎没问题"，反而掩盖了不合格）。
+
+#### 14.7.2 `MRB-20231013-01`：走真实终判入口归位（**非 SQL**）
+
+其来源单 `OQC-SF-20231013-0001` 此前在库内是 `PENDING`，**没有口径可派生**；因此不订正数据，
+而是补做业务动作，让链路自己把值写对：
+
+| 项 | 值 |
+|:---|:---|
+| 入口 | `POST /inspections/30000000-0000-4000-8000-000000000012/status` |
+| 操作人 | 张强 `11000000-0000-4000-8000-000000000001`（周海波 `...007` 因 PBAC 403，非数据问题） |
+| 请求体 | `{"status":"FAILED","judgment":"FAILED","passQty":17,"failQty":3,"remark":"委外热处理回厂，表面脱碳层超标判不合格，转 MRB 评审"}` |
+| 来源单结果 | `FAILED / FAILED`，抽样 20 / 合格 17 / 不合格 3 |
+| MRB 结果 | `MRB-20231013-01` 的 `defect_qty` **800 → 3** |
+| 台账结果 | **新建**行：`defect_qty=3` / `total_qty=20` / `defect_rate=15` / `INITIATED`，`mrb_review_id` 已回填 |
+| 追溯结果 | 委外节点 `B20231013-05` 记为 `FAILED` |
+
+800 与其来源单抽样数同源，属 §14.2 缺陷的存量残留；这次不用 SQL 硬改，顺带验证了
+「委外终判不合格 → 自动建单 / 对齐 MRB」在委外场景同样成立。
+
+#### 14.7.3 离线 Mock 同步（`apps/web/src/mocks/data.ts`）
+
+| 条目（锚点） | 订正前 | 订正后 | 依据 |
+|:---|:---|:---|:---|
+| `MRB-20231012-01`（`defectDescription` = 切断毛刺高度超标…） | `defectQty: 3000` | **8** | 源单 `INS-20231012-0002` 的 `failQty`（抽样 32 / 合格 24 / 不合格 8） |
+| `MRB-20231012-02`（`defectDescription` = 螺栓螺纹中径偏大…） | `defectQty: 10000` | **1** | 源单 `INS-20231012-0003` 的 `failQty`（抽样 80 / 合格 79 / 不合格 1） |
+| `MRB-20231011-01`（`defectDescription` = 表面存在沿轧制方向裂纹…） | `defectQty: 15000` | **4** | Mock 内无该源单，取种子同单号同批次的派生值（`sampleQty 32` 经 `deriveQty(..., 'HAS_FAILED')` = 4） |
+| 池条目 `INS-20231012-0002`（`defectItemCode` = `CUT-002`） | `defectQty: 3000` / `totalQty: 5000` | **8** / **32** | 同 `MRB-20231012-01`；分母改用抽样数，与 `docs/03` §2.3 一致 |
+
+`pnpm --filter @letian/web run validate:mocks` 20/20 通过，`typecheck` 通过。
+
+#### 14.7.4 全库复核
+
+基线：`inspection_orders` 54 行 / `mrb_reviews` 19 行 / `pending_mrb_items` 19 行（订正后不变）。
+
+```sql
+select count(*) filter (where m.defect_qty = o.fail_qty) as matched, count(*) as total
+from mrb_reviews m
+join inspection_orders o on o.order_no = m.source_order_no
+where o.judgment = 'FAILED';
+-- matched = 19 / total = 19：所有「来源单已终判不合格」的 MRB 均已对齐
+```
+
+`GET /mrb/records` 实测回吐的不合格数量：60 / 50 / 25 / **3** / 10 / 4 / 4，TEST 系列全部为 **1**。
+
+#### 14.7.5 造数脚本同口径（防再次漂移）
+
+演示造数脚本 `scripts/logs/testdata-TEST2609.sql`（gitignore，不入库）已同步：
+MRB 段的 `defect_qty` 由 `3 + r.rn` 改为 **`r.fail_qty`**，台账段由 `m.defect_qty` 改为 **`o.fail_qty`**、
+分母由 `o.total_qty` 改为 **`o.sample_qty`**。此后重跑造数或 `pnpm db:seed` 都不会重新漂移。

@@ -27,6 +27,9 @@ import {
   ListTransferOverrideTicketsUseCase,
   BatchFreezeTerminatedChainsUseCase,
   GetTransferKpisUseCase,
+  SyncErpIncomingInspectionsUseCase,
+  SyncErpOutsourceInspectionsUseCase,
+  SyncErpSalesDispatchUseCase,
   type IUnitOfWork,
 } from '@letian/application';
 import {
@@ -122,6 +125,12 @@ export interface ApiContainer {
     exportInspectionReport: ExportInspectionReportUseCase;
     exportTraceReport: ExportTraceReportUseCase;
     pendingMRBPool: PendingMRBPoolUseCase;
+    /** ERP 来料检验拉取并生成 QMS 来料检验单（IQC）用例（第①段闭环编排） */
+    syncErpIncomingInspections: SyncErpIncomingInspectionsUseCase;
+    /** ERP 委外加工单拉取并生成 QMS 委外检验单（OQC_SF/MACH/HEAT）用例（委外检验第①段闭环编排） */
+    syncErpOutsourceInspections: SyncErpOutsourceInspectionsUseCase;
+    /** ERP 销售出库拉取并生成 QMS 出货检验单（OQC_SH）用例（出货检验第①段闭环编排） */
+    syncErpSalesDispatch: SyncErpSalesDispatchUseCase;
   };
   readonly reportEngine: StandardReportEngine;
 
@@ -188,12 +197,17 @@ export function createApiContainer(options: CreateApiContainerOptions = {}): Api
     batchFreezeTerminatedChains: new BatchFreezeTerminatedChainsUseCase(uow),
     getTransferKpis: new GetTransferKpisUseCase(uow),
   };
+  // ERP 来料检验同步用例需要复用建单用例（保证方案快照/审计/Outbox 一致），
+  // 必须在 useCases 对象构造完成后才能引用其 createInspectionOrder 实例。
+  const syncErpIncomingInspections = new SyncErpIncomingInspectionsUseCase(uow, useCases.createInspectionOrder);
+  const syncErpOutsourceInspections = new SyncErpOutsourceInspectionsUseCase(uow, useCases.createInspectionOrder);
+  const syncErpSalesDispatch = new SyncErpSalesDispatchUseCase(uow, useCases.createInspectionOrder);
   const reportEngine = new StandardReportEngine();
   return {
     db,
     uow,
     repositories,
-    useCases,
+    useCases: { ...useCases, syncErpIncomingInspections, syncErpOutsourceInspections, syncErpSalesDispatch },
     reportEngine,
     dispose: async () => {
       if (!externalDb) {

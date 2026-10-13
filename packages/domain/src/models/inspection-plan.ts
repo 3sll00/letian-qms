@@ -19,6 +19,11 @@ export class InspectionPlan {
   private categoryCode?: string | undefined;
   private categoryName?: string | undefined;
   private inspectionType: InspectionType;
+  /**
+   * 方案适用的检验类型全集（039：新建弹窗质检类型支持多选）。
+   * inspectionType 仍是主类型（集合首位）；缺省 = [inspectionType]。
+   */
+  private inspectionTypes: InspectionType[];
   private versions: InspectionPlanVersionDTO[];
 
   constructor(params: {
@@ -30,6 +35,7 @@ export class InspectionPlan {
     categoryCode?: string | undefined;
     categoryName?: string | undefined;
     inspectionType: InspectionType;
+    inspectionTypes?: InspectionType[] | undefined;
     versions?: InspectionPlanVersionDTO[];
   }) {
     this.id = params.id;
@@ -40,6 +46,11 @@ export class InspectionPlan {
     this.categoryCode = params.categoryCode;
     this.categoryName = params.categoryName;
     this.inspectionType = params.inspectionType;
+    // 归一：主类型恒居首位且必在集合内，传入集合去重
+    this.inspectionTypes = [
+      params.inspectionType,
+      ...(params.inspectionTypes ?? []).filter((type) => type !== params.inspectionType),
+    ];
     this.versions = params.versions ? [...params.versions] : [];
   }
 
@@ -70,6 +81,11 @@ export class InspectionPlan {
 
   public getInspectionType(): InspectionType {
     return this.inspectionType;
+  }
+
+  /** 方案适用的检验类型全集（主类型居首；只读副本防外部改写内部状态） */
+  public getInspectionTypes(): InspectionType[] {
+    return [...this.inspectionTypes];
   }
 
   public getCategoryName(): string | undefined {
@@ -208,6 +224,7 @@ export class InspectionPlan {
       isCategoryDefault: (this.materialCode ?? '') === '' && this.categoryCode !== undefined,
       status: this.getStatus(),
       inspectionType: this.inspectionType,
+      inspectionTypes: [...this.inspectionTypes],
       versions: this.versions.map(v => ({
         ...v,
         items: v.items.map(item => ({ ...item }))

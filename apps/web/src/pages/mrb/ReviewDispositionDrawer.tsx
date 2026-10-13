@@ -66,6 +66,8 @@ export function ReviewDispositionDrawer({
   const [disposition, setDisposition] = useState<MRBDisposition>('RETURN_TO_VENDOR');
   const [dispositionReason, setDispositionReason] = useState('');
   const [concessionAttachmentUrl, setConcessionAttachmentUrl] = useState('');
+  const [customerName, setCustomerName] = useState('');
+  const [signingCustomer, setSigningCustomer] = useState(false);
   const [dispositionError, setDispositionError] = useState<string | null>(null);
   const [disposing, setDisposing] = useState(false);
   /** 返工处置连带生成的复检单号（取自处置响应 DisposeMRBResponse，仅本次处置回吐） */
@@ -78,6 +80,7 @@ export function ReviewDispositionDrawer({
     setDispositionReason('');
     setDispositionError(null);
     setConcessionAttachmentUrl('');
+    setCustomerName('');
     setDisposition(record?.disposition ?? 'RETURN_TO_VENDOR');
   }, [record?.id, record?.disposition]);
 
@@ -112,13 +115,34 @@ export function ReviewDispositionDrawer({
     }
   };
 
+  const handleCustomerSignOff = async () => {
+    if (!customerName.trim() || !concessionAttachmentUrl.trim()) {
+      setDispositionError('请填写客户名称及已签核的书面凭证路径。');
+      return;
+    }
+    try {
+      setSigningCustomer(true);
+      setDispositionError(null);
+      const updated = await api.post<MrbReviewRecord>(`/mrb/records/${record.id}/customer-sign-off`, {
+        customerName: customerName.trim(),
+        signOffDocumentUrl: concessionAttachmentUrl.trim(),
+        agreed: true,
+      });
+      onChanged(updated);
+    } catch (err) {
+      setDispositionError(errorMessage(err));
+    } finally {
+      setSigningCustomer(false);
+    }
+  };
+
   const handleDispose = async () => {
     if (dispositionReason.trim() === '') {
       setDispositionError('请填写处置决议理由与防范措施。');
       return;
     }
-    if (disposition === 'CONCESSION' && concessionAttachmentUrl.trim() === '') {
-      setDispositionError('特采（让步接收）必须填写客户书面签核凭证路径。');
+    if (disposition === 'CONCESSION' && !record.concessionAttachmentUrl?.trim()) {
+      setDispositionError('特采（让步接收）必须先登记客户书面签核凭证。');
       return;
     }
     try {
@@ -128,7 +152,7 @@ export function ReviewDispositionDrawer({
         disposition,
         dispositionReason: dispositionReason.trim(),
         ...(disposition === 'CONCESSION'
-          ? { concessionAttachmentUrl: concessionAttachmentUrl.trim() }
+          ? { concessionAttachmentUrl: record.concessionAttachmentUrl }
           : {}),
       });
       setDispositionReason('');
@@ -392,6 +416,25 @@ export function ReviewDispositionDrawer({
                 />
               </label>
             </div>
+            {disposition === 'CONCESSION' && (
+              <div className="flex flex-wrap items-end gap-3 text-xs">
+                <label className="block flex-1 min-w-[160px]">
+                  <span className="block text-slate-600 mb-1.5">签核客户名称</span>
+                  <input
+                    type="text"
+                    value={customerName}
+                    onChange={(e) => setCustomerName(e.target.value)}
+                    disabled={!canDispose || signingCustomer}
+                    className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-slate-700"
+                  />
+                </label>
+                <button type="button" onClick={handleCustomerSignOff}
+                  disabled={!canDispose || signingCustomer || !!record.concessionAttachmentUrl}
+                  className="px-3 py-2 rounded-xl bg-blue-600 text-white disabled:opacity-50">
+                  {record.concessionAttachmentUrl ? '客户凭证已登记' : signingCustomer ? '登记中…' : '登记客户书面签核'}
+                </button>
+              </div>
+            )}
             <label className="block text-xs">
               <span className="block text-slate-600 mb-1.5">处置决议理由与防范措施（必填）</span>
               <textarea

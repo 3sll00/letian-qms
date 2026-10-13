@@ -20,7 +20,7 @@ const ROOT = path.resolve(__dirname, '..', '..');
 const FIXTURE = path.join(ROOT, 'packages', 'infrastructure', 'fixtures', 'erp-ptype.sample.json');
 const TMP_FIXTURE = path.join(__dirname, '..', 'logs', 'erp-ptype.verify.tmp.json');
 const DB_URL =
-  process.env.DATABASE_URL || 'postgresql://letian_user:letian_secure_pass_2026@127.0.0.1:5432/letian_qms_db';
+  process.env.DATABASE_URL || 'postgresql://letian_user:letian_secure_pass_2026@127.0.0.1:5433/letian_qms_db';
 const PREFIX = 'ERP-FIX-%';
 
 let checks = 0;

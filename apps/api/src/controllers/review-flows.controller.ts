@@ -3,10 +3,13 @@ import { z } from 'zod';
 import type { ApiContainer } from '../container';
 import { operatorOf } from '../lib/operator';
 import { NotFoundError, ConflictError } from '@letian/application';
-import { ReviewFlowSchema } from '@letian/contracts';
+import { MRBFailCategoryEnum, ReviewFlowSchema } from '@letian/contracts';
 
 const ReviewFlowIdParamsSchema = z.object({
   id: z.string().uuid('流程定义ID必须为有效的UUID'),
+});
+const ApplicableFlowParamsSchema = z.object({
+  category: MRBFailCategoryEnum,
 });
 
 export const reviewFlowsController: FastifyPluginAsync<{ container: ApiContainer }> = async (
@@ -26,14 +29,18 @@ export const reviewFlowsController: FastifyPluginAsync<{ container: ApiContainer
   });
 
   // 2. 按适用类别获取当前生效的流程定义
-  fastify.get('/applicable/:category', async (request, reply) => {
-    const { category } = request.params as { category: string };
-    const flow = await repo.findApplicableFlow(category);
-    if (!flow) {
-      throw new NotFoundError(`未找到适用于 ${category} 的有效评审流程定义`);
+  fastify.get(
+    '/applicable/:category',
+    { schema: { params: ApplicableFlowParamsSchema } },
+    async (request, reply) => {
+      const { category } = request.params as z.infer<typeof ApplicableFlowParamsSchema>;
+      const flow = await repo.findApplicableFlow(category);
+      if (!flow) {
+        throw new NotFoundError(`未找到适用于 ${category} 的有效评审流程定义`);
+      }
+      return reply.status(200).send(flow);
     }
-    return reply.status(200).send(flow);
-  });
+  );
 
   // 3. 按 ID 获取单条流程
   fastify.get('/:id', { schema: { params: ReviewFlowIdParamsSchema } }, async (request, reply) => {

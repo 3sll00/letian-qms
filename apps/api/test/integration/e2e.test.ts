@@ -807,6 +807,7 @@ async function runIntegrationTests() {
       planCode: string;
       planName: string;
       materialCode: string;
+      version?: string;
       samplingConfig?: Record<string, unknown>;
     }): Promise<string> => {
       const id = crypto.randomUUID();
@@ -819,9 +820,10 @@ async function runIntegrationTests() {
           planName: params.planName,
           materialCode: params.materialCode,
           categoryCode: fallbackCategory,
-          version: 'v1.0.0',
+          version: params.version ?? 'v1.0.0',
           versionStatus: 'ACTIVE',
           inspectionStage: 'IQC',
+          inspectionTypes: JSON.stringify(['IQC']),
           items: JSON.stringify([
             {
               itemCode: 'FALLBACK-DIA-001',
@@ -883,6 +885,13 @@ async function runIntegrationTests() {
       materialCode: '',
       samplingConfig: { effectiveStartDate: '2020-01-01', effectiveEndDate: '2099-12-31' },
     });
+    await insertActivePlanRow({
+      planCode: `QP-TEST-CATEGORY-${stamp}`,
+      planName: '【测试】CAT-RAW-WIRE 分类通用方案',
+      materialCode: '',
+      version: 'v0.9.0',
+      samplingConfig: { effectiveEndDate: '2020-01-01' },
+    });
     const categoryMatched = await matchFallbackMaterial();
     assert.equal(categoryMatched.statusCode, 200, `分类通用方案应被命中，实际: ${categoryMatched.body}`);
     const categoryMatchedBody = JSON.parse(categoryMatched.body) as {
@@ -922,7 +931,15 @@ async function runIntegrationTests() {
     assert.equal(
       fallbackCreated.planVersionId,
       categoryPlanId,
-      '建单必须绑定分类兜底命中的方案版本'
+      '建单必须绑定分类兜底命中的生效版本，而非同方案中过期但仍标记 ACTIVE 的旧版本'
+    );
+    const fallbackPersisted = await db.selectFrom('inspectionOrders')
+      .select(['planSnapshot', 'items']).where('id', '=', fallbackCreated.id).executeTakeFirstOrThrow();
+    assert.equal(fallbackPersisted.planSnapshot.versionId, categoryPlanId);
+    assert.deepEqual(
+      (fallbackPersisted.items as Array<{ itemCode: string }>).map((item) => item.itemCode),
+      categoryMatchedBody.items.map((item) => (item as { itemCode: string }).itemCode),
+      '检验项 JSONB 必须与绑定版本快照的指标一致'
     );
 
     // ⑤ 补上物料专属方案 -> 优先级切换到物料级
@@ -1020,6 +1037,7 @@ async function runIntegrationTests() {
         version: 'v1.0.0',
         versionStatus: 'ACTIVE',
         inspectionStage: 'IQC',
+        inspectionTypes: JSON.stringify(['IQC']),
         // 标准语只写一个值，清单里多给一个 —— 判定必须只认清单
         items: JSON.stringify([
           {
@@ -1143,59 +1161,112 @@ async function runIntegrationTests() {
 
     const orderRows = await db
       .selectFrom('inspectionOrders')
-      .select(['batchNo', 'orderNo', 'orderType', 'status', 'judgment', 'inspectorId'])
+      .select([
+        'batchNo',
+        'orderNo',
+        'orderType',
+        'status',
+        'judgment',
+        'inspectorId',
+        'updatedAt',
+        'createdAt',
+      ])
       .execute();
     const mrbRows = await db
       .selectFrom('mrbReviews')
-      .select(['batchNo', 'mrbNo', 'status', 'disposition', 'updatedAt'])
+      .select([
+        'batchNo',
+        'mrbNo',
+        'status',
+        'disposition',
+        'updatedAt',
+        'sourceOrderNo',
+        'concessionAttachmentUrl',
+      ])
       .execute();
 
-    const OQC_TYPES = ['OQC_SF', 'OQC_SH'];
+    const OQC_TYPES = ['OQC_SH'];
     type GateExpectation =
       | { kind: 'blocked'; code: string }
       | { kind: 'allowed'; overallDecision: string | null; disposition: string | null };
 
+    /** 复检轮次：`-R{n}` 后缀（与领域 reinspectionRoundOf 同口径） */
+    const reinspectionRoundOf = (orderNo: string): number => {
+      const matched = /-R(\d+)$/.exec(orderNo);
+      return matched ? Number(matched[1]) : 0;
+    };
+    /** 权威上游排序：复检轮次最高 -> updatedAt 最新 -> createdAt 最新 -> 单号倒序（与领域 pickAuthoritativeUpstream 同口径） */
+    const newestFirst = <T extends { updatedAt: Date; createdAt: Date; orderNo: string }>(
+      rows: readonly T[]
+    ): T[] =>
+      [...rows].sort(
+        (a, b) =>
+          reinspectionRoundOf(b.orderNo) - reinspectionRoundOf(a.orderNo) ||
+          b.updatedAt.getTime() - a.updatedAt.getTime() ||
+          b.createdAt.getTime() - a.createdAt.getTime() ||
+          b.orderNo.localeCompare(a.orderNo)
+      );
+
     /**
-     * 测试侧独立推导的放行关卡期望（规则来源：release-gates 控制器的放行口径）：
-     * 优先取该批次的成品检(OQC)工单；工单必须已结单归档(COMPLETED)，
-     * 不合格工单需存在 DISPOSED + CONCESSION 的 MRB 评审单才允许受限放行。
+     * 测试侧独立推导的放行关卡期望（规则来源：docs/48 §2~§3 与 TBD-02）：
+     * 口径是「判定合格即可放行」—— 不要求 status = COMPLETED（TBD-02 已确认）；
+     * 不合格 / 特采 / 已进 MRB 的工单一律回到 MRB 结论：DISPOSED + CONCESSION 且
+     * 客户书面授权件在位才受限放行，REWORK 视为仍在返工复检，退货 / 报废与无结论一律阻断。
      */
-    const expectedGate = (batchNo: string): GateExpectation => {
+    const expectedGate = (batchNo: string, gateType: 'PROCESS_TRANSFER' | 'OUTBOUND_SHIPMENT' = 'OUTBOUND_SHIPMENT'): GateExpectation => {
       const orders = orderRows.filter((row) => row.batchNo === batchNo);
       if (orders.length === 0) return { kind: 'blocked', code: ErrorCode.GATE_NOT_INSPECTED };
 
-      const inspection = orders.find((row) => OQC_TYPES.includes(row.orderType)) ?? orders[0];
+      const gateOrders = orders.filter((row) => gateType === 'PROCESS_TRANSFER'
+        ? row.orderType === 'IPQC_FN'
+        : OQC_TYPES.includes(row.orderType));
+      // 出货关卡只认 OQC_SH；只有 OQC_SF 或 IPQC_FN 的批次仍视为出货未检。
+      if (gateOrders.length === 0) return { kind: 'blocked', code: ErrorCode.GATE_NOT_INSPECTED };
+      const inspection = newestFirst(gateOrders)[0];
       assert.ok(inspection, '批次应至少存在一条检验工单');
 
-      const mrb =
-        mrbRows
-          .filter((row) => row.batchNo === batchNo)
-          .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0] ?? null;
-      const underReview = mrb !== null && (mrb.status === 'PENDING_REVIEW' || mrb.status === 'UNDER_REVIEW');
+      // MRB 仅按来源检验单号关联，不能借同批次其它环节的处置结论放行
+      const mrb = mrbRows
+        .filter((row) => row.sourceOrderNo === inspection.orderNo)
+        .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0] ?? null;
 
-      if (inspection.status !== 'COMPLETED') {
-        if ((inspection.status === 'FAILED' || inspection.status === 'IN_MRB_REVIEW') && underReview) {
+      /** 上游不合格后的 MRB 三分支（与领域 evaluateNonconforming 同口径） */
+      const byMrbConclusion = (): GateExpectation => {
+        if (mrb === null) return { kind: 'blocked', code: ErrorCode.GATE_FAILED };
+        if (mrb.status === 'PENDING_REVIEW' || mrb.status === 'UNDER_REVIEW') {
           return { kind: 'blocked', code: ErrorCode.GATE_UNDER_MRB };
         }
-        if (inspection.status === 'FAILED' || inspection.status === 'IN_MRB_REVIEW') {
-          return { kind: 'blocked', code: ErrorCode.GATE_FAILED };
+        if (mrb.status === 'REJECTED') return { kind: 'blocked', code: ErrorCode.GATE_FAILED };
+        switch (mrb.disposition) {
+          case 'CONCESSION':
+            return (mrb.concessionAttachmentUrl ?? '').trim() === ''
+              ? { kind: 'blocked', code: ErrorCode.GATE_FAILED }
+              : { kind: 'allowed', overallDecision: inspection.judgment, disposition: 'CONCESSION' };
+          case 'REWORK':
+            return { kind: 'blocked', code: ErrorCode.GATE_INSPECTING };
+          case 'RETURN_TO_VENDOR':
+          case 'SCRAP':
+            return { kind: 'blocked', code: ErrorCode.GATE_FAILED };
+          default:
+            return { kind: 'blocked', code: ErrorCode.GATE_FAILED };
         }
-        return { kind: 'blocked', code: ErrorCode.GATE_INSPECTING };
-      }
-
-      if (inspection.judgment === 'FAILED') {
-        if (underReview) return { kind: 'blocked', code: ErrorCode.GATE_UNDER_MRB };
-        if (mrb !== null && mrb.status === 'DISPOSED' && mrb.disposition === 'CONCESSION') {
-          return { kind: 'allowed', overallDecision: 'FAILED', disposition: 'CONCESSION' };
-        }
-        return { kind: 'blocked', code: ErrorCode.GATE_FAILED };
-      }
-
-      return {
-        kind: 'allowed',
-        overallDecision: inspection.judgment,
-        disposition: inspection.judgment === 'CONCESSION' ? 'CONCESSION' : null,
       };
+
+      // 1. 结论明确合格：判定已出即可放行（TBD-02，不要求 status = COMPLETED）
+      if (inspection.judgment === 'PASSED') {
+        return { kind: 'allowed', overallDecision: inspection.judgment, disposition: null };
+      }
+      // 2. 特采结论（MRB 回写产物）与不合格：一律回 MRB 结论复核（授权件撤销即失效）
+      if (inspection.judgment === 'CONCESSION') return byMrbConclusion();
+      if (inspection.judgment === 'FAILED' || inspection.status === 'FAILED') return byMrbConclusion();
+      // 3. 已进入 MRB 流程：结案后才按结论判定
+      if (inspection.status === 'IN_MRB_REVIEW') {
+        return mrb !== null && mrb.status === 'DISPOSED'
+          ? byMrbConclusion()
+          : { kind: 'blocked', code: ErrorCode.GATE_UNDER_MRB };
+      }
+      // 4. 其余（PENDING / INSPECTING / RE_INSPECTING / COMPLETED 无终判）一律视为尚未得出合格结论
+      return { kind: 'blocked', code: ErrorCode.GATE_INSPECTING };
     };
 
     const batchNos = [...new Set(orderRows.map((row) => row.batchNo))].sort();
@@ -1232,6 +1303,7 @@ async function runIntegrationTests() {
       '真实库中缺少"合格并已结单归档"的样本，该放行分支未被验证'
     );
 
+    const gateAuditSince = new Date();
     const auditBeforeGates = await countAuditLogs();
     for (const batchNo of gateTargets) {
       const expected = expectations.get(batchNo);
@@ -1285,12 +1357,50 @@ async function runIntegrationTests() {
       }
     }
 
-    // 纯只读保证：放行评估绝不写入审计日志
+    // 留痕保证（docs/48 §8 硬约束 5）：关卡判定不写任何业务数据，
+    // 但**每次判定都必须留痕** —— 放行记 STATUS_CHANGE、阻断记 GATE_BLOCKED，
+    // 一次调用恰好一条，客户追问「这批为什么放不了」时查得到（阻断不再随异常回滚而消失）。
     assert.equal(
-      await countAuditLogs(),
-      auditBeforeGates,
-      'release-gates 接口是纯只读的，绝不产生审计日志副作用'
+      (await countAuditLogs()) - auditBeforeGates,
+      gateTargets.length,
+      'release-gates 每次判定必须恰好留痕 1 条审计（放行 / 阻断都要留）'
     );
+    const blockedExpectationCount = [...expectations.values()].filter(
+      (e) => e.kind === 'blocked'
+    ).length;
+    const gateAudits = await db
+      .selectFrom('auditLogs')
+      .select(['action'])
+      .where('entityName', '=', 'RELEASE_GATE')
+      .where('occurredAt', '>=', gateAuditSince)
+      .execute();
+    assert.equal(
+      gateAudits.filter((row) => row.action === 'GATE_BLOCKED').length,
+      blockedExpectationCount,
+      '每一次阻断都必须留痕 GATE_BLOCKED（无检验单 / 检验中 / MRB 评审中 / 不合格四类分支）'
+    );
+    assert.equal(
+      gateAudits.filter((row) => row.action === 'STATUS_CHANGE').length,
+      gateTargets.length - blockedExpectationCount,
+      '每一次放行同样必须留痕（放行也要可追溯，不能只有阻断才留）'
+    );
+
+    const finishedRow = orderRows.find((row) => row.orderType === 'IPQC_FN');
+    assert.ok(finishedRow, '真实库中必须有 IPQC_FN 才能验证过程成品放行关卡');
+    for (const batchNo of [finishedRow.batchNo, notInspectedBatch]) {
+      const expected = expectedGate(batchNo, 'PROCESS_TRANSFER');
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/v1/release-gates/${batchNo}?gateType=PROCESS_TRANSFER`,
+        headers: authHeader,
+      });
+      assert.equal(res.statusCode, expected.kind === 'blocked' ? 409 : 200);
+      if (expected.kind === 'blocked') {
+        const body = JSON.parse(res.body);
+        assert.equal(body.code, expected.code);
+        assert.equal(body.requiredGate, 'IPQC_FN');
+      }
+    }
 
     // 对照：追溯查询是"读 + 审计留痕"，必须恰好新增 1 条审计
     const auditBeforeTrace = await countAuditLogs();
@@ -1305,7 +1415,7 @@ async function runIntegrationTests() {
       auditBeforeTrace + 1,
       '追溯穿透查询应按实现写入 1 条审计日志'
     );
-    console.log('✔ 放行关卡 4 类阻断 + 2 类放行均由真实库推导校验，且为纯只读');
+    console.log('✔ 放行关卡 4 类阻断 + 2 类放行均由真实库推导校验，且每次判定恰好留痕 1 条审计');
 
     // =======================================================================
     // 4. 审计统计与追溯响应契约
@@ -2223,7 +2333,7 @@ async function runIntegrationTests() {
     //      否则页面新建方案会被 400 挡在门外（界面无法为尚不存在的版本行编造 UUID）；
     //   2. 版本生效周期必须真实落到 sampling_config 并能在读侧回放，
     //      方案列表的「未生效 / 已过期」提示才有真实依据；
-    //   3. 首个版本一律以 DRAFT 落库（待审批后启用），请求体里写 ACTIVE 也不生效。
+    //   3. 首个版本直接以 ACTIVE 落库（保存即启用，方案不再有「草稿 → 审批」链路）。
     // ----------------------------------------------------------------------
     const periodStamp = Date.now();
     const periodPlanCode = `QP-PERIOD-${periodStamp}`;
@@ -2287,8 +2397,8 @@ async function runIntegrationTests() {
     assert.equal(createdPlanRows.length, 1, '新建方案应落 1 行版本记录');
     assert.equal(
       createdPlanRow.versionStatus,
-      'DRAFT',
-      '新建方案的首个版本一律以 DRAFT 落库（请求体写 ACTIVE 也必须被忽略）'
+      'ACTIVE',
+      '新建方案的首个版本保存即启用（ACTIVE）'
     );
     const storedSamplingConfig = createdPlanRow.samplingConfig as {
       effectiveStartDate?: string;
@@ -2362,15 +2472,14 @@ async function runIntegrationTests() {
     assert.equal(orphanEmptyRows.length, 0, '被拒绝的空草稿不得留下任何版本行');
 
     // ----------------------------------------------------------------------
-    // 质检方案设计页「版本启停（审批）」链路（TBD-01）：
-    //   新建方案一律以 DRAFT 落库，而建单侧的方案匹配（/plans/match）只认 ACTIVE 版本，
-    //   因此必须存在一条审批路由把版本从「待审批」推到「已启用」，
-    //   否则方案永远停在草稿态，生效周期配置在真实系统里根本用不上。
-    //   守门点：
-    //   1. 角色门禁：检验员无权启停（配置变更类动作归质量主管），必须 403；
+    // 质检方案设计页「版本停用」链路（TBD-01）：
+    //   方案的生命周期已简化为 启用 ↔ 停用 —— 新建 / 导入即启用（保存后直接参与检验录入的
+    //   自动匹配），不再需要的方案在方案列表直接「停用」，故新增版本行一律落在 ACTIVE。
+    //   本链路仍钉死停用端点自身的守门语义（后端 /versions/:id/status 保留给启用 / 停用两种动作）：
+    //   1. 角色门禁：检验员无权停用（配置变更类动作归质量主管），必须 403；
     //   2. 参数守门：非契约动作 400、不存在的版本 UUID 404（严禁静默回退到别的版本）；
-    //   3. 审批启用：DRAFT -> ACTIVE，方案级状态随之 ENABLED，且真实落库；
-    //   4. 单激活态：同方案审批新版本时，旧 ACTIVE 版本必须自动转 INACTIVE；
+    //   3. 重复启用幂等：对已 ACTIVE 的版本再 ACTIVATE 仍 200，不改变任何版本行；
+    //   4. 单激活态：同方案启用新版本时，旧 ACTIVE 版本必须自动转 INACTIVE；
     //   5. 停用：ACTIVE -> INACTIVE，方案级状态回到 DISABLED；
     //   6. KPI 口径同步：/plans/stats 的 已启用 / 待审批 必须跟着版本状态变化。
     // ----------------------------------------------------------------------
@@ -2421,23 +2530,8 @@ async function runIntegrationTests() {
       ErrorCode.VALIDATION_FAILED,
       '非契约动作的 400 必须走契约的 validation-failed 口径（而非自定义大写码）'
     );
-    // DRAFT 版本不可直接停用（只有 ACTIVE 才可停用）
-    const deactivateDraftRes = await app.inject({
-      method: 'POST',
-      url: `/api/v1/plans/versions/${periodVersionId}/status`,
-      headers: authHeader,
-      payload: { action: 'DEACTIVATE' },
-    });
-    assert.equal(
-      deactivateDraftRes.statusCode,
-      400,
-      `DRAFT 版本不可停用，实际: ${deactivateDraftRes.statusCode} ${deactivateDraftRes.body}`
-    );
-    assert.equal(
-      (JSON.parse(deactivateDraftRes.body) as { code: string }).code,
-      'plan-toggle-failed',
-      '启停失败必须携带小写短横线错误码 plan-toggle-failed（RFC 7807 type URI 口径）'
-    );
+    // 新建即启用的版本可直接停用，且停用真实落库（此处只验证 ACL 与参数是先于业务动作生效的，
+    // 完整的停用结果校验见本链路第 5 步）
     const missingVersionRes = await app.inject({
       method: 'POST',
       url: '/api/v1/plans/versions/00000000-0000-4000-8000-0000000000ff/status',
@@ -2455,7 +2549,7 @@ async function runIntegrationTests() {
       '未找到版本行的 404 必须携带小写短横线错误码 plan-not-found'
     );
 
-    // 3. 审批启用：DRAFT -> ACTIVE
+    // 3. 重复启用幂等：新建即启用，对已 ACTIVE 的版本再 ACTIVATE 必须 "放行且不产生副作用"
     const activateRes = await app.inject({
       method: 'POST',
       url: `/api/v1/plans/versions/${periodVersionId}/status`,
@@ -2465,7 +2559,7 @@ async function runIntegrationTests() {
     assert.equal(
       activateRes.statusCode,
       200,
-      `质量主管启用 DRAFT 版本必须成功，实际: ${activateRes.statusCode} ${activateRes.body}`
+      `对已 ACTIVE 版本重复 ACTIVATE 必须幂等放行，实际: ${activateRes.statusCode} ${activateRes.body}`
     );
     const activatedPlan = JSON.parse(activateRes.body) as {
       status?: string;
@@ -2479,11 +2573,11 @@ async function runIntegrationTests() {
         activatedParsed.success ? '' : activatedParsed.error.issues.slice(0, 3)
       )}`
     );
-    assert.equal(activatedPlan.status, 'ENABLED', '启用后方案级状态必须为 ENABLED');
+    assert.equal(activatedPlan.status, 'ENABLED', '启用态（含重复启用）方案级状态必须为 ENABLED');
     assert.equal(
       (activatedPlan.versions ?? []).find((version) => version.id === periodVersionId)?.status,
       'ACTIVE',
-      '被审批的版本必须转 ACTIVE'
+      '已启用的版本重复 ACTIVATE 后仍为 ACTIVE'
     );
     const afterActivateRows = await db
       .selectFrom('inspectionPlans')
@@ -2504,18 +2598,19 @@ async function runIntegrationTests() {
       enabled: number;
       pending: number;
     };
+    // 新建即启用：KPI 在创建时已计入「已启用」，重复启用不改变任何计数
     assert.equal(
       statsAfterActivate.enabled,
-      statsBeforeToggle.enabled + 1,
-      '审批启用后 KPI 已启用数必须 +1（该方案由待审批转入已启用）'
+      statsBeforeToggle.enabled,
+      '方案已在创建时计入已启用，重复启用不应让 KPI 计数漂移'
     );
     assert.equal(
       statsAfterActivate.pending,
-      statsBeforeToggle.pending - 1,
-      '审批启用后 KPI 待审批数必须 -1'
+      statsBeforeToggle.pending,
+      '新建方案不再产生待审批草稿，重复启用不应改变待审批计数'
     );
 
-    // 4. 单激活态：同方案追加 V2.0 并审批启用，旧 ACTIVE（V1.0）必须自动转 INACTIVE
+    // 4. 单激活态：同方案追加 V2.0（新增版本行同样即启用），旧 ACTIVE（V1.0）自动转 INACTIVE
     const secondVersionRes = await app.inject({
       method: 'POST',
       url: '/api/v1/plans',
@@ -2622,13 +2717,13 @@ async function runIntegrationTests() {
     };
     assert.equal(
       statsAfterToggle.enabled,
-      statsBeforeToggle.enabled,
-      '探针方案停用后已启用数应回到启用前基线'
+      statsBeforeToggle.enabled - 1,
+      '探针方案停用后已启用数必须 -1（该方案在创建时即计入已启用）'
     );
     assert.equal(
       statsAfterToggle.pending,
-      statsBeforeToggle.pending - 1,
-      '探针方案停用后不再计入待审批（无 DRAFT 版本）'
+      statsBeforeToggle.pending,
+      '探针方案未经草稿态，停用前后待审批计数不变'
     );
 
     // ----------------------------------------------------------------------

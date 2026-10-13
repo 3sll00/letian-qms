@@ -42,12 +42,14 @@ export class DecideMrbDispositionUseCase {
         throw new ApplicationError('MRB_NOT_FOUND', `未找到 MRB 评审单 [${cmd.mrbId}]`, 404);
       }
 
+      const sourceOrder = await ctx.inspectionOrders.findByOrderNo(review.sourceOrderNo);
       if (securityCtx) {
         // 从物料主数据解析真实分类；查不到时 UNKNOWN 不命中任何白名单（fail-closed）
         const material = await ctx.materials.getMaterialByCode(review.materialCode);
         securityCtx.assertAccess({
           targetCategory: material?.categoryCode ?? 'UNKNOWN',
           targetMaterialCode: review.materialCode,
+          ...(sourceOrder?.supplierCode !== undefined ? { targetSupplierCode: sourceOrder.supplierCode } : {}),
         });
       }
 
@@ -62,7 +64,7 @@ export class DecideMrbDispositionUseCase {
       // 锁定批次
       await ctx.locks.acquireXactLock(review.batchNo);
 
-      const effectiveConcessionUrl = cmd.concessionAttachmentUrl || review.concessionAttachmentUrl;
+      const effectiveConcessionUrl = review.concessionAttachmentUrl?.trim();
       // 特采让步校验：必须已上传客户书面同意书附件
       if (cmd.disposition === 'CONCESSION') {
         if (!effectiveConcessionUrl) {
@@ -94,7 +96,6 @@ export class DecideMrbDispositionUseCase {
       // 只加门禁不回写，会让让步接收后的批次永久卡死，比不加门禁更糟（§8 硬约束 1）。
       // 三种处置在传递语义上并不同构：让步接收 = 受限解锁；返工 = 条件解锁（等复检）；
       // 退货 / 报废 = 整链终止（下游禁建单 + 已建未终判单冻结）。
-      const sourceOrder = await ctx.inspectionOrders.findByOrderNo(review.sourceOrderNo);
       if (sourceOrder !== null && cmd.disposition === 'CONCESSION') {
         const concessionOrderId = sourceOrder.id;
         if (concessionOrderId !== undefined) {
@@ -117,7 +118,8 @@ export class DecideMrbDispositionUseCase {
       // 关键规则：返工决策必须触发复检轮次生成
       if (cmd.disposition === 'REWORK') {
         const reinspectionUseCase = new CreateReinspectionUseCase(this.uow);
-        const reinspectionDTO = await reinspectionUseCase.execute(
+        const reinspectionDTO = await reinspectionUseCase.runInTransaction(
+          ctx,
           {
             parentOrderId: sourceOrder?.id ?? review.sourceOrderNo,
             reworkReason: `[MRB处置-${review.mrbNo}] ${cmd.dispositionReason}`,

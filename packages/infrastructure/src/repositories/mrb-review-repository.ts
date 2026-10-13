@@ -46,6 +46,25 @@ export interface MRBListResult {
   items: MRBReview[];
 }
 
+/** 后台催办任务所需的超时 MRB 投影（只包含告警载荷，不扩散契约 DTO） */
+export interface OverdueMrbReview {
+  id: string;
+  mrbNo: string;
+  sourceType: string;
+  sourceOrderNo: string;
+  batchNo: string;
+  materialCode: string;
+  materialName: string;
+  defectDescription: string;
+  defectQty: number;
+  status: 'PENDING_REVIEW' | 'UNDER_REVIEW';
+  urgencyLevel: MRBUrgencyLevel;
+  createdAt: Date;
+  updatedAt: Date;
+  lastRemindedAt: Date | null;
+  reminderCount: number;
+}
+
 function toSourceType(value: string): MRBFailCategory {
   if (!SOURCE_TYPES.includes(value)) {
     throw new Error(`MRB_SOURCE_TYPE_INVALID: 非法的不合格来源类型 [${value}]`);
@@ -325,6 +344,76 @@ export class KyselyMRBReviewRepository implements IMRBReviewRepository {
       .execute();
 
     return rows.map((row) => this.mapRow(row));
+  }
+
+  /**
+   * 查询超过裁决时限且仍处于非终局的 MRB。
+   * created_at 是发起时间；DISPOSED / REJECTED 不再进入催办候选集。
+   */
+  public async findOverdueUndecided(params: {
+    overdueBefore: Date;
+    /** 传 null 表示每张单只催办一次 */
+    remindAgainBefore: Date | null;
+    limit: number;
+  }): Promise<OverdueMrbReview[]> {
+    const rows = await this.db
+      .selectFrom('mrbReviews')
+      .selectAll()
+      .where('status', 'in', ['PENDING_REVIEW', 'UNDER_REVIEW'])
+      .where('createdAt', '<=', params.overdueBefore)
+      .where((eb) =>
+        params.remindAgainBefore === null
+          ? eb('lastRemindedAt', 'is', null)
+          : eb.or([
+              eb('lastRemindedAt', 'is', null),
+              eb('lastRemindedAt', '<=', params.remindAgainBefore),
+            ])
+      )
+      .orderBy('createdAt', 'asc')
+      .limit(params.limit)
+      .execute();
+
+    return rows.map((row) => ({
+      id: row.id,
+      mrbNo: row.mrbNo,
+      sourceType: row.sourceType,
+      sourceOrderNo: row.sourceOrderNo,
+      batchNo: row.batchNo,
+      materialCode: row.materialCode,
+      materialName: row.materialName,
+      defectDescription: row.defectDescription,
+      defectQty: Number(row.defectQty),
+      status: row.status as 'PENDING_REVIEW' | 'UNDER_REVIEW',
+      urgencyLevel: toUrgencyLevel(row.urgencyLevel),
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      lastRemindedAt: row.lastRemindedAt,
+      reminderCount: row.reminderCount,
+    }));
+  }
+
+  /**
+   * 催办落痕：标红告警统一收敛为 urgency_level=CRITICAL。
+   * 更新仍限定非终局状态，通知发送与查询之间若已处置/驳回，不会误把终态单据再标红。
+   */
+  public async markReminderSent(
+    id: string,
+    remindedAt: Date,
+    escalateToCritical = true
+  ): Promise<boolean> {
+    const result = await this.db
+      .updateTable('mrbReviews')
+      .set((eb) => ({
+        lastRemindedAt: remindedAt,
+        reminderCount: eb('reminderCount', '+', 1),
+        updatedAt: remindedAt,
+        ...(escalateToCritical ? { urgencyLevel: 'CRITICAL' } : {}),
+      }))
+      .where('id', '=', id)
+      .where('status', 'in', ['PENDING_REVIEW', 'UNDER_REVIEW'])
+      .executeTakeFirst();
+
+    return Number(result.numUpdatedRows ?? 0) > 0;
   }
 
   public async save(review: MRBReview): Promise<void> {

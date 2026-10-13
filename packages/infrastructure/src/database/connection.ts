@@ -30,18 +30,40 @@ export interface DatabaseConfig {
   ssl?: boolean | { rejectUnauthorized: boolean };
 }
 
+function intFromEnv(name: string, fallback: number): number {
+  const parsed = Number.parseInt(process.env[name] ?? '', 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 export function createDatabaseConnection(config?: DatabaseConfig): Kysely<Database> {
+  const hasDiscreteDbConfig = Boolean(
+    config?.host ||
+      config?.port ||
+      config?.database ||
+      config?.user ||
+      config?.password ||
+      process.env.DB_HOST ||
+      process.env.DB_PORT ||
+      process.env.DB_NAME ||
+      process.env.DB_USER ||
+      process.env.DB_PASSWORD
+  );
+  const connectionString =
+    config?.connectionString ||
+    process.env.DATABASE_URL ||
+    (hasDiscreteDbConfig ? undefined : 'postgres://postgres:postgres@localhost:5432/letian_qms');
+
   const pool = new Pool({
-    connectionString:
-      config?.connectionString ||
-      process.env.DATABASE_URL ||
-      'postgres://postgres:postgres@localhost:5432/letian_qms',
-    host: config?.host || process.env.DB_HOST,
-    port: config?.port || (process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : undefined),
-    database: config?.database || process.env.DB_NAME,
-    user: config?.user || process.env.DB_USER,
-    password: config?.password || process.env.DB_PASSWORD,
-    max: config?.max || 20,
+    ...(connectionString !== undefined
+      ? { connectionString }
+      : {
+          host: config?.host || process.env.DB_HOST || 'localhost',
+          port: config?.port || intFromEnv('DB_PORT', 5432),
+          database: config?.database || process.env.DB_NAME || 'letian_qms',
+          user: config?.user || process.env.DB_USER || 'postgres',
+          password: config?.password || process.env.DB_PASSWORD || 'postgres',
+        }),
+    max: config?.max || intFromEnv('DB_POOL_MAX', 20),
     ssl: config?.ssl || (process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined),
   });
 

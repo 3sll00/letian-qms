@@ -14,7 +14,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const DB_URL =
-  process.env.DATABASE_URL || 'postgresql://letian_user:letian_secure_pass_2026@127.0.0.1:5432/letian_qms_db';
+  process.env.DATABASE_URL || 'postgresql://letian_user:letian_secure_pass_2026@127.0.0.1:5433/letian_qms_db';
 
 const positional = process.argv.slice(2).filter((x) => !x.startsWith('-'));
 const limit = Number.isFinite(Number(positional[0])) ? Number(positional[0]) : 5;

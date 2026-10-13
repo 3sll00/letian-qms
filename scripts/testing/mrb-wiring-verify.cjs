@@ -25,7 +25,7 @@ const path = require('node:path');
 const BASE = process.env.MRB_WIRING_BASE ?? 'http://127.0.0.1:3101/api/v1';
 const DB =
   process.env.DATABASE_URL ??
-  'postgresql://letian_user:letian_secure_pass_2026@127.0.0.1:5432/letian_qms_db';
+  'postgresql://letian_user:letian_secure_pass_2026@127.0.0.1:5433/letian_qms_db';
 
 /**
  * pg 依赖解析：仓库用 pnpm 隔离式 node_modules，scripts/ 不是工作区包，

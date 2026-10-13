@@ -1,6 +1,7 @@
 import type {
   QualityCertificateData,
   ManufacturingCertData,
+  ManufacturingCertRow,
   CertificateCompanyProfile,
   ChemicalElementValue,
   MechanicalPropertyItem,
@@ -138,6 +139,24 @@ function certSupplierText(record: any, profile: CertificateCompanyProfile | unde
     .join(' / ');
 }
 
+/**
+ * 证书专用字段袋（`inspection_orders.cert_fields`，docs/51）读侧归一化。
+ *
+ * 调用方来源有三族（检验单 DTO / 列表行 / 表单暂存对象），字段袋可能挂在 `certFields` 键下、
+ * 也可能还没从后端回来；这里统一收窄成 `Record<string,string>`，非对象/非串值一律丢弃 ——
+ * 与「证书只映射真实值」同一条口径，不把未知结构渲成文本。
+ */
+function certFieldsOf(record: any): Record<string, string> {
+  const raw = record?.certFields;
+  if (raw === null || raw === undefined || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const bag: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const text = firstCertText(value);
+    if (text !== '') bag[key] = text;
+  }
+  return bag;
+}
+
 /** 证书分段展示名（与 planMatch 的 PLAN_SECTION_LABEL 同口径，避免 lib 层反向依赖表单层） */
 const CERT_SECTION_LABEL = {
   CHEMICAL: '化学成分',
@@ -233,17 +252,45 @@ export function detectSteelGrade(name = '', spec = ''): string {
   return '';
 }
 
+/** 解析「C≤0.08 Si≤1 Mn≤2 P≤0.045 S≤0.03 Ni 8~10.5 Cr 18~20」式多元素文本 -> [{element,value}] */
+function parseElementPairs(text: string): { element: string; value: string }[] {
+  const pairs: { element: string; value: string }[] = [];
+  const re = /([A-Z][a-z]?)\s*([≤≥<>=]?)\s*(\d+(?:\.\d+)?(?:\s*[~～—–-]\s*\d+(?:\.\d+)?)?)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    pairs.push({ element: m[1], value: `${m[2]}${m[3]}`.replace(/\s+/g, '') });
+  }
+  return pairs;
+}
+
 export function getChemicalComposition(items?: unknown): { elements: ChemicalElementValue[] } {
   const chem = pickMeasuredItems(items, ['CHEMICAL_COMPOSITION'], ['CHEM_']);
-  return {
-    elements: chem.map((item) => ({
-      element: String(item.name ?? '')
-        .replace(/含量.*|\(.*\)/g, '')
-        .trim(),
-      standard: standardTextOf(item),
-      actual: actualTextOf(item),
-    })),
-  };
+  const elements: ChemicalElementValue[] = [];
+  for (const item of chem) {
+    const std = standardTextOf(item);
+    const act = actualTextOf(item);
+    const stdPairs = parseElementPairs(std);
+    if (stdPairs.length > 1) {
+      // 整段「C≤0.08 Si≤1 ...」文本 -> 逐元素一列（C/Si/Mn/P/S/Ni/Cr...），实测值按元素符号对齐
+      const actPairs = parseElementPairs(act);
+      for (const p of stdPairs) {
+        const a = actPairs.find((x) => x.element === p.element);
+        elements.push({ element: p.element, standard: p.value, actual: a?.value ?? '' });
+      }
+    } else {
+      // 非多元素文本（单项指标等）保持原样：取检验项名称作列名
+      elements.push({
+        element: String(item.name ?? '')
+          .replace(/含量.*|\(.*\)/g, '')
+          // 「化学成分 Chemical Composition」是检验项通用名，不是元素符号，证书列表头不展示
+          .replace(/化学成分\s*Chemical\s*Composition/gi, '')
+          .trim(),
+        standard: std,
+        actual: act,
+      });
+    }
+  }
+  return { elements };
 }
 
 export function getMechanicalProperties(items?: unknown): { items: MechanicalPropertyItem[] } {
@@ -274,6 +321,7 @@ export function getDimensions(items?: unknown): DimensionItem[] {
 
 export function buildIqcCertificateData(record: any): QualityCertificateData {
   const docNo = firstCertText(record.orderNo, record.docNo);
+  const cf = certFieldsOf(record);
   const companyProfile = normalizeCompanyProfile(record.companyProfile);
   const chemicalComposition = getChemicalComposition(record.items);
   const mechanicalProperties = getMechanicalProperties(record.items);
@@ -292,6 +340,17 @@ export function buildIqcCertificateData(record: any): QualityCertificateData {
     // IQC 的「供货单位」是**供应商主数据**（真实来源与 OQC 出厂场景不同，不混用企业档案，docs/35 §6）
     supplier: firstCertText(record.supplier, record.supplierName),
     contractNo: firstCertText(record.contractNo),
+    // 质保书字段网格补充格（docs/51 模板B）：表头列取不到时回落 cert_fields 袋；
+    // 都没有即空串，网格对应格留白（不编造订单号 / 抽样日期 / 制造商）。
+    // 「订单号」格是客户订单号，不是本单检验单号（检验单号已进 certNo/报告编号格）。
+    orderNo: firstCertText(cf.orderNo),
+    shippedQty: firstCertText(record.shippedQty, record.totalQty, cf.shippedQty),
+    productNo: firstCertText(record.productNo, cf.productNo),
+    samplingDate: firstCertText(record.samplingDate, cf.samplingDate),
+    marking: firstCertText(record.marking, cf.marking),
+    inspectionDate: firstCertText(record.inspectionDate, record.inspectedDate, cf.inspectionDate),
+    manufacturer: firstCertText(record.manufacturer, cf.manufacturer),
+    samplingPlan: firstCertText(record.samplingPlan, cf.samplingPlan),
     productName: firstCertText(record.material, record.materialName, record.productName),
     specification: firstCertText(record.spec, record.specModel, record.specification),
     heatNo: firstCertText(record.furnaceNo, record.furnaceHeatNo, record.heatNo),
@@ -325,6 +384,7 @@ export function buildIqcCertificateData(record: any): QualityCertificateData {
 
 export function buildOqcCertificateData(record: any): QualityCertificateData {
   const docNo = firstCertText(record.orderNo, record.docNo);
+  const cf = certFieldsOf(record);
   const companyProfile = normalizeCompanyProfile(record.companyProfile);
   const chemicalComposition = getChemicalComposition(record.items);
   const mechanicalProperties = getMechanicalProperties(record.items);
@@ -343,6 +403,17 @@ export function buildOqcCertificateData(record: any): QualityCertificateData {
     // 调用方给出真实供应商快照时优先用调用方的（委外转出货等场景），两者都无即留空
     supplier: certSupplierText(record, companyProfile),
     contractNo: firstCertText(record.contractNo),
+    // 质保书字段网格补充格（docs/51 模板B）：与 IQC 同一口径，回落 cert_fields 袋。
+    // 「订单号」格优先取销售出库台账真实字段（008），其次 cert_fields 袋；
+    // 不拿检验单号顶替（检验单号已进 certNo/报告编号格）。
+    orderNo: firstCertText(record.salesOrderPoNo, record.salesOrderNo, cf.orderNo),
+    shippedQty: firstCertText(record.shippedQty, record.totalQty, cf.shippedQty),
+    productNo: firstCertText(record.productNo, cf.productNo),
+    samplingDate: firstCertText(record.samplingDate, cf.samplingDate),
+    marking: firstCertText(record.marking, cf.marking),
+    inspectionDate: firstCertText(record.inspectionDate, record.inspectedDate, cf.inspectionDate),
+    manufacturer: firstCertText(record.manufacturer, cf.manufacturer),
+    samplingPlan: firstCertText(record.samplingPlan, cf.samplingPlan),
     productName: firstCertText(record.productName, record.name, record.materialName),
     specification: firstCertText(record.specification, record.spec, record.specModel),
     heatNo: firstCertText(record.heatNo, record.furnaceHeatNo, record.furnaceNo),
@@ -389,13 +460,96 @@ export function buildOqcCertificateData(record: any): QualityCertificateData {
  *
  * 签发日期：有真实日期即用；没有则取「今天」（本证书的生成动作真实发生日，不是编造的历史日期）。
  */
+/**
+ * 制造证书 14 列产品主表行组装（docs/51 模板A）。
+ *
+ * 调用方给 `record.rows` 数组（多产品场景）即逐行归一化透传；否则按「单产品单」从表头列
+ * 与 cert_fields 袋拼一行 —— 单产品单是委外/出货检验的常态。所有列只映射真实值，未录入即空串。
+ *
+ * 列优先级：**行内真实值 > cert_fields 手工补录 > 单据表头同源字段 > 空串**。
+ * 手工补录排在自动带出之前，操作员显式填过的值不会被自动值悄悄改写；单据表头同源字段
+ * 只搬运检验单上已有的真实值，不做译名或单位推断。
+ */
+function manufacturingRows(record: any, cf: Record<string, string>): ManufacturingCertRow[] {
+  /**
+   * 单据表头同源字段：台账「证书」按钮与录入页「预览证书」两条入口的字段名并不一致
+   * （前者传 `process`，后者传 `processType`），这里统一收口，避免同一列在两条路径上表现不一。
+   */
+  const headerValue = {
+    type: record?.processType ?? record?.process,
+    materialGrade: record?.materialGrade ?? record?.steelGrade,
+    specification: record?.specification ?? record?.spec ?? record?.partSpec,
+    quantity: record?.quantityPcs ?? record?.quantity ?? record?.sampleQty,
+  };
+  const sanitize = (row: Record<string, unknown>, index: number): ManufacturingCertRow => ({
+    // 客户工序编号就是主表行序（1、2、3…），随行自动编号；手工指定过则保留手工值
+    customerProcessNo: firstCertText(row.customerProcessNo, cf.customerProcessNo) || String(index + 1),
+    type: firstCertText(row.type, row.productType, cf.type, headerValue.type),
+    materialGrade: firstCertText(
+      row.materialGrade,
+      row.steelGrade,
+      cf.materialGrade,
+      headerValue.materialGrade,
+    ),
+    specification: firstCertText(
+      row.specification,
+      row.spec,
+      row.partSpec,
+      cf.specification,
+      headerValue.specification,
+    ),
+    quantity: firstCertText(row.quantity, row.quantityPcs, cf.quantity, headerValue.quantity),
+    coating: firstCertText(row.coating, cf.coating),
+    colour: firstCertText(row.colour, row.color, cf.colour),
+    appearance: firstCertText(row.appearance, row.visualActual, cf.appearance),
+    cureTest: firstCertText(row.cureTest, cf.cureTest),
+    zincThickness: firstCertText(row.zincThickness, cf.zincThickness),
+    dft: firstCertText(row.dft, cf.dft),
+    hardness: firstCertText(row.hardness, cf.hardness),
+    adhesion: firstCertText(row.adhesion, cf.adhesion),
+    saltSpray: firstCertText(row.saltSpray, cf.saltSpray),
+  });
+  if (Array.isArray(record?.rows) && record.rows.length > 0) {
+    return record.rows
+      .filter((row: unknown) => row !== null && typeof row === 'object')
+      .map((row: Record<string, unknown>, index: number) => sanitize(row, index));
+  }
+  return [sanitize(record as Record<string, unknown>, 0)];
+}
+
 export function buildManufacturingCertData(record: any): ManufacturingCertData {
   const docNo = firstCertText(record.docNo);
   const dateText = firstCertText(record.dateOfIssue, record.issueDate, record.date).slice(0, 10);
+  const cf = certFieldsOf(record);
   const companyProfile = normalizeCompanyProfile(record.companyProfile);
   return {
     certNo: docNo === '' ? '' : `MC-${docNo}`,
     dateOfIssue: dateText === '' ? new Date().toISOString().slice(0, 10) : dateText,
+    // 扫描件表头七格（docs/51 模板A）：客户 / 交货订单参考 / 证书编号 / PO号 / 工单号 / 日期 / 交货点。
+    // 真实列（customerName / salesOrderPoNo / workOrderNo）优先，cert_fields 袋兜底，均无即留白。
+    customerName: firstCertText(record.customerName, record.customer, cf.customerName),
+    purchaseOrderNo: firstCertText(record.purchaseOrderNo, record.salesOrderPoNo, cf.purchaseOrderNo),
+    deliveryNoteNo: firstCertText(record.deliveryNoteNo, cf.deliveryNoteNo),
+    jobcardNo: firstCertText(record.jobcardNo, record.workOrderNo, cf.jobcardNo),
+    deliveryPoint: firstCertText(record.deliveryPoint, cf.deliveryPoint),
+    rows: manufacturingRows(record, cf),
+    // 验收标准副行（扫描件判定基准行）：cert_fields 的 std* 键逐一透传，未录入即不输出该键
+    standards: (() => {
+      const bag: Record<string, string> = {};
+      for (const key of [
+        'stdAppearance',
+        'stdCureTest',
+        'stdZincThickness',
+        'stdDft',
+        'stdHardness',
+        'stdAdhesion',
+        'stdSaltSpray',
+      ]) {
+        const text = firstCertText(record[key], cf[key]);
+        if (text !== '') bag[key] = text;
+      }
+      return bag;
+    })(),
     subcontractor: firstCertText(record.subcontractor, record.vendorName, record.vendor, record.supplier),
     subcontractNo: firstCertText(record.subcontractNo, record.outsourceNo, record.orderNo, record.dispatchNo),
     productDescription: firstCertText(record.productName, record.materialName),
@@ -417,7 +571,7 @@ export function buildManufacturingCertData(record: any): ManufacturingCertData {
     // 质量负责人 = **真实签核动作**的产物（`inspection_orders.approver_name`，docs/35 §5）；
     // 未签核即留空，绝不打印一个没有发生过的签核人名
     qaManagerName: firstCertText(record.approverName, record.qaManagerName),
-    remarks: firstCertText(record.remarks),
+    remarks: firstCertText(record.remarks, cf.remarks),
     ...(companyProfile !== undefined ? { companyProfile } : {}),
   };
 }

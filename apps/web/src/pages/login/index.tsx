@@ -8,10 +8,14 @@ import {
   Lock,
   LogIn,
   RefreshCw,
+  Server,
+  Settings2,
   ShieldCheck,
   UserRound,
 } from 'lucide-react';
 import {
+  API_BASE,
+  ApiError,
   fetchAuthUsers,
   loginAsDefault,
   loginUser,
@@ -56,12 +60,24 @@ function writeLastUsername(value: string): void {
 }
 
 /**
- * 独立登录页（开发/演示环境）：
- * 主路径为「用户名（工号或姓名）+ 密码」；另保留折叠的演示身份切换区，
- * 用于快速对比不同职员的三维物料权限。
- * 生产环境后端不注册 /auth 路由，登录接口 404 时展示环境提示。
+ * 独立登录页，两种形态由运行环境自动切换：
+ *
+ * - **生产形态（桌面客户端 + 真实后端）**：preload 注入 `window.desktop` 且非 mock 构建时，
+ *   收起演示身份切换与初始口令提示，露出当前连接的服务器地址与「服务器设置」入口。
+ *   生产后端只允许桌面客户端接入（浏览器直连无此桥接对象，永远落在演示形态）。
+ * - **演示形态（浏览器 / 离线 mock 构建）**：保留折叠的演示身份切换区，
+ *   用于快速对比不同职员的三维物料权限。
+ *
+ * 登录接口 POST /auth/login 在 NODE_ENV=production 的后端不注册：
+ * 生产形态下收到 404 时给出环境提示，不冒充口令错误。
  */
 export function LoginPage({ onLoggedIn }: LoginPageProps) {
+  const isMockBuild = import.meta.env.VITE_USE_MOCK === 'true';
+  const isDesktop = typeof window !== 'undefined' && window.desktop !== undefined;
+  // 生产登录 UI 只在桌面客户端出现（「桌面客户端才能用生产后端」）
+  const isProduction = isDesktop && !isMockBuild;
+  // 展示实际生效的 API 基址：桌面「服务器设置」配置优先，其次构建期固化值
+  const serverUrl = isDesktop ? (window.desktop?.getServerUrl?.() ?? '') : '';
   const [userName, setUserName] = useState<string>(() => readLastUsername());
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -94,7 +110,15 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
       writeLastUsername(name);
       onLoggedIn(user);
     } catch (err) {
-      setError(errorMessage(err));
+      // 生产后端不注册 /auth/login（NODE_ENV=production 时整组路由跳过注册）：
+      // 404 属于「环境未接入统一身份认证」，与口令错误是两类问题，文案必须区分开
+      if (err instanceof ApiError && err.status === 404) {
+        setError(
+          '登录接口不可用：所连接后端未开放本地登录（生产环境应由统一身份认证接管）。请核对服务器地址或联系系统管理员。'
+        );
+      } else {
+        setError(errorMessage(err));
+      }
     } finally {
       setSubmitting(false);
     }
@@ -164,7 +188,7 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
               <span className="text-lg font-semibold tracking-wide">乐天QMS</span>
             </div>
             <p className="text-[13px] text-slate-300/90 mt-6 leading-relaxed">
-              质量管理系统 · 物料权限演示
+              {isProduction ? '质量管理系统 · 桌面客户端' : '质量管理系统 · 物料权限演示'}
             </p>
           </div>
           <div className="space-y-4 text-[12px] text-slate-300/80">
@@ -173,12 +197,23 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
               <p>登录后，检验台账 / MRB / 看板 / 追溯等全部模块的数据均按三维物料权限（分类 / 编码 / 供应商）自动过滤。</p>
             </div>
             <div className="flex items-start gap-2.5">
-              <UserRound className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
-              <p>切换不同用户登录，可直观对比各自可见的数据范围；未配置任何权限规则的用户登录后看不到数据（安全默认）。</p>
+              {isProduction ? (
+                <>
+                  <Server className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+                  <p>当前连接生产后端，数据写入实时生效；服务器地址可在「服务器设置」中查看或切换。</p>
+                </>
+              ) : (
+                <>
+                  <UserRound className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+                  <p>切换不同用户登录，可直观对比各自可见的数据范围；未配置任何权限规则的用户登录后看不到数据（安全默认）。</p>
+                </>
+              )}
             </div>
           </div>
           <p className="text-[11px] text-slate-400/70 leading-relaxed">
-            仅限开发 / 演示环境使用：生产环境由统一身份认证（SSO）接管，本页面不会注册登录接口。
+            {isProduction
+              ? '生产后端仅允许桌面客户端接入；账号口令由后端统一校验，登录状态 24 小时内有效。'
+              : '仅限开发 / 演示环境使用：生产环境由统一身份认证（SSO）接管，本页面不会注册登录接口。'}
           </p>
         </div>
 
@@ -290,73 +325,100 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
             </button>
           </form>
 
-          <p className="mt-3 text-[11px] text-slate-400">
-            演示环境初始密码：<span className="font-mono text-slate-500">{DEFAULT_PASSWORD}</span>
-          </p>
-
-          {/* 演示：身份切换（开发态专用，绕过口令以快速对比物料权限） */}
-          <div className="mt-4 pt-4 border-t border-slate-100">
-            <button
-              type="button"
-              onClick={handleToggleDemo}
-              className="w-full flex items-center justify-between text-xs text-slate-500 hover:text-slate-700"
-            >
-              <span>演示：以其他身份快速进入（不校验密码）</span>
-              {showDemo ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-            </button>
-
-            {showDemo && (
-              <div className="mt-3">
-                <div className="max-h-[168px] overflow-y-auto border border-slate-200/80 rounded-lg divide-y divide-slate-100">
-                  {loadingUsers && (
-                    <div className="flex items-center justify-center text-sm text-slate-400 py-10">
-                      正在加载用户列表...
-                    </div>
-                  )}
-                  {!loadingUsers && users.length === 0 && (
-                    <div className="py-8 text-center space-y-3">
-                      <p className="text-xs text-slate-500 px-4">
-                        未能获取用户列表（后端服务未启动或登录接口不可用）
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => void handleDefaultLogin()}
-                        disabled={submitting}
-                        className="px-3 py-1.5 rounded bg-slate-800 text-white text-xs font-medium hover:bg-slate-900 disabled:opacity-60"
-                      >
-                        以默认身份（张强 · 质量主管）进入
-                      </button>
-                    </div>
-                  )}
-                  {!loadingUsers &&
-                    users.map((u) => (
-                      <button
-                        key={u.id}
-                        type="button"
-                        onClick={() => void enterAs(u.id)}
-                        disabled={submitting}
-                        className="w-full flex items-center gap-3 px-3 py-2 text-left transition-colors hover:bg-slate-50 disabled:opacity-60"
-                      >
-                        <span className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-medium shrink-0 bg-slate-200 text-slate-600">
-                          {initialOf(u.name)}
-                        </span>
-                        <span className="min-w-0 flex-1">
-                          <span className="block text-xs font-medium text-slate-800">
-                            {u.name}
-                            {u.employeeCode && (
-                              <span className="ml-2 text-[11px] font-normal text-slate-400">{u.employeeCode}</span>
-                            )}
-                          </span>
-                          <span className="block text-[11px] text-slate-500 truncate">
-                            {u.roleName ?? u.roleCode ?? '未分配角色'}
-                          </span>
-                        </span>
-                      </button>
-                    ))}
-                </div>
+          {/* 生产形态（桌面客户端）：显示实际生效的服务器地址 + 「服务器设置」入口 */}
+          {isProduction && (
+            <div className="mt-4 pt-4 border-t border-slate-100 space-y-2.5">
+              <div className="flex items-center gap-2 rounded border border-slate-200 bg-slate-50 px-3 py-2">
+                <Server className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-600" title={API_BASE}>
+                  {serverUrl !== '' ? API_BASE : '未配置服务器（当前使用默认基址）'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => window.desktop?.openSettings?.()}
+                  className="flex items-center gap-1 shrink-0 text-[11px] text-blue-600 hover:text-blue-700"
+                >
+                  <Settings2 className="w-3.5 h-3.5" />
+                  服务器设置
+                </button>
               </div>
-            )}
-          </div>
+              <p className="text-[11px] leading-relaxed text-slate-400">
+                生产后端仅允许桌面客户端接入。若服务器地址变更，修改设置后主窗口会自动重载。
+              </p>
+            </div>
+          )}
+
+          {!isProduction && (
+            <>
+              <p className="mt-3 text-[11px] text-slate-400">
+                演示环境初始密码：<span className="font-mono text-slate-500">{DEFAULT_PASSWORD}</span>
+              </p>
+
+              {/* 演示：身份切换（开发态专用，绕过口令以快速对比物料权限） */}
+              <div className="mt-4 pt-4 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={handleToggleDemo}
+                  className="w-full flex items-center justify-between text-xs text-slate-500 hover:text-slate-700"
+                >
+                  <span>演示：以其他身份快速进入（不校验密码）</span>
+                  {showDemo ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                </button>
+
+                {showDemo && (
+                  <div className="mt-3">
+                    <div className="max-h-[168px] overflow-y-auto border border-slate-200/80 rounded-lg divide-y divide-slate-100">
+                      {loadingUsers && (
+                        <div className="flex items-center justify-center text-sm text-slate-400 py-10">
+                          正在加载用户列表...
+                        </div>
+                      )}
+                      {!loadingUsers && users.length === 0 && (
+                        <div className="py-8 text-center space-y-3">
+                          <p className="text-xs text-slate-500 px-4">
+                            未能获取用户列表（后端服务未启动或登录接口不可用）
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => void handleDefaultLogin()}
+                            disabled={submitting}
+                            className="px-3 py-1.5 rounded bg-slate-800 text-white text-xs font-medium hover:bg-slate-900 disabled:opacity-60"
+                          >
+                            以默认身份（张强 · 质量主管）进入
+                          </button>
+                        </div>
+                      )}
+                      {!loadingUsers &&
+                        users.map((u) => (
+                          <button
+                            key={u.id}
+                            type="button"
+                            onClick={() => void enterAs(u.id)}
+                            disabled={submitting}
+                            className="w-full flex items-center gap-3 px-3 py-2 text-left transition-colors hover:bg-slate-50 disabled:opacity-60"
+                          >
+                            <span className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-medium shrink-0 bg-slate-200 text-slate-600">
+                              {initialOf(u.name)}
+                            </span>
+                            <span className="min-w-0 flex-1">
+                              <span className="block text-xs font-medium text-slate-800">
+                                {u.name}
+                                {u.employeeCode && (
+                                  <span className="ml-2 text-[11px] font-normal text-slate-400">{u.employeeCode}</span>
+                                )}
+                              </span>
+                              <span className="block text-[11px] text-slate-500 truncate">
+                                {u.roleName ?? u.roleCode ?? '未分配角色'}
+                              </span>
+                            </span>
+                          </button>
+                        ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>

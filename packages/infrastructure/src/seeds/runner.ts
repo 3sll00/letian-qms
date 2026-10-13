@@ -21,12 +21,7 @@
  * （由 database/connection.ts 统一加载，与 migration runner 共用同一套逻辑）。
  */
 import { Kysely, sql } from 'kysely';
-import type {
-  InspectionItem,
-  InspectionPlan,
-  InspectionPlanItem,
-  PlanSnapshot,
-} from '@letian/contracts';
+import type { InspectionPlan } from '@letian/contracts';
 import type { Database } from '../database/schema.js';
 import { createDatabaseConnection } from '../database/connection.js';
 import { KyselyInspectionPlanRepository } from '../repositories/inspection-plan-repository.js';
@@ -67,12 +62,16 @@ import {
   materialUnitOf,
   materialCategoryOf,
   planVersionOf,
-  type ItemResultKind,
-  type SeedMetric,
   type SeedPlan,
-  type SeedPlanVersion,
   seedCompanyProfile,
 } from './data.js';
+// 方案快照 / 工单实测项的构造实现在 ./order-builders.ts（唯一实现，`pnpm db:demo:repair` 共用同一套）
+import {
+  buildInspectionOrderFields,
+  buildOrderItems,
+  deriveQty,
+  toPlanItem,
+} from './order-builders.js';
 
 // ============================================================================
 // 0. 需要清空 / 统计的 26 张业务表（CamelCasePlugin 运行时名 -> snake_case 物理名）
@@ -143,13 +142,8 @@ const TABLE_PHYSICAL_NAMES: Readonly<Record<string, string>> = {
 };
 
 // ============================================================================
-// 1. 指标 / 快照构造工具
+// 1. 指标 / 快照构造工具（唯一实现在 ./order-builders.ts，与 `pnpm db:demo:repair` 共用）
 // ============================================================================
-
-/** 保留 3 位小数，让演示实测值整洁可读 */
-function round3(value: number): number {
-  return Math.round(value * 1000) / 1000;
-}
 
 /**
  * jsonb 数组列的序列化边界在仓储类里（KyselyInspectionOrderRepository.save /
@@ -160,133 +154,6 @@ function round3(value: number): number {
  * 而不是 'array'（双编码），读出来是 string，`jsonb_array_elements(items)` 也会直接报
  * "cannot extract elements from a scalar"（SQLSTATE 22023）。
  */
-
-/**
- * 数值判定基准。演示工单的实测值只对数值型指标生成（`toOrderItem` 已先按 dataType 拦下定性指标），
- * 故这里的 `?? 0` 只是为可选字段收窄类型，正常路径不会命中默认值。
- */
-function numericBasis(metric: SeedMetric): {
-  nominalValue: number;
-  upperTolerance: number;
-} {
-  return {
-    nominalValue: metric.nominalValue ?? 0,
-    upperTolerance: metric.upperTolerance ?? 0,
-  };
-}
-
-/** 公差内的实测值（取上公差的 35% 作为偏移量） */
-function withinTolerance(metric: SeedMetric): number {
-  const basis = numericBasis(metric);
-  return round3(basis.nominalValue + basis.upperTolerance * 0.35);
-}
-
-/** 公差外的实测值（超出上公差 50%） */
-function outOfTolerance(metric: SeedMetric): number {
-  const basis = numericBasis(metric);
-  const overshoot = basis.upperTolerance > 0 ? basis.upperTolerance * 0.5 : 0.01;
-  return round3(basis.nominalValue + basis.upperTolerance + overshoot);
-}
-
-/** 指标模板 -> 方案快照指标（契约 InspectionPlanItem） */
-function toPlanItem(metric: SeedMetric, seq: number): InspectionPlanItem {
-  return {
-    seq,
-    itemCode: metric.itemCode,
-    name: metric.name,
-    dataType: metric.dataType,
-    metricCategory: metric.metricCategory,
-    standardText: metric.standardText,
-    // 定性指标的判标清单（TBD-06 唯一权威）：此前种子路径漏传，播种后清单会丢失
-    acceptableValues: metric.acceptableValues,
-    nominalValue: metric.nominalValue,
-    upperTolerance: metric.upperTolerance,
-    lowerTolerance: metric.lowerTolerance,
-    sampleSize: metric.sampleSize,
-    unit: metric.unit,
-    measurementTool: metric.measurementTool,
-    isMandatory: metric.isMandatory,
-  };
-}
-
-/** 指标模板 -> 工单实测项（契约 InspectionItem），按形态填充 result / measuredVal */
-function toOrderItem(metric: SeedMetric, seq: number, kind: ItemResultKind): InspectionItem {
-  // 演示工单的「实测值」只对数值型指标编造（公差内 / 公差外各一版）；定性指标没有可生成的实测文本，
-  // 若将来把定性指标接进演示工单，必须显式给出实测文本，不能在这里静默落空值。
-  if (metric.dataType !== 'NUMERIC') {
-    throw new Error(
-      `SEED_ORDER_ITEM_REQUIRES_NUMERIC: 方案指标 [${metric.itemCode}] 为 ${metric.dataType} 型，演示工单实测值生成仅支持 NUMERIC`
-    );
-  }
-
-  const base: InspectionItem = {
-    seq,
-    itemCode: metric.itemCode,
-    name: metric.name,
-    dataType: metric.dataType,
-    metricCategory: metric.metricCategory,
-    standardText: metric.standardText,
-    nominalValue: metric.nominalValue,
-    upperTolerance: metric.upperTolerance,
-    lowerTolerance: metric.lowerTolerance,
-    sampleSize: metric.sampleSize,
-    unit: metric.unit,
-    result: 'PENDING',
-    isExempt: false,
-    isManuallyModified: false,
-  };
-
-  if (kind === 'PENDING') {
-    // 未检验：保留 PENDING 且不写实测值
-    return base;
-  }
-
-  // 只让第 1 项偏离公差，其余项合格，保证 "FAILED -> 至少 1 项 FAILED"
-  const failed = kind !== 'ALL_PASSED' && seq === 1;
-  const measuredVal = failed ? outOfTolerance(metric) : withinTolerance(metric);
-
-  return {
-    ...base,
-    measuredVal,
-    result: failed ? 'FAILED' : 'PASSED',
-    ...(failed
-      ? { defectReason: `${metric.name} 实测 ${measuredVal}${metric.unit} 超出公差上限` }
-      : {}),
-  };
-}
-
-/** 组装工单实测项列表 */
-function buildOrderItems(version: SeedPlanVersion, kind: ItemResultKind): InspectionItem[] {
-  return version.items.map((metric, index) => toOrderItem(metric, index + 1, kind));
-}
-
-/** 组装完整的方案版本快照（planId / versionId 均指向该版本行 UUID） */
-function buildSnapshot(plan: SeedPlan, version: SeedPlanVersion, snapshotAt: string): PlanSnapshot {
-  return {
-    planId: version.id,
-    planCode: plan.planCode,
-    planName: plan.planName,
-    versionId: version.id,
-    versionNo: version.versionNo,
-    samplingScheme: SAMPLING.samplingScheme,
-    aqlLevel: SAMPLING.aqlLevel,
-    strictness: SAMPLING.strictness,
-    items: version.items.map((metric, index) => toPlanItem(metric, index + 1)),
-    snapshotAt,
-  };
-}
-
-/** 依据工单判定形态推导合格 / 不合格数量 */
-function deriveQty(sampleQty: number, kind: ItemResultKind): { passQty: number; failQty: number } {
-  if (kind === 'PENDING') {
-    return { passQty: 0, failQty: 0 };
-  }
-  if (kind === 'ALL_PASSED') {
-    return { passQty: sampleQty, failQty: 0 };
-  }
-  const failQty = Math.max(1, Math.round(sampleQty * 0.125));
-  return { passQty: sampleQty - failQty, failQty };
-}
 
 // ============================================================================
 // 2. 核心播种逻辑
@@ -397,7 +264,6 @@ export async function seed(db: Kysely<Database>): Promise<void> {
       throw new Error(`SEED_PLAN_NOT_FOUND: 工单 [${spec.orderNo}] 引用了不存在的方案 [${spec.planCode}]`);
     }
     const version = planVersionOf(spec.planCode, spec.versionNo);
-    const { passQty, failQty } = deriveQty(spec.sampleQty, spec.itemKind);
     // 检验人姓名：显式指定优先，否则由员工档案反查，避免落库后 inspector_name 为空
     const inspectorName = spec.inspectorName ?? employeeNameOf(spec.inspectorId);
     // 供应商姓名快照：委外工序取加工商，来料取供应商档案（池/台账展示口径同源）
@@ -423,16 +289,19 @@ export async function seed(db: Kysely<Database>): Promise<void> {
       // 「数量」列 = 报检批量（物理列 total_qty）：spec.totalQty 早已在种子清单里声明，
       // 但此处从未写入 -> 库中恒为 NULL、台账只能显示 --（见 docs/29 §3 断链 ④）
       totalQty: spec.totalQty,
-      passQty,
-      failQty,
       isMandatoryGate: spec.isMandatoryGate,
       status: spec.status,
       inspectorId: spec.inspectorId,
       inspectionNotes: spec.inspectionNotes,
-      planVersionId: version.id,
-      planSnapshot: buildSnapshot(plan, version, spec.snapshotAt),
-      // items 原样传数组：JSON 序列化由仓储 save() 统一负责（见文件顶部双编码说明）
-      items: buildOrderItems(version, spec.itemKind),
+      // 版本绑定 / 快照 / 指标行 / 合格与不合格数量只由统一 builder 生成，
+      // 保证种子检验单和真实建单链路同形（items 数组的 JSON 序列化仍由仓储 save() 负责）。
+      ...buildInspectionOrderFields({
+        sampleQty: spec.sampleQty,
+        itemKind: spec.itemKind,
+        plan,
+        version,
+        snapshotAt: spec.snapshotAt,
+      }),
       ...(spec.supplierCode !== undefined ? { supplierCode: spec.supplierCode } : {}),
       ...(specSupplierName !== undefined ? { supplierName: specSupplierName } : {}),
       ...(spec.customerCode !== undefined ? { customerCode: spec.customerCode } : {}),
@@ -497,7 +366,7 @@ export async function seed(db: Kysely<Database>): Promise<void> {
     const plan = seedPlans.find((candidate) => candidate.planCode === spec.planCode);
     const version = planVersionOf(spec.planCode, spec.versionNo);
     const { failQty } = deriveQty(spec.sampleQty, spec.itemKind);
-    const orderItems = plan !== undefined ? buildOrderItems(version, spec.itemKind) : [];
+    const orderItems = plan !== undefined ? buildOrderItems(version.items, spec.itemKind) : [];
     const failedItems = orderItems.filter((item) => item.result === 'FAILED');
     const inspectorName = spec.inspectorName ?? employeeNameOf(spec.inspectorId);
     const supplierName =
@@ -542,6 +411,21 @@ export async function seed(db: Kysely<Database>): Promise<void> {
   const mrbRepo = new KyselyMRBReviewRepository(db);
   for (const review of seedMrbReviews) {
     const sourceOrder = seedOrders.find((spec) => spec.orderNo === review.sourceOrderNo);
+    // 不合格数量的**唯一口径**是源检验单的 `fail_qty`（docs/21 §4.1），运行时 `trigger-mrb-review`
+    // 同为 `cmd.defectQty ?? order.failQty`，与本文件 §2.6 的池条目同源 —— 因此本处一律派生、绝不手写。
+    // 手写即漂移：MRB-20231013-02 曾手写 5000，而源单 OQC-SH-20231013-0002 的不合格数量是 25。
+    if (sourceOrder === undefined) {
+      throw new Error(
+        `SEED_MRB_SOURCE_ORDER_MISSING: MRB [${review.mrbNo}] 的来源检验单 [${review.sourceOrderNo}] 不在种子工单清单中`
+      );
+    }
+    if (sourceOrder.judgment !== 'FAILED') {
+      throw new Error(
+        `SEED_MRB_SOURCE_ORDER_NOT_FAILED: MRB [${review.mrbNo}] 的来源检验单 [${review.sourceOrderNo}] 终判为 ` +
+          `[${sourceOrder.judgment ?? '未判定'}]，不合格数量无口径可依（只有终判不合格的单据才会建 MRB，见 docs/43）`
+      );
+    }
+    const { failQty: defectQty } = deriveQty(sourceOrder.sampleQty, sourceOrder.itemKind);
     // 生效流程与处置闭环时间：与迁移 015 的回填口径一致，保证种子库与"真实跑过一遍"的库同形
     const applicableFlow = seedReviewFlows.find(
       (flow) => flow.applicableType === review.sourceType && flow.isActive
@@ -549,6 +433,7 @@ export async function seed(db: Kysely<Database>): Promise<void> {
     const lastApprover = review.approvers[review.approvers.length - 1];
     await mrbRepo.save({
       ...review,
+      defectQty,
       ...(sourceOrder !== undefined && pooledOrderIds.has(sourceOrder.id)
         ? { pendingDefectId: pendingDefectIdOfOrder(sourceOrder.id) }
         : {}),

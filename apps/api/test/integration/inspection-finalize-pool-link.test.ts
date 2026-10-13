@@ -1,4 +1,10 @@
 import assert from 'node:assert/strict';
+import {
+  DecideMrbDispositionUseCase,
+  FinalizeInspectionStatusUseCase,
+  RecordMeasurementsAndJudgeUseCase,
+  type IUnitOfWork,
+} from '@letian/application';
 import { buildApp } from '../../src/app';
 import { createApiContainer, type ApiContainer } from '../../src/container';
 import { generateTestToken } from '../../src/plugins/auth';
@@ -57,6 +63,7 @@ async function runFinalizePoolLinkTests() {
    * 而节点表**没有外键级联**，必须显式删除 —— 否则回归测试会往追溯看板里堆探针批次。
    */
   const touchedBatches: string[] = [];
+  const runId = crypto.randomUUID().slice(0, 8);
 
   const createOrder = async (batchNo: string) => {
     const res = await app.inject({
@@ -121,7 +128,7 @@ async function runFinalizePoolLinkTests() {
 
   try {
     // ==== 1. 终判不合格 -> 同事务入池 + 自动创建 MRB 评审单 ====
-    const failOrder = await createOrder('VERIFY-FINALIZE-POOL-A');
+    const failOrder = await createOrder(`VERIFY-FINALIZE-POOL-A-${runId}`);
     const remark = '整批判退：来料盘条外观划伤，无法投线';
     const failRes = await finalize(failOrder.id, {
       status: 'FAILED',
@@ -193,6 +200,12 @@ async function runFinalizePoolLinkTests() {
       mrbRow?.reviewFlowId !== null && mrbRow?.reviewFlowId !== undefined,
       '自动建单必须绑定生效评审流程（IQC -> FLOW-IQC-FAIL）'
     );
+    const release = await app.inject({
+      method: 'GET',
+      url: `/api/v1/release-gates/${encodeURIComponent(`VERIFY-FINALIZE-POOL-A-${runId}`)}`,
+      headers: authHeader,
+    });
+    assert.equal(release.statusCode, 409, 'MRB 评审中的批次必须被放行关卡阻断');
     console.log(
       `✔ 终判不合格 -> 同事务入池 + 自动建 MRB 单（${failOrder.orderNo}，${String(mrbRow?.mrbNo)}，流程已绑定）`
     );
@@ -252,10 +265,15 @@ async function runFinalizePoolLinkTests() {
       .where('sourceOrderNo', '=', failOrder.orderNo)
       .execute();
     assert.equal(mrbRowsAgain.length, 1, '重复终判必须复用既有 MRB 单，不得重复建单');
+    const bypass = await finalize(failOrder.id, { status: 'PASSED' });
+    assert.equal(bypass.statusCode, 400, '已有不合格结论的单据不能省略 judgment 改成合格以绕过 MRB');
+    const stillInMrb = await db.selectFrom('inspectionOrders').select('status')
+      .where('id', '=', failOrder.id).executeTakeFirstOrThrow();
+    assert.equal(stillInMrb.status, 'IN_MRB_REVIEW');
     console.log('✔ 重复终判幂等：台账条目与 MRB 单仍各 1 条');
 
     // ==== 4. 合格终判不得入池、不得建单 ====
-    const passOrder = await createOrder('VERIFY-FINALIZE-POOL-B');
+    const passOrder = await createOrder(`VERIFY-FINALIZE-POOL-B-${runId}`);
     const passRes = await finalize(passOrder.id, {
       status: 'PASSED',
       judgment: 'PASSED',
@@ -316,7 +334,132 @@ async function runFinalizePoolLinkTests() {
       preliminaryDisposition: 'NOT_A_DISPOSITION',
     });
     assert.equal(badDisposition.statusCode, 400, '非法拟定处置必须返回 400');
-    console.log('✔ 非法状态 / 非法判定结论 / 非法拟定处置均返回 400');
+    const inconsistentOrder = await createOrder(`VERIFY-INCONSISTENT-${runId}`);
+    const inconsistent = await finalize(inconsistentOrder.id, { status: 'PASSED', judgment: 'FAILED' });
+    assert.equal(inconsistent.statusCode, 400, '合格状态与不合格结论冲突时必须拒绝，不能只入池不建 MRB');
+    const inconsistentPersisted = await db.selectFrom('inspectionOrders')
+      .select(['status', 'judgment']).where('id', '=', inconsistentOrder.id).executeTakeFirst();
+    assert.equal(inconsistentPersisted?.status, 'PENDING', '非法终判不能修改原单状态');
+    assert.equal(inconsistentPersisted?.judgment, null, '非法终判不能修改原单结论');
+    console.log('✔ 非法状态 / 非法判定结论 / 非法拟定处置 / 互相矛盾的终判均返回 400');
+
+    const measurementOrder = await createOrder(`VERIFY-MEASUREMENT-${runId}`);
+    const measurementRow = await db.selectFrom('inspectionOrders')
+      .select('items').where('id', '=', measurementOrder.id).executeTakeFirstOrThrow();
+    const numericItem = (measurementRow.items as Array<{
+      itemCode: string; dataType: string; nominalValue?: number; upperTolerance?: number;
+    }>).find((item) => item.dataType === 'NUMERIC' && typeof item.nominalValue === 'number');
+    assert.ok(numericItem, '实测录入测试需要数值检验项');
+    const measured = await app.inject({
+      method: 'POST',
+      url: `/api/v1/inspections/${measurementOrder.id}/submit-measurements`,
+      headers: headersOf(CHEN_JING),
+      payload: {
+        items: [{
+          itemCode: numericItem.itemCode,
+          measuredVal: numericItem.nominalValue! + (numericItem.upperTolerance ?? 0) + 1,
+        }],
+        failQty: 1,
+        passQty: 19,
+        isDraft: false,
+      },
+    });
+    assert.equal(measured.statusCode, 200, `供应商限定用户实测录入后应自动建 MRB：${measured.body}`);
+    assert.equal((JSON.parse(measured.body) as { status: string }).status, 'IN_MRB_REVIEW');
+    const measuredMrb = await db.selectFrom('mrbReviews').select(['id', 'sourceType', 'reviewFlowId', 'defectQty'])
+      .where('sourceOrderNo', '=', measurementOrder.orderNo).executeTakeFirstOrThrow();
+    assert.equal(measuredMrb.sourceType, 'INCOMING_FAIL');
+    assert.equal(measuredMrb.defectQty, 1);
+    assert.ok(measuredMrb.reviewFlowId, '实测不合格必须绑定来料评审流程');
+    const measuredPool = await db.selectFrom('pendingMrbItems').select(['status', 'mrbReviewId'])
+      .where('sourceOrderId', '=', measurementOrder.id).executeTakeFirstOrThrow();
+    assert.equal(measuredPool.status, 'INITIATED');
+    assert.equal(measuredPool.mrbReviewId, measuredMrb.id);
+    const measuredAudit = await db.selectFrom('auditLogs').select(['action', 'diffPatch'])
+      .where('entityName', '=', 'INSPECTION_ORDER').where('entityId', '=', measurementOrder.id).execute();
+    assert.ok(measuredAudit.some((log) => log.action === 'STATUS_CHANGE'), '实测判定必须同事务写入审计');
+
+    const acquiredLocks: string[] = [];
+    const rollbackUow: IUnitOfWork = {
+      execute: (work) => container.uow.execute((ctx) => work({
+        ...ctx,
+        locks: {
+          ...ctx.locks,
+          acquireXactLock: async (key) => {
+            acquiredLocks.push(key);
+            await ctx.locks.acquireXactLock(key);
+          },
+          acquireXactLock2: (classId, objId) => ctx.locks.acquireXactLock2(classId, objId),
+        },
+        auditLogs: new Proxy(ctx.auditLogs, {
+          get(target, prop, receiver) {
+            if (prop === 'insert') return async () => { throw new Error('AUDIT_INSERT_FAILED'); };
+            return Reflect.get(target, prop, receiver);
+          },
+        }),
+      })),
+    };
+    const rollbackOrder = await createOrder(`VERIFY-ROLLBACK-${runId}`);
+    await assert.rejects(
+      new FinalizeInspectionStatusUseCase(rollbackUow).execute({
+        orderId: rollbackOrder.id,
+        status: 'FAILED',
+        judgment: 'FAILED',
+        failQty: 2,
+        operatorId: CHEN_JING.userId,
+        operatorName: CHEN_JING.userName,
+      }),
+      /AUDIT_INSERT_FAILED/
+    );
+    assert.ok(acquiredLocks.includes(`LOCK_ORDER_VERIFY-ROLLBACK-${runId}`));
+    assert.ok(acquiredLocks.includes(`VERIFY-ROLLBACK-${runId}`));
+    const rollbackRow = await db.selectFrom('inspectionOrders').select(['status', 'judgment'])
+      .where('id', '=', rollbackOrder.id).executeTakeFirstOrThrow();
+    assert.equal(rollbackRow.status, 'PENDING', '审计失败必须回滚终判状态');
+    assert.equal(rollbackRow.judgment, null);
+    assert.equal((await db.selectFrom('pendingMrbItems').select('id')
+      .where('sourceOrderId', '=', rollbackOrder.id).execute()).length, 0, '审计失败必须回滚入池');
+    assert.equal((await db.selectFrom('mrbReviews').select('id')
+      .where('sourceOrderNo', '=', rollbackOrder.orderNo).execute()).length, 0, '审计失败必须回滚 MRB');
+    assert.equal((await db.selectFrom('batchTraceNodes').select('id')
+      .where('batchNo', '=', `VERIFY-ROLLBACK-${runId}`).execute()).length, 0, '审计失败必须回滚追溯节点');
+    assert.equal((await db.selectFrom('auditLogs').select('id')
+      .where('entityName', '=', 'INSPECTION_ORDER').where('entityId', '=', rollbackOrder.id)
+      .where('action', '=', 'STATUS_CHANGE').execute()).length, 0, '审计失败不能留下终判审计');
+
+    const rollbackMeasuredOrder = await createOrder(`VERIFY-MEASURE-ROLLBACK-${runId}`);
+    await assert.rejects(
+      new RecordMeasurementsAndJudgeUseCase(rollbackUow).execute({
+        orderId: rollbackMeasuredOrder.id,
+        items: [{
+          itemCode: numericItem.itemCode,
+          measuredVal: numericItem.nominalValue! + (numericItem.upperTolerance ?? 0) + 1,
+        }],
+        failQty: 1,
+        passQty: 19,
+        operatorId: CHEN_JING.userId,
+        operatorName: CHEN_JING.userName,
+      }),
+      /AUDIT_INSERT_FAILED/
+    );
+    const rollbackMeasurementRow = await db.selectFrom('inspectionOrders').select(['status', 'judgment', 'items'])
+      .where('id', '=', rollbackMeasuredOrder.id).executeTakeFirstOrThrow();
+    assert.equal(rollbackMeasurementRow.status, 'PENDING', '审计失败必须回滚实测终判状态');
+    assert.equal(rollbackMeasurementRow.judgment, null);
+    assert.ok((rollbackMeasurementRow.items as Array<{ result: string }>).every((item) => item.result === 'PENDING'));
+    assert.equal((await db.selectFrom('pendingMrbItems').select('id')
+      .where('sourceOrderId', '=', rollbackMeasuredOrder.id).execute()).length, 0);
+    assert.equal((await db.selectFrom('mrbReviews').select('id')
+      .where('sourceOrderNo', '=', rollbackMeasuredOrder.orderNo).execute()).length, 0);
+    assert.equal((await db.selectFrom('batchTraceNodes').select('id')
+      .where('batchNo', '=', `VERIFY-MEASURE-ROLLBACK-${runId}`).execute()).length, 0, '审计失败必须回滚实测终判追溯节点');
+    assert.equal((await db.selectFrom('outboxEvents').select('id')
+      .where('aggregateId', '=', rollbackMeasuredOrder.id).where('eventType', '=', 'INSPECTION_FAILED')
+      .execute()).length, 0, '审计失败必须回滚实测判定 Outbox');
+    assert.equal((await db.selectFrom('auditLogs').select('id')
+      .where('entityName', '=', 'INSPECTION_ORDER').where('entityId', '=', rollbackMeasuredOrder.id)
+      .where('action', '=', 'STATUS_CHANGE').execute()).length, 0);
+    assert.ok(acquiredLocks.includes(`LOCK_ORDER_VERIFY-MEASURE-ROLLBACK-${runId}`));
 
     // ==== 7. 四环节来源分类与评审流程绑定（docs/44 §1）====
     //     同一写路径下，过程 / 委外 / 出货必须各归各的不合格分类并绑定对应生效流程：
@@ -354,7 +497,7 @@ async function runFinalizePoolLinkTests() {
     ];
 
     for (const stageCase of stageCases) {
-      const batchNo = `VERIFY-STAGE-${stageCase.inspectionType}`;
+      const batchNo = `VERIFY-STAGE-${stageCase.inspectionType}-${runId}`;
       const stageOrder = await createOrderOfType(
         stageCase.inspectionType,
         stageCase.materialCode,
@@ -449,10 +592,118 @@ async function runFinalizePoolLinkTests() {
         ),
         `${stageCase.inspectionType} 的评审单必须在【MRB不合格品处置】列表可见且分类正确`
       );
+      const stageDetail = await app.inject({
+        method: 'GET',
+        url: `/api/v1/mrb/${stageMrb.id}`,
+        headers: authHeader,
+      });
+      assert.equal(stageDetail.statusCode, 200, `MRB 详情必须返回 200：${stageDetail.body}`);
+      const detail = stageDetail.json<{ id: string; sourceOrderNo: string; sourceType: string }>();
+      assert.equal(detail.id, stageMrb.id);
+      assert.equal(detail.sourceOrderNo, stageOrder.orderNo);
+      assert.equal(detail.sourceType, stageCase.expectCategory);
       console.log(
         `✔ ${stageCase.inspectionType} 判定不合格 -> ${stageCase.expectCategory} -> ${stageCase.expectFlowCode}（MRB ${stageMrb.id}）`
       );
     }
+
+    const createFailedReview = async (tag: string) => {
+      const order = await createOrder(`VERIFY-MRB-${tag}-${runId}`);
+      const result = await finalize(order.id, { status: 'FAILED', judgment: 'FAILED', failQty: 2 });
+      assert.equal(result.statusCode, 200, result.body);
+      const review = await db.selectFrom('mrbReviews').select(['id', 'status'])
+        .where('sourceOrderNo', '=', order.orderNo).executeTakeFirstOrThrow();
+      return { order, review };
+    };
+    const dispose = (id: string, disposition: string, extra: Record<string, unknown> = {}) => app.inject({
+      method: 'POST',
+      url: `/api/v1/mrb/${id}/disposition`,
+      headers: authHeader,
+      payload: { disposition, dispositionReason: '评审确认处置方式', ...extra },
+    });
+
+    const rework = await createFailedReview('REWORK');
+    const reworkResult = await dispose(rework.review.id, 'REWORK');
+    assert.equal(reworkResult.statusCode, 200, `返工必须生成复检单: ${reworkResult.body}`);
+    const reworkBody = reworkResult.json<{ reinspectionOrderId?: string; reinspectionOrderNo?: string }>();
+    assert.ok(reworkBody.reinspectionOrderId && reworkBody.reinspectionOrderNo);
+    createdOrderIds.push(reworkBody.reinspectionOrderId);
+    createdOrderNos.push(reworkBody.reinspectionOrderNo);
+    assert.ok(reworkBody.reinspectionOrderNo.startsWith(`${rework.order.orderNo}-R`));
+    const reworkSource = await db.selectFrom('inspectionOrders').select('status')
+      .where('id', '=', rework.order.id).executeTakeFirstOrThrow();
+    assert.equal(reworkSource.status, 'RE_INSPECTING');
+
+    const concession = await createFailedReview('CONCESSION');
+    const unsigned = await dispose(concession.review.id, 'CONCESSION', {
+      concessionAttachmentUrl: '/attachments/unverified.pdf',
+    });
+    assert.equal(unsigned.statusCode, 400, '直接在处置请求传附件不得绕过客户签核');
+    const signed = await app.inject({
+      method: 'POST',
+      url: `/api/v1/mrb/records/${concession.review.id}/customer-sign-off`,
+      headers: authHeader,
+      payload: { customerName: '验收客户', signOffDocumentUrl: '/attachments/customer-signed.pdf', agreed: true },
+    });
+    assert.equal(signed.statusCode, 200, `客户书面签核必须可登记: ${signed.body}`);
+    const persistedSignOff = await db.selectFrom('mrbReviews').select('concessionAttachmentUrl')
+      .where('id', '=', concession.review.id).executeTakeFirstOrThrow();
+    assert.equal(persistedSignOff.concessionAttachmentUrl, '/attachments/customer-signed.pdf');
+    const conceded = await dispose(concession.review.id, 'CONCESSION');
+    assert.equal(conceded.statusCode, 200, `签核后特采必须可处置: ${conceded.body}`);
+    const concessionSource = await db.selectFrom('inspectionOrders').select(['status', 'judgment'])
+      .where('id', '=', concession.order.id).executeTakeFirstOrThrow();
+    assert.equal(concessionSource.status, 'COMPLETED');
+    assert.equal(concessionSource.judgment, 'CONCESSION');
+
+    for (const disposition of ['SCRAP', 'RETURN_TO_VENDOR']) {
+      const terminated = await createFailedReview(disposition);
+      const response = await dispose(terminated.review.id, disposition);
+      assert.equal(response.statusCode, 200, `${disposition} 处置必须成功: ${response.body}`);
+      const persisted = await db.selectFrom('mrbReviews').select(['disposition', 'status'])
+        .where('id', '=', terminated.review.id).executeTakeFirstOrThrow();
+      assert.equal(persisted.disposition, disposition);
+      assert.equal(persisted.status, 'DISPOSED');
+      const chainEvent = await db.selectFrom('outboxEvents').select('id')
+        .where('aggregateId', '=', terminated.review.id).where('eventType', '=', 'CHAIN_TERMINATED')
+        .executeTakeFirst();
+      assert.ok(chainEvent, `${disposition} 必须发出整链终止事件`);
+    }
+
+    const rollbackRework = await createFailedReview('ROLLBACK');
+    const rollbackAtDispositionUow: IUnitOfWork = {
+      execute: (work) => container.uow.execute((ctx) => work({
+        ...ctx,
+        auditLogs: new Proxy(ctx.auditLogs, {
+          get(target, prop, receiver) {
+            if (prop === 'insert') return (log: Parameters<typeof target.insert>[0]) => {
+              if (log.action === 'DISPOSE') throw new Error('DISPOSE_AUDIT_FAILED');
+              return target.insert(log);
+            };
+            return Reflect.get(target, prop, receiver);
+          },
+        }),
+      })),
+    };
+    await assert.rejects(
+      new DecideMrbDispositionUseCase(rollbackAtDispositionUow).execute({
+        mrbId: rollbackRework.review.id,
+        disposition: 'REWORK',
+        dispositionReason: '事务回滚探针',
+        operatorId: CHEN_JING.userId,
+        operatorName: CHEN_JING.userName,
+      }),
+      /DISPOSE_AUDIT_FAILED/
+    );
+    const rollbackReview = await db.selectFrom('mrbReviews').select('status')
+      .where('id', '=', rollbackRework.review.id).executeTakeFirstOrThrow();
+    assert.equal(rollbackReview.status, 'PENDING_REVIEW', '处置审计失败必须回滚 MRB 终态');
+    const rollbackSource = await db.selectFrom('inspectionOrders').select('status')
+      .where('id', '=', rollbackRework.order.id).executeTakeFirstOrThrow();
+    assert.equal(rollbackSource.status, 'IN_MRB_REVIEW', '处置失败必须回滚源单状态');
+    const orphanRounds = await db.selectFrom('inspectionOrders').select('id')
+      .where('orderNo', 'like', `${rollbackRework.order.orderNo}-R%`).execute();
+    assert.equal(orphanRounds.length, 0, '处置失败不能留下独立提交的复检单');
   } finally {
     if (createdOrderIds.length > 0) {
       // mrb_reviews 与检验单之间只有 source_order_no 文本关联（无外键），必须显式删除
@@ -464,6 +715,9 @@ async function runFinalizePoolLinkTests() {
         .deleteFrom('pendingMrbItems')
         .where('sourceOrderId', 'in', createdOrderIds)
         .executeTakeFirst();
+      await db.deleteFrom('batchTraceRelations')
+        .where('parentBatch', 'in', createdOrderNos.map((no) => `${no}:FAIL`))
+        .execute();
       const deletedNodes = await db
         .deleteFrom('batchTraceNodes')
         .where('batchNo', 'in', touchedBatches)

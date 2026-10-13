@@ -69,9 +69,12 @@ export class CreatePlanUseCase {
         categoryCode: cmd.categoryCode ?? undefined,
         materialCategory: cmd.categoryName ?? cmd.categoryId ?? "GENERAL",
         inspectionType: cmd.inspectionType,
+        ...(cmd.inspectionTypes !== undefined ? { inspectionTypes: cmd.inspectionTypes } : {}),
       });
 
-      // 创建初始草稿版本
+      // 创建首个版本并直接启用（产品口径：方案不再走「草稿 → 审批」链路，
+      // 不合适的方案由用户在方案列表直接「停用」）。
+      // activateVersion 内部含空指标项守门（PLAN_ACTIVE_EMPTY_ITEMS）与单激活态保证。
       const versionId = crypto.randomUUID();
       const versionNo = cmd.initialVersionNo ?? 'V1.0';
       try {
@@ -94,6 +97,7 @@ export class CreatePlanUseCase {
         const msg = err instanceof Error ? err.message : String(err);
         throw new ValidationFailedError(msg, [{ name: 'versions', reason: msg }]);
       }
+      plan.activateVersion(versionId);
 
       await ctx.inspectionPlans.save(plan.toDTO());
 
@@ -131,6 +135,7 @@ export class CreatePlanUseCase {
           materialCode: cmd.materialCode,
           categoryCode: cmd.categoryCode ?? null,
           inspectionType: cmd.inspectionType,
+          inspectionTypes: cmd.inspectionTypes ?? [cmd.inspectionType],
           versionNo,
         },
         createdAt: new Date().toISOString(),

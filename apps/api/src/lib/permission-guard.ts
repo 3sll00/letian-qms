@@ -31,7 +31,9 @@ export async function getRequestPermissions(
   container: ApiContainer
 ): Promise<readonly MaterialPermission[]> {
   const operator = operatorOf(request);
-  const rules = await container.repositories.materialPermissions.findByUserId(operator.userId);
+  const rules =
+    request.securityContext?.permissions ??
+    (await container.repositories.materialPermissions.findByUserId(operator.userId));
   if (rules.length > 0) {
     return rules;
   }
@@ -70,6 +72,9 @@ export async function buildRequestSecurityContext(
   request: FastifyRequest,
   container: ApiContainer
 ): Promise<ISecurityContext> {
+  if (request.securityContext !== undefined) {
+    return request.securityContext;
+  }
   const operator = operatorOf(request);
   const factory = new SecurityContextFactory(container.repositories.materialPermissions);
   return factory.createContext({

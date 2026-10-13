@@ -1,4 +1,4 @@
-import { Kysely, sql, type Transaction } from 'kysely';
+import { Kysely, sql, Transaction } from 'kysely';
 import type { IUnitOfWork, IUnitOfWorkContext, ILockPort } from '@letian/application';
 import type { Database } from '../database/schema.js';
 import { KyselyInspectionPlanRepository } from '../repositories/inspection-plan-repository.js';
@@ -36,36 +36,38 @@ export class PostgresAdvisoryLockPort implements ILockPort {
 /**
  * 基于 Kysely 事务的工作单元 (Unit of Work)
  *
- * 一次 execute() = 一个 PostgreSQL 事务：
+ * 一次 execute() = 一个 PostgreSQL 事务；若传入已有事务，则复用该事务：
  * - 事务内构造的全部仓储共享同一个 Transaction 连接，因此读到的都是本事务未提交的写入；
  * - 业务回调抛异常时整个事务回滚（仓储写入、Outbox、审计一并撤销）；
  * - 咨询锁随事务结束自动释放。
  */
 export class KyselyUnitOfWork implements IUnitOfWork {
-  constructor(private readonly db: Kysely<Database>) {}
+  constructor(private readonly db: Kysely<Database> | Transaction<Database>) {}
 
   public async execute<T>(work: (ctx: IUnitOfWorkContext) => Promise<T>): Promise<T> {
-    return await this.db.transaction().execute(async (trx) => {
-      const ctx: IUnitOfWorkContext = {
-        inspectionPlans: new KyselyInspectionPlanRepository(trx),
-        inspectionOrders: new KyselyInspectionOrderRepository(trx),
-        mrbReviews: new KyselyMRBReviewRepository(trx),
-        pendingDefects: new KyselyPendingDefectPoolRepository(trx),
-        reviewFlows: new KyselyReviewFlowRepository(trx),
-        traceDags: new KyselyBatchTraceRepository(trx),
-        outbox: new KyselyOutboxRepository(trx),
-        locks: new PostgresAdvisoryLockPort(trx),
-        auditLogs: new KyselyAuditLogRepository(trx),
-        permissions: new KyselyMaterialPermissionRepository(trx),
-        materials: new KyselyMasterDataRepository(trx),
-        suppliers: new KyselyMasterDataRepository(trx),
-        transferOverrides: new KyselyTransferOverrideRepository(trx),
-      };
-      return await work(ctx);
-    });
+    if (this.db instanceof Transaction) return work(this.createContext(this.db));
+    return this.db.transaction().execute((trx) => work(this.createContext(trx)));
+  }
+
+  private createContext(trx: Transaction<Database>): IUnitOfWorkContext {
+    return {
+      inspectionPlans: new KyselyInspectionPlanRepository(trx),
+      inspectionOrders: new KyselyInspectionOrderRepository(trx),
+      mrbReviews: new KyselyMRBReviewRepository(trx),
+      pendingDefects: new KyselyPendingDefectPoolRepository(trx),
+      reviewFlows: new KyselyReviewFlowRepository(trx),
+      traceDags: new KyselyBatchTraceRepository(trx),
+      outbox: new KyselyOutboxRepository(trx),
+      locks: new PostgresAdvisoryLockPort(trx),
+      auditLogs: new KyselyAuditLogRepository(trx),
+      permissions: new KyselyMaterialPermissionRepository(trx),
+      materials: new KyselyMasterDataRepository(trx),
+      suppliers: new KyselyMasterDataRepository(trx),
+      transferOverrides: new KyselyTransferOverrideRepository(trx),
+    };
   }
 }
 
-export function createUnitOfWork(db: Kysely<Database>): IUnitOfWork {
+export function createUnitOfWork(db: Kysely<Database> | Transaction<Database>): IUnitOfWork {
   return new KyselyUnitOfWork(db);
 }

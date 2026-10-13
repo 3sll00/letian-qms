@@ -36,7 +36,7 @@ const log = (...args) => {
 const PORTS = [5200, 5201, 5202];
 const TIMEOUT_MS = 6000;
 const DB_URL =
-  process.env.DATABASE_URL || 'postgresql://letian_user:letian_secure_pass_2026@127.0.0.1:5432/letian_qms_db';
+  process.env.DATABASE_URL || 'postgresql://letian_user:letian_secure_pass_2026@127.0.0.1:5433/letian_qms_db';
 /** 张强 · QA_MANAGER（读取范围最宽，用于把接口返回与库内行对账） */
 const MAIN_USER = '11000000-0000-4000-8000-000000000001';
 const PROBE_TYPE = process.env.PROBE_TYPE || 'OQC_SH';

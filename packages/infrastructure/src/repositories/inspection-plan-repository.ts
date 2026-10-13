@@ -156,41 +156,94 @@ export class KyselyInspectionPlanRepository implements IInspectionPlanRepository
         OR (sampling_config ->> 'effectiveEndDate')::date >= CURRENT_DATE)
     )`;
 
+    // 039：质检类型多选 —— 匹配谓词从主类型单列升级为「类型 ∈ inspection_types 全集」。
+    // jsonb `?` 运算符：检查字符串是否为顶层数组元素（inspection_types 有 NOT NULL +
+    // jsonb_typeof='array' 约束，存量行已由迁移按 [inspection_stage] 回填，无 NULL 歧义）。
+    const matchesInspectionType = sql<SqlBool>`inspection_types ? ${inspectionType}`;
+
     const specific = await this.db
       .selectFrom('inspectionPlans')
       .selectAll()
       .where('versionStatus', '=', 'ACTIVE')
       .where('materialCode', '=', materialCode)
-      .where('inspectionStage', '=', inspectionType)
+      .where(matchesInspectionType)
       .where(withinEffectivePeriod)
       .orderBy('createdAt', 'desc')
       .executeTakeFirst();
 
     if (specific) {
-      return this.loadPlanByCode(specific);
+      return this.loadPlanByCode(specific, true);
     }
 
-    // 第二级兜底：物料无专属方案时，下沉到该存货分类的通用方案
-    if (materialCategory === undefined || materialCategory === '') {
-      return null;
+    // 第二级兜底：物料有分类时，下沉到该存货分类的通用方案
+    if (materialCategory !== undefined && materialCategory !== '') {
+      const categoryFallback = await this.db
+        .selectFrom('inspectionPlans')
+        .selectAll()
+        .where('versionStatus', '=', 'ACTIVE')
+        .where('materialCode', '=', '')
+        .where('categoryCode', '=', materialCategory)
+        .where(matchesInspectionType)
+        .where(withinEffectivePeriod)
+        .orderBy('createdAt', 'desc')
+        .executeTakeFirst();
+
+      if (categoryFallback) {
+        return this.loadPlanByCode(categoryFallback, true);
+      }
     }
 
-    const categoryFallback = await this.db
+    // 第三级兜底（通用 IQC 方案）：物料既无专属方案、也无分类方案（或物料本身不在
+    // 存货档案里、无分类）时，一律下沉到「全局通用方案」（materialCode='' 且 categoryCode=''），
+    // 覆盖所有漏网物料。这是把 ERP 来料检验整批同步进 QMS 的关键——否则 4735 个物料里
+    // 99% 因"找不到方案"而建单失败。该分支不受 materialCategory 是否缺失影响，必须始终尝试。
+    const globalFallback = await this.db
       .selectFrom('inspectionPlans')
       .selectAll()
       .where('versionStatus', '=', 'ACTIVE')
       .where('materialCode', '=', '')
-      .where('categoryCode', '=', materialCategory)
-      .where('inspectionStage', '=', inspectionType)
+      .where('categoryCode', '=', '')
+      .where(matchesInspectionType)
       .where(withinEffectivePeriod)
       .orderBy('createdAt', 'desc')
       .executeTakeFirst();
 
-    if (!categoryFallback) {
+    if (!globalFallback) {
       return null;
     }
 
-    return this.loadPlanByCode(categoryFallback);
+    return this.loadPlanByCode(globalFallback, true);
+  }
+
+  /**
+   * 导入判重（POST /plans/import 专用）：按「方案名称 + 物料编码 + 分类编码 + 主质检类型」
+   * 精确探测既有方案。命中返回既有 plan_code（供跳过原因回显），不命中返回 null。
+   *
+   * 语义：这四个字段相同视为"同一份方案的重复导入"，而不是靠用户手工命名区分——
+   * 用户修正 Excel 某行后整文件重传时，已导入的组会被这里拦截，不会重复建方案。
+   * material_code 空串 = 分类通用方案（与 save 的落库口径一致）；category_code 可空，
+   * 判等用 IS NOT DISTINCT FROM 兼容存量 NULL 行。
+   */
+  public async findDuplicatePlanCode(query: {
+    planName: string;
+    materialCode: string;
+    categoryCode: string | null;
+    inspectionType: string;
+  }): Promise<string | null> {
+    const row = await this.db
+      .selectFrom('inspectionPlans')
+      .select('planCode')
+      .where('planName', '=', query.planName)
+      .where('materialCode', '=', query.materialCode)
+      .where('inspectionStage', '=', toInspectionType(query.inspectionType))
+      .where((eb) =>
+        query.categoryCode === null
+          ? eb('categoryCode', 'is', null)
+          : eb('categoryCode', '=', query.categoryCode)
+      )
+      .limit(1)
+      .executeTakeFirst();
+    return row?.planCode ?? null;
   }
 
   public async save(plan: InspectionPlan): Promise<void> {
@@ -223,6 +276,8 @@ export class KyselyInspectionPlanRepository implements IInspectionPlanRepository
         version: version.versionNo,
         versionStatus: version.status,
         inspectionStage: plan.inspectionType,
+        // 039：全集缺省回落为 [主类型]，保证匹配谓词 `inspection_types ? :type` 对未传字段的写入同样成立
+        inspectionTypes: JSON.stringify(plan.inspectionTypes ?? [plan.inspectionType]),
         items: JSON.stringify(version.items),
         samplingConfig: JSON.stringify(samplingConfig),
         createdBy: version.createdBy,
@@ -239,6 +294,7 @@ export class KyselyInspectionPlanRepository implements IInspectionPlanRepository
             materialCode: plan.materialCode ?? "",
             categoryCode: plan.categoryCode ?? null,
             inspectionStage: plan.inspectionType,
+            inspectionTypes: JSON.stringify(plan.inspectionTypes ?? [plan.inspectionType]),
             versionStatus: version.status,
             items: JSON.stringify(version.items),
             samplingConfig: JSON.stringify(samplingConfig),
@@ -311,7 +367,9 @@ export class KyselyInspectionPlanRepository implements IInspectionPlanRepository
     const filter = (eb: ExpressionBuilder<Database, 'inspectionPlans'>): Expression<SqlBool> => {
       const list: Expression<SqlBool>[] = [];
       if (query.inspectionType !== undefined) {
-        list.push(eb('inspectionStage', '=', toInspectionType(query.inspectionType)));
+        // 039：与 findActivePlan 同口径 —— 按「类型 ∈ inspection_types 全集」过滤，
+        // 多类型方案在任一适用类型的筛选下都应出现
+        list.push(sql<SqlBool>`inspection_types ? ${toInspectionType(query.inspectionType)}`);
       }
       if (query.materialCode !== undefined) {
         list.push(eb('materialCode', 'ilike', `%${escapeLike(query.materialCode)}%`));
@@ -345,6 +403,8 @@ export class KyselyInspectionPlanRepository implements IInspectionPlanRepository
             targetRef: 'inspection_plans',
             hasSupplierColumn: false,
             supplierDimension: 'NOT_APPLICABLE',
+            categoryCodeExpr: sql`coalesce(nullif(inspection_plans.category_code, ''),
+              (select category_code from materials where material_code = inspection_plans.material_code))`,
           })
         );
       }
@@ -397,6 +457,8 @@ export class KyselyInspectionPlanRepository implements IInspectionPlanRepository
             targetRef: 'inspection_plans',
             hasSupplierColumn: false,
             supplierDimension: 'NOT_APPLICABLE',
+            categoryCodeExpr: sql`coalesce(nullif(inspection_plans.category_code, ''),
+              (select category_code from materials where material_code = inspection_plans.material_code))`,
           });
 
     let statement = this.db
@@ -437,7 +499,7 @@ export class KyselyInspectionPlanRepository implements IInspectionPlanRepository
    * 不改变方案自身的聚合口径：物料与分类按编码唯一命中，职员表按 id::text 关联
    * （employees.id 是 uuid，inspection_plans.created_by 是 VARCHAR，需显式转型）。
    */
-  private async loadPlanByCode(matched: InspectionPlanRow): Promise<InspectionPlan> {
+  private async loadPlanByCode(matched: InspectionPlanRow, matchedVersionFirst = false): Promise<InspectionPlan> {
     const rows = await this.db
       .selectFrom('inspectionPlans')
       .leftJoin('materials', 'materials.materialCode', 'inspectionPlans.materialCode')
@@ -461,7 +523,10 @@ export class KyselyInspectionPlanRepository implements IInspectionPlanRepository
       .orderBy('inspectionPlans.createdAt', 'asc')
       .execute();
 
-    return this.buildPlanDto(rows, matched);
+    const selectedRows = matchedVersionFirst
+      ? [...rows].sort((a, b) => Number(b.id === matched.id) - Number(a.id === matched.id))
+      : rows;
+    return this.buildPlanDto(selectedRows, matched);
   }
 
   private buildPlanDto(rows: readonly InspectionPlanJoinedRow[], matched: InspectionPlanRow): InspectionPlan {
@@ -484,6 +549,8 @@ export class KyselyInspectionPlanRepository implements IInspectionPlanRepository
       planCode: matched.planCode,
       planName: matched.planName,
       inspectionType: matched.inspectionStage,
+      // 039：全集以物理列为准；列为空（理论上已被迁移回填覆盖，防御兜底）回落主类型
+      inspectionTypes: matched.inspectionTypes ?? [matched.inspectionStage],
       materialCode,
       categoryCode: matched.categoryCode,
       status,

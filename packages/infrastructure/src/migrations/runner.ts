@@ -36,6 +36,17 @@ import * as outsourceSfFamilyPlansMigration from './033_add_outsource_sf_family_
 import * as inspectionHeatTraceFieldsMigration from './034_add_inspection_heat_trace_fields.js';
 import * as transferTraceFieldsMigration from './035_add_transfer_trace_fields.js';
 import * as transferOverrideTicketsMigration from './036_add_transfer_override_tickets.js';
+import * as testItemsDictionaryMigration from './037_add_test_items_dictionary.js';
+import * as certTemplateFieldsMigration from './038_add_cert_template_fields.js';
+import * as planInspectionTypesMigration from './039_add_plan_inspection_types.js';
+import * as updateCompanyProfileNameMigration from './040_update_company_profile_name.js';
+import * as erpCodeMappingMigration from './041_create_qms_erp_code_mapping.js';
+import * as writeLogMigration from './042_create_qms_write_log.js';
+import * as widenOrderKeyColsMigration from './043_widen_inspection_order_key_columns.js';
+import * as widenOutboxAuditIdColsMigration from './044_widen_outbox_audit_id_columns.js';
+import * as widenChainKeyColsMigration from './045_widen_chain_key_columns.js';
+import * as materialCodeAliasMigration from './046_create_material_code_alias.js';
+import * as backgroundOpsJobFieldsMigration from './047_background_ops_job_fields.js';
 
 class DynamicMigrationProvider implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -76,6 +87,17 @@ class DynamicMigrationProvider implements MigrationProvider {
       '034_add_inspection_heat_trace_fields': inspectionHeatTraceFieldsMigration,
       '035_add_transfer_trace_fields': transferTraceFieldsMigration,
       '036_add_transfer_override_tickets': transferOverrideTicketsMigration,
+      '037_add_test_items_dictionary': testItemsDictionaryMigration,
+      '038_add_cert_template_fields': certTemplateFieldsMigration,
+      '039_add_plan_inspection_types': planInspectionTypesMigration,
+      '040_update_company_profile_name': updateCompanyProfileNameMigration,
+      '041_create_qms_erp_code_mapping': erpCodeMappingMigration,
+      '042_create_qms_write_log': writeLogMigration,
+      '043_widen_inspection_order_key_columns': widenOrderKeyColsMigration,
+      '044_widen_outbox_audit_id_columns': widenOutboxAuditIdColsMigration,
+      '045_widen_chain_key_columns': widenChainKeyColsMigration,
+      '046_create_material_code_alias': materialCodeAliasMigration,
+      '047_background_ops_job_fields': backgroundOpsJobFieldsMigration,
     };
   }
 }

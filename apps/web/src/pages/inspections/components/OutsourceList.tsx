@@ -10,17 +10,25 @@ function useSearchParams() {
   }, []);
   return [params, setParams] as const;
 }
+import { DateInput } from '../../../components/common/DateInput';
 import { CertificatePrintModal } from '../../../components/certificate/CertificatePrintModal';
-import { convertOutsourceToManufacturingCert } from '../../../lib/certificateDataService';
-import { ManufacturingCertData } from '../../../lib/inspectionTypes';
+import {
+  buildOqcCertificateData,
+  convertOutsourceToManufacturingCert,
+} from '../../../lib/certificateDataService';
+import type {
+  CertTemplateKind,
+  ManufacturingCertData,
+  QualityCertificateData,
+} from '../../../lib/inspectionTypes';
 import { api } from '../../../lib/api';
 import { loadCompanyProfile } from '../../../lib/companyProfile';
-import { TransferGateBadge } from '../../../components/common/TransferGateBadge';
 import type { TransferStateFields } from '../../../lib/transferGateFormat';
 
 interface OutsourceListProps {
   /** readOnly = true 表示只读回看（TBD-07）：走本单方案快照，而不是按物料匹配当前生效方案 */
-  onInspect: (item: any, readOnly?: boolean) => void;
+  /** isSurface = 是否来自「表面检验」页签（委外表面处理场景，docs/51：仅此处弹模板选择框） */
+  onInspect: (item: any, readOnly?: boolean, isSurface?: boolean) => void;
   initialTab?: 'surface' | 'machining' | 'heat';
 }
 
@@ -57,6 +65,10 @@ export interface OutsourceListItem {
    */
   completedAt?: string;
   createdAt?: string;
+  /** 证书模板（docs/51）：建单前选定的版式；历史单无值即按本模块缺省出证 */
+  certTemplate?: CertTemplateKind;
+  /** 证书专用补充字段袋（cert_fields） */
+  certFields?: Record<string, string>;
   /**
    * 「合格后传递」派生字段（docs/48 §4.6，服务端 `withTransferState` 回填）：
    * canTransfer / transferCode / blockedBy / predecessorOrderNo / chainKey。
@@ -87,6 +99,37 @@ const CN_TO_STATUSES: Record<string, string> = {
   已合格: 'PASSED,COMPLETED',
   不合格: 'FAILED,IN_MRB_REVIEW',
 };
+
+/**
+ * 台账展示上限：命中超过 1 万条时只展示前 1 万条，并提示缩小日期范围
+ * （与来料检验台账 IqcList 的 MAX_DISPLAY_ROWS 同一口径），避免无界翻页拖垮后端。
+ */
+const MAX_DISPLAY_ROWS = 10000;
+
+/**
+ * 默认「回厂日期」区间 = 本月（月初 ~ 月末），与「默认显示本月」口径一致。
+ * 每次调用都重新计算，跨月长驻页面时「重置」也能回到当月。
+ */
+function currentMonthRange(): { from: string; to: string } {
+  // 默认不限日期：空串表示不下发 returnDateFrom/To，列表返回全部（与过程检验口径一致）。
+  // 委外同步单的回厂日期多为空或历史，默认本月会把历史单全过滤掉，故改为默认不限。
+  return { from: '', to: '' };
+}
+
+/**
+ * 界面筛选条件集合。
+ * 「查询 / 重置」按钮把新值直接作为参数送进 loadList，而不是靠 setState 后的闭包重渲染
+ * —— 否则按钮里的 loadList 读到的仍是上一次渲染的旧筛选值（先发旧请求、后发新请求，
+ * 若旧请求更晚返回还会把正确结果覆盖掉）。
+ */
+interface OutsourceFilters {
+  doc: string;
+  type: string;
+  vendor: string;
+  status: string;
+  dateFrom: string;
+  dateTo: string;
+}
 
 interface OrderRow {
   id?: string;
@@ -120,6 +163,9 @@ interface OrderRow {
   inspectedDate?: string;
   /** 完成时间（inspection_orders.completed_at）：签发日期回落的第二档 */
   completedAt?: string | null;
+  /** 038 证书模板与证书专用字段袋：只取物理列，列为空即不下发该键 */
+  certTemplate?: CertTemplateKind | null;
+  certFields?: Record<string, string> | null;
   /** 「合格后传递」派生字段（服务端回填，docs/48 §4.6）：字段缺失即未下发，不是「允许」 */
   canTransfer?: boolean | null;
   transferCode?: string | null;
@@ -143,9 +189,14 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
   const [type, setType] = useState('全部');
   const [vendor, setVendor] = useState('');
   const [status, setStatus] = useState('全部');
+  // 「回厂日期」区间：默认本月（月初 ~ 月末），即「默认显示本月筛选内容」；清空即不限
+  const [dateFrom, setDateFrom] = useState(() => currentMonthRange().from);
+  const [dateTo, setDateTo] = useState(() => currentMonthRange().to);
 
   const [printModalOpen, setPrintModalOpen] = useState(false);
+  const [certKind, setCertKind] = useState<CertTemplateKind>('MANUFACTURING');
   const [currentCertData, setCurrentCertData] = useState<ManufacturingCertData | null>(null);
+  const [currentQualityData, setCurrentQualityData] = useState<QualityCertificateData | null>(null);
 
   // 表格数据一律来自 GET /inspections，未加载完成前保持空列表，不再渲染写死的演示行
   const [rows, setRows] = useState<OutsourceListItem[]>([]);
@@ -156,18 +207,29 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
 
   // 切换 Tab 同步 URL 查询参数
   const handleTabChange = (newTab: 'surface' | 'machining' | 'heat') => {
+    const defaults = currentMonthRange();
     setTab(newTab);
     setPage(1);
     setDoc('');
     setType('全部');
     setVendor('');
     setStatus('全部');
+    // 切页签同样回到「本月」：与其余筛选框统一清回默认态
+    setDateFrom(defaults.from);
+    setDateTo(defaults.to);
     const newParams = new URLSearchParams(searchParams);
     newParams.set('tab', newTab);
     setSearchParams(newParams);
   };
 
-  const loadList = useCallback(async (targetPage: number) => {
+  const loadList = useCallback(async (targetPage: number, override?: Partial<OutsourceFilters>) => {
+    // 按钮触发时以传入的新值为准（setState 是异步的，闭包里读到的还是上一次渲染的旧值）
+    const f: OutsourceFilters = { doc, type, vendor, status, dateFrom, dateTo, ...override };
+    // 起止日期选反时自动对调，避免「选反了查空」的困惑
+    const [safeFrom, safeTo] =
+      f.dateFrom !== '' && f.dateTo !== '' && f.dateFrom > f.dateTo
+        ? [f.dateTo, f.dateFrom]
+        : [f.dateFrom, f.dateTo];
     setListLoading(true);
     const backendType = tab === 'machining' ? 'OQC_MACH' : tab === 'heat' ? 'OQC_HEAT' : 'OQC_SF';
     try {
@@ -175,14 +237,18 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
         inspectionType: backendType,
         page: targetPage,
         pageSize,
-        ...(doc.trim() !== '' ? { outsourceNo: doc.trim() } : {}),
-        ...(status !== '全部' && CN_TO_STATUSES[status] !== undefined
-          ? { statuses: CN_TO_STATUSES[status] }
+        ...(f.doc.trim() !== '' ? { outsourceNo: f.doc.trim() } : {}),
+        ...(f.status !== '全部' && CN_TO_STATUSES[f.status] !== undefined
+          ? { statuses: CN_TO_STATUSES[f.status] }
           : {}),
         // 「加工类型」与「加工商」同样下沉到后端：加工类型为精确匹配，加工商走 partner 模糊匹配
         // （后端 partner 命中供应商名称/编码），避免出现「接口返回一页、前端再筛一次」的双口径
-        ...(type !== '全部' ? { processType: type } : {}),
-        ...(vendor.trim() !== '' ? { partner: vendor.trim() } : {}),
+        ...(f.type !== '全部' ? { processType: f.type } : {}),
+        ...(f.vendor.trim() !== '' ? { partner: f.vendor.trim() } : {}),
+        // 「回厂日期」区间下沉到后端 return_date 列：与 dateFrom/To 的建单时间、
+        // inboundDate* 的来料入库日期是三套不同口径；留空即不限，展示上限由 MAX_DISPLAY_ROWS 兜住
+        ...(safeFrom !== '' ? { returnDateFrom: safeFrom } : {}),
+        ...(safeTo !== '' ? { returnDateTo: safeTo } : {}),
       });
 
       // 真实后端 GET /inspections 的响应信封为 { total, list, statusCounts }；
@@ -220,6 +286,8 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
           createdAt: o.createdAt ?? '',
           approverName: o.approverName || '',
           approvedAt: o.approvedAt || '',
+          certTemplate: o.certTemplate ?? undefined,
+          certFields: o.certFields ?? undefined,
           tabType: tab,
           // 传递派生字段原样透传，前端不做任何推导（docs/48 §2.1：规则在领域、执法在应用、其余只呈现）
           canTransfer: o.canTransfer ?? null,
@@ -240,15 +308,54 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
     } finally {
       setListLoading(false);
     }
-  }, [tab, doc, status, type, vendor]);
+  }, [tab, doc, status, type, vendor, dateFrom, dateTo]);
 
   useEffect(() => {
     loadList(page);
   }, [loadList, page]);
 
-  // 筛选已全部下沉到后端（inspectionType / outsourceNo / statuses / processType / partner），
-  // 前端不再二次过滤：列表直接渲染服务端返回的当前页数据，页脚条数取服务端命中总数。
+  // 筛选已全部下沉到后端（inspectionType / outsourceNo / statuses / processType / partner /
+  // returnDateFrom / returnDateTo），前端不再二次过滤：列表直接渲染服务端返回的当前页数据，
+  // 页脚条数取服务端命中总数。
   const filteredList = rows;
+
+  // 展示上限：命中超过 1 万条时只允许浏览前 1 万条（1000 页 × 10 条/页），
+  // 计数显示「10,000+」并提示缩小日期范围——避免无界翻页拖垮后端。
+  const overCap = rowTotal > MAX_DISPLAY_ROWS;
+  const displayTotal = Math.min(rowTotal, MAX_DISPLAY_ROWS);
+  const maxPage = Math.max(1, Math.ceil(displayTotal / pageSize));
+
+  /** 查询：把界面条件提交并回到第 1 页（新值直接传参，避免闭包读到上一次渲染的旧值） */
+  const handleSearch = () => {
+    const from = dateFrom.trim();
+    const to = dateTo.trim();
+    // 起止选反时自动对调，避免「选反了查空」的困惑
+    const [safeFrom, safeTo] = from !== '' && to !== '' && from > to ? [to, from] : [from, to];
+    setDateFrom(safeFrom);
+    setDateTo(safeTo);
+    setPage(1);
+    void loadList(1, { dateFrom: safeFrom, dateTo: safeTo });
+  };
+
+  /** 重置：清空界面条件并把「回厂日期」恢复为默认本月（与「默认显示本月」口径一致） */
+  const handleReset = () => {
+    const defaults = currentMonthRange();
+    setDoc('');
+    setType('全部');
+    setVendor('');
+    setStatus('全部');
+    setDateFrom(defaults.from);
+    setDateTo(defaults.to);
+    setPage(1);
+    void loadList(1, {
+      doc: '',
+      type: '全部',
+      vendor: '',
+      status: '全部',
+      dateFrom: defaults.from,
+      dateTo: defaults.to,
+    });
+  };
 
   /**
    * 行级证书（docs/35 §10 M9，委外台账为基准）：按本行真实数据组装，未录入的项留白。
@@ -257,12 +364,39 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
   const handleOpenCert = (item: OutsourceListItem) => {
     void (async () => {
       const companyProfile = await loadCompanyProfile();
-      const cert = convertOutsourceToManufacturingCert({
+      // 版式取本单建单时选定的 cert_template（docs/51）；历史单无值按本模块缺省 MANUFACTURING 出证
+      const kind: CertTemplateKind = item.certTemplate ?? 'MANUFACTURING';
+      if (kind === 'QUALITY') {
+        setCurrentQualityData(
+          buildOqcCertificateData({
+            orderNo: item.docNo,
+            docNo: item.docNo,
+            productName: item.materialName,
+            materialName: item.materialName,
+            specification: item.specification,
+            batchNo: item.batchNo,
+            quantity: item.qty > 0 ? String(item.qty) : '',
+            inspector: item.inspector === '-' ? '' : item.inspector,
+            standard: item.techStandard,
+            inspectionDate: item.inspectedDate,
+            certFields: item.certFields,
+            ...(item.approverName !== undefined && item.approverName !== ''
+              ? { approverName: item.approverName }
+              : {}),
+            ...(companyProfile !== null ? { companyProfile } : {}),
+          })
+        );
+        setCurrentCertData(null);
+      } else {
+        setCurrentQualityData(null);
+        setCurrentCertData(convertOutsourceToManufacturingCert({
         docNo: item.docNo,
         outsourceNo: item.outsourceNo,
         materialCode: item.materialCode,
         materialName: item.materialName,
         specification: item.specification,
+        // 材质牌号随台账行一起带到证书「材料级别」列（此前只在录入页传，台账入口漏传）
+        materialGrade: item.materialGrade,
         process: item.processType,
         quantityPcs: item.qty > 0 ? String(item.qty) : '',
         vendor: item.vendor,
@@ -278,9 +412,11 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
           item.status === '已合格' ? 'PASSED' : item.status === '不合格' ? 'FAILED' : '',
         // 质量负责人只有真实签核过才有值；未签核即空（不打印编造人名）
         ...(item.approverName !== undefined && item.approverName !== '' ? { approverName: item.approverName } : {}),
+        certFields: item.certFields,
         ...(companyProfile !== null ? { companyProfile } : {}),
-      });
-      setCurrentCertData(cert);
+        }));
+      }
+      setCertKind(kind);
       setPrintModalOpen(true);
     })();
   };
@@ -305,7 +441,7 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
           // 带上当前页签：表单按 `initialItem.tabType` 推导 inspectionType，
           // 不带的话在「热处理」页点新建会建成 OQC_SF（表面处理）—— 建单类型与用户所在页不符，
           // 传递门禁也会按错误环节判定（docs/48 §2.2 锚点与环节类型相关）。
-          onClick={() => onInspect({ tabType: tab }, false)}
+          onClick={() => onInspect({ tabType: tab }, false, tab === 'surface')}
           className="px-4 py-1.5 rounded bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 shadow-sm flex items-center gap-1.5 shrink-0"
         >
           <span aria-hidden="true">+</span> 新建委外检验单
@@ -346,88 +482,112 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
         </button>
       </div>
 
-      {/* Filters: 仅在表面处理检验展示，机加工与热处理按原型直接展示表格 */}
-      {tab === 'surface' && (
-        <div className="bg-white border border-slate-200/80 rounded-lg p-4 shadow-sm flex flex-wrap items-center gap-4 text-xs">
-          <div className="flex items-center gap-2">
-            <span className="text-slate-600 font-medium">委外加工单号</span>
-            <input
-              type="text"
-              placeholder="WWJG-20260706-001"
-              value={doc}
-              onChange={(e) => setDoc(e.target.value)}
-              className="border border-slate-200 rounded px-2.5 py-1.5 w-40 text-slate-700 placeholder-slate-400 focus:outline-none focus:border-blue-500"
-            />
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-slate-600 font-medium">加工类型</span>
-            <select
-              value={type}
-              onChange={(e) => setType(e.target.value)}
-              className="border border-slate-200 rounded px-2.5 py-1.5 w-28 text-slate-700 bg-white focus:outline-none focus:border-blue-500"
-            >
-              <option value="全部">全部</option>
-              <option value="镀锌">镀锌</option>
-              <option value="镀镍">镀镍</option>
-              <option value="发黑">发黑</option>
-              <option value="磷化">磷化</option>
-            </select>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-slate-600 font-medium">加工商</span>
-            <input
-              type="text"
-              value={vendor}
-              onChange={(e) => setVendor(e.target.value)}
-              className="border border-slate-200 rounded px-2.5 py-1.5 w-36 text-slate-700 focus:outline-none focus:border-blue-500"
-            />
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-slate-600 font-medium">检验状态</span>
-            <select
-              value={status}
-              onChange={(e) => setStatus(e.target.value)}
-              className="border border-slate-200 rounded px-2.5 py-1.5 w-28 text-slate-700 bg-white focus:outline-none focus:border-blue-500"
-            >
-              <option value="全部">全部</option>
-              <option value="待检验">待检验</option>
-              <option value="已合格">已合格</option>
-              <option value="不合格">不合格</option>
-            </select>
-          </div>
+      {/*
+        Filters：「回厂日期」区间在三个页签通用 —— 委外件关注的业务时点是「回厂」；
+        其余筛选框（委外加工单号 / 加工类型 / 加工商 / 检验状态）按原型仅在表面处理展示。
+      */}
+      <div className="bg-white border border-slate-200/80 rounded-lg p-4 shadow-sm flex flex-wrap items-center gap-4 text-xs">
+        {tab === 'surface' && (
+          <>
+            <div className="flex items-center gap-2">
+              <span className="text-slate-600 font-medium">委外加工单号</span>
+              <input
+                type="text"
+                placeholder="WWJG-20260706-001"
+                value={doc}
+                onChange={(e) => setDoc(e.target.value)}
+                className="border border-slate-200 rounded px-2.5 py-1.5 w-40 text-slate-700 placeholder-slate-400 focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-slate-600 font-medium">加工类型</span>
+              <select
+                value={type}
+                onChange={(e) => setType(e.target.value)}
+                className="border border-slate-200 rounded px-2.5 py-1.5 w-28 text-slate-700 bg-white focus:outline-none focus:border-blue-500"
+              >
+                <option value="全部">全部</option>
+                <option value="镀锌">镀锌</option>
+                <option value="镀镍">镀镍</option>
+                <option value="发黑">发黑</option>
+                <option value="磷化">磷化</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-slate-600 font-medium">加工商</span>
+              <input
+                type="text"
+                value={vendor}
+                onChange={(e) => setVendor(e.target.value)}
+                className="border border-slate-200 rounded px-2.5 py-1.5 w-36 text-slate-700 focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-slate-600 font-medium">检验状态</span>
+              <select
+                value={status}
+                onChange={(e) => setStatus(e.target.value)}
+                className="border border-slate-200 rounded px-2.5 py-1.5 w-28 text-slate-700 bg-white focus:outline-none focus:border-blue-500"
+              >
+                <option value="全部">全部</option>
+                <option value="待检验">待检验</option>
+                <option value="已合格">已合格</option>
+                <option value="不合格">不合格</option>
+              </select>
+            </div>
+          </>
+        )}
 
-          <div className="ml-auto flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                setDoc('');
-                setType('全部');
-                setVendor('');
-                setStatus('全部');
-                setPage(1);
-                void loadList(1);
-              }}
-              className="px-3.5 py-1.5 rounded border border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer"
-            >
-              重置
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setPage(1);
-                void loadList(1);
-              }}
-              className="px-4 py-1.5 rounded bg-blue-600 text-white font-medium hover:bg-blue-700 shadow-sm cursor-pointer"
-            >
-              查询
-            </button>
-          </div>
+        {/* 回厂日期区间：默认本月；两个框都清空即不限（展示上限仍为 MAX_DISPLAY_ROWS） */}
+        <div className="flex items-center gap-2">
+          <span className="text-slate-600 font-medium">回厂日期</span>
+          <DateInput
+            wrapClassName="w-36"
+            placeholder="开始日期"
+            value={dateFrom}
+            // 改日期即回到第 1 页：新区间的结果集与当前页次无关，留在原页容易看到空列表
+            onChange={(e) => {
+              setDateFrom(e.target.value);
+              setPage(1);
+            }}
+            className="px-2 py-1.5 text-xs border border-slate-200 rounded text-slate-700 focus:outline-none focus:border-blue-500"
+          />
+          <span className="text-slate-400">~</span>
+          <DateInput
+            wrapClassName="w-36"
+            placeholder="结束日期"
+            value={dateTo}
+            onChange={(e) => {
+              setDateTo(e.target.value);
+              setPage(1);
+            }}
+            className="px-2 py-1.5 text-xs border border-slate-200 rounded text-slate-700 focus:outline-none focus:border-blue-500"
+          />
         </div>
-      )}
+
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleReset}
+            className="px-3.5 py-1.5 rounded border border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer"
+          >
+            重置
+          </button>
+          <button
+            type="button"
+            onClick={handleSearch}
+            className="px-4 py-1.5 rounded bg-blue-600 text-white font-medium hover:bg-blue-700 shadow-sm cursor-pointer"
+          >
+            查询
+          </button>
+        </div>
+      </div>
 
       {/* Table */}
-      <div className="bg-white border border-slate-200/80 rounded-lg shadow-sm overflow-hidden">
-        <table className="w-full text-xs text-left">
+      {/* 台账列数已到 12 列：给表格一个最小宽度并允许横向滚动，
+          否则中文表头会被压成竖排单字、规格字符串被逐字折行（1280 宽下必现） */}
+      <div className="bg-white border border-slate-200/80 rounded-lg shadow-sm overflow-x-auto">
+        <table className="w-full min-w-[1200px] text-xs text-left">
           <thead className="bg-[#F8FAFC] text-slate-600 font-medium border-b border-slate-200">
             <tr>
               <th className="py-3 px-4">检验单号</th>
@@ -435,11 +595,11 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
               {tab === 'surface' && <th className="py-3 px-4">加工类型</th>}
               <th className="py-3 px-4">物料编码</th>
               <th className="py-3 px-4">物料名称</th>
+              <th className="py-3 px-4 whitespace-nowrap">规格尺寸</th>
               <th className="py-3 px-4">数量</th>
               <th className="py-3 px-4">加工商</th>
               <th className="py-3 px-4">回厂日期</th>
               <th className="py-3 px-4">状态</th>
-              <th className="py-3 px-4">传递</th>
               <th className="py-3 px-4">检验人</th>
               <th className="py-3 px-4">操作</th>
             </tr>
@@ -469,7 +629,7 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
                 >
                   <td className="py-3 px-4">
                     <span
-                      onClick={() => onInspect({ ...item }, item.status !== '待检验' && item.status !== '检验中')}
+                      onClick={() => onInspect({ ...item }, item.status !== '待检验' && item.status !== '检验中', tab === 'surface')}
                       className="font-medium text-blue-600 hover:underline cursor-pointer"
                     >
                       {item.docNo}
@@ -499,6 +659,15 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
                   )}
                   <td className="py-3 px-4 font-medium text-slate-900">{item.materialCode}</td>
                   <td className="py-3 px-4 text-slate-800">{item.materialName}</td>
+                  {/* 规格尺寸取 inspection_orders.specification 真实列（API 已随台账返回）；
+                      历史导入行该列为空即如实留白，不用物料名称里的型号顶替 */}
+                  <td className="py-3 px-4 text-slate-600 min-w-[170px]">
+                    {item.specification !== '' && item.specification !== undefined ? (
+                      <span title={item.specification}>{item.specification}</span>
+                    ) : (
+                      <span className="text-slate-400">—</span>
+                    )}
+                  </td>
                   <td className="py-3 px-4">{item.qty}</td>
                   <td className="py-3 px-4 text-slate-600">{item.vendor}</td>
                   <td className="py-3 px-4 text-slate-500">{item.returnDate}</td>
@@ -518,22 +687,18 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
                     </span>
                   </td>
                   <td className="py-3 px-4 text-slate-600">{item.inspector}</td>
-                  {/* 传递（docs/48 §4.6）：本环节的上游是否已放行；文案与色板只翻译服务端判定码 */}
-                  <td className="py-3 px-4">
-                    <TransferGateBadge state={item} />
-                  </td>
                   <td className="py-3 px-4">
                     <div className="flex items-center gap-3">
                       {(item.status === '待检验' || item.status === '检验中') && (
                         <button
-                          onClick={() => onInspect({ ...item }, false)}
+                          onClick={() => onInspect({ ...item }, false, tab === 'surface')}
                           className="text-blue-600 hover:underline cursor-pointer"
                         >
                           {item.status === '待检验' ? '检验' : '继续'}
                         </button>
                       )}
                       <button
-                        onClick={() => onInspect({ ...item }, true)}
+                        onClick={() => onInspect({ ...item }, true, tab === 'surface')}
                         className="text-blue-600 hover:underline cursor-pointer"
                       >
                         详情
@@ -555,7 +720,14 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
 
       {/* Pagination */}
       <div className="flex items-center justify-between text-xs text-slate-500 pt-2">
-        <div>共 {rowTotal} 条委外检验记录</div>
+        <div>
+          共 {overCap ? `${MAX_DISPLAY_ROWS.toLocaleString()}+` : rowTotal} 条委外检验记录
+          {overCap && (
+            <span className="ml-2 text-amber-600">
+              （展示前 {MAX_DISPLAY_ROWS.toLocaleString()} 条，请缩小日期范围）
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <button
             type="button"
@@ -565,10 +737,12 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
           >
             上一页
           </button>
-          <span>第 {page} 页</span>
+          <span>
+            第 {page} / {maxPage} 页
+          </span>
           <button
             type="button"
-            disabled={page * pageSize >= rowTotal}
+            disabled={page >= maxPage}
             onClick={() => setPage((p) => p + 1)}
             className="px-2.5 py-1 rounded border border-slate-200 disabled:opacity-40 hover:bg-slate-50 cursor-pointer disabled:cursor-not-allowed"
           >
@@ -577,12 +751,13 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
         </div>
       </div>
 
-      {/* 委外制造证书导出与打印模态框 */}
+      {/* 证书导出与打印模态框（版式按本单 cert_template，docs/51） */}
       <CertificatePrintModal
         isOpen={printModalOpen}
         onClose={() => setPrintModalOpen(false)}
-        type="manufacturing"
+        type={certKind === 'QUALITY' ? 'quality' : 'manufacturing'}
         manufacturingData={currentCertData}
+        qualityData={currentQualityData}
       />
     </div>
   );

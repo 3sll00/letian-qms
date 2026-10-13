@@ -63,6 +63,33 @@ export class KyselyAuthorizationLogRepository {
     await this.db.insertInto('authorizationLogs').values(values).execute();
   }
 
+  /**
+   * 分批删除超过保留期的权限校验日志。
+   * 注意：这里只清理 authorization_logs；audit_logs 由数据库触发器保证 append-only，
+   * 任何业务/后台任务都不能物理删除。
+   */
+  public async purgeOlderThan(cutoff: Date, limit = 1000): Promise<number> {
+    const rows = await this.db
+      .selectFrom('authorizationLogs')
+      .select('id')
+      .where('createdAt', '<', cutoff)
+      .orderBy('createdAt', 'asc')
+      .limit(limit)
+      .execute();
+
+    const ids = rows.map((row) => row.id);
+    if (ids.length === 0) {
+      return 0;
+    }
+
+    const result = await this.db
+      .deleteFrom('authorizationLogs')
+      .where('id', 'in', ids)
+      .executeTakeFirst();
+
+    return Number(result.numDeletedRows ?? 0);
+  }
+
   /** 分页查询校验日志（别名兼容） */
   public async listLogs(query: AuthorizationLogQuery): Promise<AuthorizationLogListResult> {
     return this.queryList(query);
