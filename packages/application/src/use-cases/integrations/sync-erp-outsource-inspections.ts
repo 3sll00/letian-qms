@@ -32,8 +32,12 @@ export interface ErpOutsourceInspectionLike {
   ptypeUserCode: string;
   /** 物料 ERP 全名（Ptype.FullName）：主数据缺失时兜底为 materialName */
   ptypeFullName: string;
+  /** 物料 ERP 规格型号（Ptype.Standard）：建单时直接作为 specification 快照 */
+  ptypeStandard: string;
   /** 委外加工单位 ERP 用户编码（Btype.UserCode）= QMS supplierCode */
   btypeUserCode: string;
+  /** 委外加工单位全名（Btype.FullName）= QMS vendor_name 快照；fixture/旧实现可省略 */
+  btypeFullName?: string;
   qty: number;
   qty2: number;
   blockNo: string;
@@ -93,6 +97,25 @@ export function resolveOutsourceType(remark: string): 'OQC_SF' | 'OQC_MACH' | 'O
   return 'OQC_SF';
 }
 
+/**
+ * 从明细备注中取出**命中的工艺词本身**，作为 `inspection_orders.process_type` 的写入值
+ * （台账「加工类型」列目前唯一的自动来源）。
+ *
+ * 与 `resolveOutsourceType` 同一优先级（热处理 > 机加工 > 表面处理）：
+ * 一条备注同时含多类词时，返回与分类结论同族的词，避免「分到热处理单、加工类型却写镀锌」。
+ *
+ * 未命中返回 `undefined` —— 备注里写的是「急件 / 客户名 / 补做加工单」这类非工艺内容时
+ * 一律不落值（process_type 保持 NULL，不编造），界面台账仍显示 `-`。
+ */
+export function resolveOutsourceProcessType(remark: string): string | undefined {
+  const r = (remark ?? '').toLowerCase();
+  return (
+    HEAT_KEYWORDS.find((k) => r.includes(k.toLowerCase())) ??
+    MACH_KEYWORDS.find((k) => r.includes(k.toLowerCase())) ??
+    SF_KEYWORDS.find((k) => r.includes(k.toLowerCase()))
+  );
+}
+
 function mapRowToCommand(
   row: ErpOutsourceInspectionLike,
   erpNumber: string,
@@ -114,9 +137,19 @@ function mapRowToCommand(
   // ERP 名称兜底：委外物料很多未同步进 QMS 主数据，缺 materialName 会直接建单失败；
   // 显式传入 ERP 存货全名（Ptype.FullName）即可绕开主数据缺失，与 IQC 同步口径一致。
   if (row.ptypeFullName) command.materialName = row.ptypeFullName;
+  // 规格同样直接取 ERP（Ptype.Standard），与名称同口径：不依赖 QMS materials.spec_model。
+  // 只出现在委外加工单的物料从未进过主数据（sync-master-data 只 JOIN DlyCheck），
+  // 依赖主数据兜底会让这批物料的规格恒为空，台账与证书【规格尺寸】两处都跟着丢。
+  if (row.ptypeStandard) command.specification = row.ptypeStandard;
   // 委外加工单号：ERP 单号原样镜像（与 inspection_orders.outsource_no 口径一致，见 docs/35 §2）
   if (row.number) command.outsourceNo = row.number;
   if (row.btypeUserCode) command.supplierCode = row.btypeUserCode;
+  // 加工商名称快照（vendor_name）：台账列优先取它，其次回落 supplier_name；
+  // ERP 行带 Btype.FullName 时一并落库，与 supplier_code 同一行取数、不会错配
+  if (row.btypeFullName) command.vendorName = row.btypeFullName;
+  // 加工类型（process_type）：只落备注里真实命中的工艺词；未命中不落值、不编造
+  const processType = resolveOutsourceProcessType(row.detailComment);
+  if (processType) command.processType = processType;
   if (row.number) command.inboundNo = row.number;
   if (row.date) command.inboundDate = row.date;
 

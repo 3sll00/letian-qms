@@ -1,4 +1,4 @@
-# 乐天质量管理系统 (Letian QMS) - Windows/Linux 部署与迁云架构方案
+﻿# 乐天质量管理系统 (Letian QMS) - Windows/Linux 部署与迁云架构方案
 
 > **版本**：v2.6.0  
 > **面向场景**：工厂车间本地局域网私有化部署、混合云部署、公有云迁移  
@@ -14,6 +14,17 @@
 1. 安装 **Node.js 20.x LTS**（配置系统环境变量 `PATH`）。
 2. 安装 **PostgreSQL 15+**（设置端口为 5432，密码写入 `.env`）。
 3. 确保防火墙放行前端 HTTP 端口（如 `5173` 或 `80`）及 API 端口（`8080`）。
+
+> **客户服务器为 Windows Server 2008 R2 时的特殊口径（2026-10 已适配）**：
+> 不走本节流程，直接使用 `deploy/` 自包含部署包（见包内 README.txt）。要点：
+> - 运行时内置 **Node 14.21.3**（最后一个支持 2008 R2 的版本），需系统已打 **SP1**，
+>   并安装包内 `redist\vc_redist.x64.exe`（VC++ 2015-2019，14.29 系列）。
+> - 数据库下限为 **PostgreSQL 13**（迁移使用 `gen_random_uuid()`，PG 13 起内置；
+>   PG 13 也是支持 2008 R2 的最后大版本），或使用内网远程 PG 13+。
+> - 服务端已按 Node 14 重新编译（target ES2020）并通过兼容性审计与真机冒烟；
+>   `pg` 锁定 8.16.0（8.18+ 依赖 Node 15+ 的 webcrypto），kysely / openapi3-ts /
+>   mssql / tedious 由 `scripts/deploy/node14-patches/` 打语义等价补丁。
+> - Node 14 已 EOL，仅限纯内网部署，严禁暴露公网。
 
 ### 1.2 利用 NSSM 配置服务开机自启
 使用 NSSM (Non-Sucking Service Manager) 将服务注册为 Windows 原生系统服务：

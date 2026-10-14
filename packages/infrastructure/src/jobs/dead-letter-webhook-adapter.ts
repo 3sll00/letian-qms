@@ -1,3 +1,5 @@
+import { postJson } from './webhook-http.js';
+
 export interface DeadLetterAlertPayload {
   eventId: string;
   aggregateType: string;
@@ -59,28 +61,19 @@ export class DeadLetterWebhookAdapter implements IDeadLetterAlertNotifier {
       return;
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-
     try {
-      const response = await fetch(this.webhookUrl, {
-        method: 'POST',
+      const response = await postJson(this.webhookUrl, alertBody, {
         headers: this.headers,
-        body: JSON.stringify(alertBody),
-        signal: controller.signal,
+        timeoutMs: this.timeoutMs,
       });
 
-      if (!response.ok) {
-        const statusText = response.statusText;
-        const bodyText = await response.text().catch(() => '');
-        throw new Error(`WEBHOOK_HTTP_${response.status}: ${statusText} | ${bodyText}`);
+      if (response.status < 200 || response.status >= 300) {
+        throw new Error(`WEBHOOK_HTTP_${response.status}: ${response.statusText} | ${response.bodyText}`);
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[DeadLetterWebhookAdapter] Failed to send webhook alert:`, message);
       throw err;
-    } finally {
-      clearTimeout(timeout);
     }
   }
 }

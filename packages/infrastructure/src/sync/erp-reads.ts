@@ -200,6 +200,13 @@ export interface ErpIncomingInspectionRow {
   ptypeUserCode: string;
   /** 供应商在 ERP 的用户编码（Btype.UserCode），即 QMS 的 supplierCode；同上 JOIN Btype 取出 */
   btypeUserCode: string;
+  /**
+   * 炉批号（docs/52 §1.1）：ERP 实测**没有**炉号列（DlyCheck/DlyNdxCheck 全列核对无
+   * heat/furnace 语义字段，Blockno 是内部批号非炉号），故当前 SQL 不取、恒为 null。
+   * 休眠接线：若 ERP 侧日后在送检单上补炉号列，只需在 `INCOMING_INSPECTION_SELECT_SQL`
+   * 中以 `AS HeatNumber` 别名带出，本行映射与下游 `furnaceHeatNo` 落库自动生效。
+   */
+  furnaceHeatNo: string | null;
 }
 
 /**
@@ -227,8 +234,18 @@ export interface ErpOutsourceInspectionRow {
   ptypeUserCode: string;
   /** 物料名称（Ptype.FullName），建单时若不传则由 CreateInspectionOrderUseCase 按主数据补齐 */
   ptypeFullName: string;
+  /**
+   * 物料规格型号（Ptype.Standard），即 ERP 的规格列。
+   *
+   * 直接取自 ERP 而不回落到 QMS 主数据：只出现在委外加工单、从未来料送检单的物料
+   * 不会进 `materials`（sync-master-data 只 JOIN DlyCheck），一旦依赖主数据兜底，
+   * 这类物料建出来的检验单规格恒为 NULL，证书【规格尺寸】列也会跟着空掉。
+   */
+  ptypeStandard: string;
   /** 委外加工单位在 ERP 的用户编码（Btype.UserCode），即 QMS 的 supplierCode */
   btypeUserCode: string;
+  /** 委外加工单位全名（Btype.FullName），即 QMS 的 vendor_name 快照 */
+  btypeFullName: string;
   /** 送检/加工数量（DlySC.Qty）；与 qty2 取大值作为报检批量 */
   qty: number;
   qty2: number;
@@ -435,7 +452,9 @@ export const OUTSOURCE_INSPECTION_SELECT_SQL = [
   '       d.PtypeID AS PtypeId,',
   "       ISNULL(p.UserCode, N'') AS PtypeUserCode,",
   "       ISNULL(p.FullName, N'') AS PtypeFullName,",
+  "       ISNULL(p.Standard, N'') AS PtypeStandard,",
   "       ISNULL(b.UserCode, N'') AS BtypeUserCode,",
+  "       ISNULL(b.FullName, N'') AS BtypeFullName,",
   '       ISNULL(d.Qty, 0) AS Qty,',
   "       ISNULL(d.Blockno, N'') AS BlockNo,",
   "       ISNULL(d.Comment, N'') AS DetailComment",
@@ -757,6 +776,9 @@ export function createMssqlErpReads(pool: sql.ConnectionPool): ErpReads {
         sourceVchCode: asNum(r.SourceVchcode) ?? 0,
         ptypeUserCode: String(r.PtypeUserCode ?? ''),
         btypeUserCode: String(r.BtypeUserCode ?? ''),
+        // 休眠接线（docs/52 §1.1）：ERP 当前无炉号列，SELECT 未取 HeatNumber → 恒为 null；
+        // ERP 补列后在 SQL 里加 `AS HeatNumber` 即生效，无需再改代码
+        furnaceHeatNo: asText(r.HeatNumber),
       }));
     },
 
@@ -772,7 +794,9 @@ export function createMssqlErpReads(pool: sql.ConnectionPool): ErpReads {
         ptypeId: String(r.PtypeId ?? ''),
         ptypeUserCode: String(r.PtypeUserCode ?? ''),
         ptypeFullName: String(r.PtypeFullName ?? ''),
+        ptypeStandard: String(r.PtypeStandard ?? ''),
         btypeUserCode: String(r.BtypeUserCode ?? ''),
+        btypeFullName: String(r.BtypeFullName ?? ''),
         qty: asNum(r.Qty) ?? 0,
         // DlySC 委外加工单明细只有 Qty 一列数量（无 Qty2/Qty3，那是 DlyBuy 来料单才有），
         // 故 qty2 固定为 0，批次数量以 qty 为准。

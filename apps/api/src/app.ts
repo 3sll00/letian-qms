@@ -1,6 +1,8 @@
+import path from 'node:path';
 import Fastify, { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
+import fastifyStatic from '@fastify/static';
 import { zodValidatorPlugin, errorHandlerPlugin, authPlugin } from './plugins';
 import { createApiContainer, type ApiContainer } from './container';
 import {
@@ -123,6 +125,19 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     },
     { prefix: '/api/v1' }
   );
+
+  // 6.5 生产态托管前端静态文件（客户内网单进程部署：API + 静态 Web 同端口）。
+  //     开发态不启用（SERVE_WEB 未设置且 NODE_ENV != production），前端仍走 Vite 5200 代理。
+  //     注意：SPA 回退不在此处注册 —— 根级 setNotFoundHandler 已被 errorHandlerPlugin 占用，
+  //     重复注册会抛 FST_ERR_DUPLICATED_NOT_FOUND_HANDLER；回退逻辑并入该插件（见 error-handler.ts）。
+  if (process.env.SERVE_WEB === '1' || process.env.NODE_ENV === 'production') {
+    const publicDir = path.resolve(__dirname, process.env.WEB_PUBLIC_DIR ?? '../public');
+    await app.register(fastifyStatic, {
+      root: publicDir,
+      prefix: '/',
+      wildcard: false,
+    });
+  }
 
   // 7. 关闭应用时释放容器自建的连接池，避免测试进程残留连接
   if (ownsContainer) {

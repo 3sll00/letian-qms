@@ -5,22 +5,40 @@
   "files": [
     "dist"
   ],
+  "bin": {
+    "letian-qms-server": "dist/server.js",
+    "letian-qms-migrate": "dist/migrate.js"
+  },
+  "engines": {
+    "node": ">=14.21"
+  },
+  "pkg": {
+    "scripts": "dist/**/*.js",
+    "assets": "public/**/*",
+    "targets": [
+      "node14-win-x64"
+    ],
+    "outputPath": "../../deploy"
+  },
   "scripts": {
     "build": "tsc -b",
+    "build:deploy": "tsc -b && node ../../scripts/deploy/copy-web-to-api.cjs",
+    "package:exe": "tsc -b && node ../../scripts/deploy/copy-web-to-api.cjs && pkg --no-compress .",
     "typecheck": "tsc -p tsconfig.test.json",
     "dev": "tsx src/server.ts",
     "test": "tsx test/contract/schemas.contract.test.ts && tsx test/api.test.ts && tsx test/integration/e2e.test.ts && tsx test/integration/outsource-inspection-link.test.ts && tsx test/integration/permission-management-link.test.ts && tsx test/integration/inspection-finalize-pool-link.test.ts && tsx test/integration/reinspection-resume-link.test.ts && tsx test/integration/mrb-defect-qty-parity.test.ts && tsx test/integration/plan-match-pbac-link.test.ts && tsx test/integration/trace-node-registration.test.ts && tsx test/integration/mrb-defect-qty-db-parity.test.ts && tsx test/integration/heat-batch-trace-link.test.ts && tsx test/integration/plan-import-link.test.ts && tsx test/integration/auth-password.test.ts"
   },
   "dependencies": {
-    "@fastify/cors": "^11.3.0",
-    "@fastify/multipart": "9.4.0",
+    "@fastify/cors": "^9.0.1",
+    "@fastify/multipart": "8.3.0",
+    "@fastify/static": "^7.0.4",
     "@letian/application": "workspace:*",
     "@letian/contracts": "workspace:*",
     "@letian/domain": "workspace:*",
     "@letian/infrastructure": "workspace:*",
     "@types/jsonwebtoken": "^9.0.10",
     "exceljs": "4.4.0",
-    "fastify": "^5.12.4",
+    "fastify": "^4.28.1",
     "fastify-plugin": "^6.0.0",
     "jsonwebtoken": "^9.0.3",
     "zod": "^3.22.4"

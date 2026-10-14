@@ -102,7 +102,7 @@ export class MesSyncJob {
       mode: 'MES_REAL',
       ok: result.success,
       message: result.success
-        ? `工序字典 +${result.syncedWorkshops} / 检验单据 +${result.syncedInspectionOrders} / 追溯节点 +${result.syncedTraceNodes}（耗时 ${result.durationMs}ms）`
+        ? `工序字典 +${result.syncedWorkshops} / 检验单据 +${result.syncedInspectionOrders} / 追溯节点 +${result.syncedTraceNodes} / 委外回厂 +${result.syncedOutsourceReturns}（耗时 ${result.durationMs}ms）`
         : `同步失败：${result.details.join('；')}`,
     };
   }

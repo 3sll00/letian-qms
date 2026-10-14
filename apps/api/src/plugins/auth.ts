@@ -127,5 +127,5 @@ const authPluginAsync: FastifyPluginAsync<AuthPluginOptions> = async (fastify, o
 
 export const authPlugin = fp(authPluginAsync, {
   name: 'fastify-jwt-auth',
-  fastify: '5.x',
+  fastify: '>=4',
 });

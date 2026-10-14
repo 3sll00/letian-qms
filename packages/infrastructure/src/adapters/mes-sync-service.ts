@@ -3,6 +3,8 @@ import type { Database } from '../database/schema.js';
 import type { InspectionType, TraceNodeStatus, TraceRelationType } from '@letian/contracts';
 import { db as defaultDb } from '../database/connection.js';
 import { queryMes, assertSafeMesDatabase, STRICT_MES_TARGET_DB } from './mes-pool.js';
+import { getErpConnectionPool } from './erp-pool.js';
+import { queryErpReadOnly, type ErpQueryRunner } from '../sync/erp-readonly.js';
 import { createFixtureMesReads, type MesFixtureData } from '../sync/mes-reads.js';
 import { CreateInspectionOrderUseCase } from '@letian/application';
 import { createUnitOfWork } from '../tx/kysely-unit-of-work.js';
@@ -15,6 +17,8 @@ export interface MesSyncResult {
   syncedInspectionOrders: number;
   syncedTraceNodes: number;
   syncedTraceRelations: number;
+  /** MES 委外回厂/验收单 -> 委外检验单 return_date/process_type 回填条数 */
+  syncedOutsourceReturns: number;
   details: string[];
 }
 
@@ -521,8 +525,295 @@ export async function syncMesBatchTrace(
   return { syncedNodes: nodeCount, syncedRelations: relationCount };
 }
 
+/* --------------------------------------------------------------------------
+ * 4. MES 委外回厂/验收单 (t_dispatch_outsource) -> QMS 委外检验单
+ *
+ * 背景：委外检验台账「回厂日期 / 加工类型」在 ERP 委外加工单（WWJG, VchType=181）
+ * 上无可靠来源（实测：DateBegin/DateEnd 4257 张单仅 7 张有值；行级来源链 31/8517）。
+ * 真正的回厂动作记录在 MES `t_dispatch_outsource`（委外派工/验收单，OT 号段）：
+ *   check_date = 回厂验收确认时间，finish_end_date = 完工时间，
+ *   template_field 内嵌 planBodySurfaceTreatment（表面处理工艺）/ materielCode /
+ *   operatorName（加工商）。
+ *
+ * 匹配链（按优先级，全部只认真实字段，不做物料+供应商+数量的模糊猜测）：
+ *   ① MES 单据字段里直接携带的 WWJG 单号
+ *      （t_production_task.erp_bill_no / o.invoice_no / o.production_order /
+ *        o.bill_no / template_field 任意字符串值）→ inspection_orders.outsource_no；
+ *   ② task.work_no（SCRW-*）→ ERP 行级来源链
+ *      （DlySC.SourceVchCode -> DlyndxSC(171) 生产任务单）→ WWJG 单号；
+ *   ③ 两者皆无 → 记入 unmatched，不更新任何行。
+ *
+ * 回写规则：
+ *   - return_date ← check_date ?? finished_date ?? finish_end_date（MES 存 UTC 瞬时值，
+ *     回写按 +08 业务日历取日期）；
+ *   - process_type ← template_field.planBodySurfaceTreatment（真实工艺词）；
+ *   - 只更新当前为 NULL/'' 的列，人工已登记的值一律不覆盖；
+ *   - 一张 WWJG 多物料行时用 materielCode 消歧；无法消歧跳过并记原因。
+ * ------------------------------------------------------------------------ */
+
+/** MES 委外派工/验收单（t_dispatch_outsource）联表结果行形状 */
+export interface MesOutsourceDispatchRow {
+  id: string;
+  bill_no: string | null;
+  bill_date: Date | string | null;
+  check_status: string | null;
+  check_date: Date | string | null;
+  finished_date: Date | string | null;
+  finish_end_date: Date | string | null;
+  invoice_no: string | null;
+  production_order: string | null;
+  task_id: string | null;
+  task_body_id: string | null;
+  template_field: string | null;
+  task_bill_no: string | null;
+  work_no: string | null;
+  erp_bill_no: string | null;
+  materiel_code: string | null;
+  supplier_name: string | null;
+}
+
+/** ERP 行级链 SCRW -> WWJG：DlySC.SourceVchCode 指向 DlyndxSC(171) 生产任务单 */
+const OUTSOURCE_SCRW_LINK_SELECT_SQL = [
+  'SELECT sc.Number AS ScrwNo, n.Number AS WwjgNo, ISNULL(p.UserCode, N\'\') AS UserCode',
+  '  FROM DlySC d',
+  '  JOIN DlyndxSC n ON n.Vchcode = d.Vchcode',
+  '  JOIN DlyndxSC sc ON sc.Vchcode = d.SourceVchCode AND sc.VchType = 171',
+  '  LEFT JOIN Ptype p ON p.typeId = d.PtypeId',
+  ' WHERE n.VchType = 181',
+  '   AND d.SourceVchCode IS NOT NULL AND d.SourceVchCode <> 0',
+].join('\n');
+
+const WWJG_NO_PATTERN = /WWJG-\d[\d-]*/i;
+
+/** template_field 是 MES 表单快照 JSON；提取与本流程有关的键（其余忽略） */
+function parseDispatchTemplateField(raw: string | null): {
+  materielCode: string | undefined;
+  surfaceTreatment: string | undefined;
+  extraNumbers: string[];
+} {
+  if (!raw) return { materielCode: undefined, surfaceTreatment: undefined, extraNumbers: [] };
+  try {
+    const tf = JSON.parse(raw) as Record<string, unknown>;
+    const extraNumbers: string[] = [];
+    for (const [key, value] of Object.entries(tf)) {
+      if (typeof value === 'string' && /(?:bill|no|number|order)/i.test(key) && value.trim()) {
+        extraNumbers.push(value.trim());
+      }
+    }
+    return {
+      materielCode:
+        typeof tf.materielCode === 'string' && tf.materielCode.trim() ? tf.materielCode.trim() : undefined,
+      surfaceTreatment:
+        typeof tf.planBodySurfaceTreatment === 'string' && tf.planBodySurfaceTreatment.trim()
+          ? tf.planBodySurfaceTreatment.trim()
+          : undefined,
+      extraNumbers,
+    };
+  } catch {
+    return { materielCode: undefined, surfaceTreatment: undefined, extraNumbers: [] };
+  }
+}
+
+function extractWwjgNo(...candidates: (string | null | undefined)[]): string | null {
+  for (const c of candidates) {
+    if (!c) continue;
+    const m = c.match(WWJG_NO_PATTERN);
+    if (m) return m[0];
+  }
+  return null;
+}
+
+/** MES 侧存 UTC 瞬时值；回厂日期按 +08 业务日历取 YYYY-MM-DD */
+function toBizDate(value: Date | string | null | undefined): string | null {
+  if (!value) return null;
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Date(d.getTime() + 8 * 3600e3).toISOString().slice(0, 10);
+}
+
+export interface SyncMesOutsourceReturnsResult {
+  read: number;
+  matched: number;
+  updated: number;
+  unmatchedCount: number;
+  /** 未匹配明细（截断展示） */
+  unmatched: { billNo: string; reason: string }[];
+}
+
+export async function syncMesOutsourceReturns(
+  customDb?: Kysely<Database>,
+  limit: number = 200,
+  options: {
+    dispatches?: readonly MesOutsourceDispatchRow[];
+    /** 测试/离线注入：SCRW 单号 -> WWJG+物料编码（缺省走 ERP 只读查询） */
+    scrwToWwjg?: ReadonlyMap<string, { wwjgNo: string; userCode: string }[]>;
+  } = {}
+): Promise<SyncMesOutsourceReturnsResult> {
+  const db = customDb || defaultDb;
+  const unmatched: { billNo: string; reason: string }[] = [];
+  const pushUnmatched = (billNo: string, reason: string) => {
+    unmatched.push({ billNo, reason });
+  };
+
+  const sql = `
+    SELECT o.id, o.bill_no, o.bill_date, o.check_status, o.check_date,
+           o.finished_date, o.finish_end_date, o.invoice_no, o.production_order,
+           o.task_id, o.task_body_id, o.template_field,
+           t.bill_no AS task_bill_no, t.work_no, t.erp_bill_no,
+           m.code AS materiel_code, s.name AS supplier_name
+      FROM t_dispatch_outsource o
+      LEFT JOIN t_production_task t ON t.id = o.task_id AND t.del_flag = 0
+      LEFT JOIN t_materiel m ON m.id = o.materiel_id
+      LEFT JOIN t_supplier s ON s.id = o.supplier_id
+     WHERE o.del_flag = 0
+       AND (o.check_date IS NOT NULL OR o.finished_date IS NOT NULL OR o.finish_end_date IS NOT NULL)
+     ORDER BY o.create_time DESC
+     LIMIT ?
+  `;
+
+  let dispatches: readonly MesOutsourceDispatchRow[] | undefined = options.dispatches;
+  if (!dispatches) {
+    assertSafeMesDatabase();
+    dispatches = await queryMes<MesOutsourceDispatchRow>(sql, [limit]);
+  }
+  if (!dispatches || dispatches.length === 0) {
+    return { read: 0, matched: 0, updated: 0, unmatchedCount: 0, unmatched: [] };
+  }
+
+  // SCRW -> WWJG 映射：仅当存在「单据上没有 WWJG、但 work_no 是 SCRW」的行时才拉 ERP
+  let scrwToWwjg: ReadonlyMap<string, { wwjgNo: string; userCode: string }[]> | undefined =
+    options.scrwToWwjg;
+  const needScrwMap = scrwToWwjg === undefined && dispatches.some(
+    (d) => d.work_no?.startsWith('SCRW')
+  );
+  if (needScrwMap) {
+    const built = new Map<string, { wwjgNo: string; userCode: string }[]>();
+    const pool = await getErpConnectionPool();
+    if (pool) {
+      const runner: ErpQueryRunner = {
+        async query(sqlText) {
+          const res = await pool.request().query(sqlText);
+          return { recordset: (res.recordset ?? []) as unknown[] };
+        },
+      };
+      const links = await queryErpReadOnly<{ ScrwNo: string; WwjgNo: string; UserCode: string }>(
+        runner,
+        OUTSOURCE_SCRW_LINK_SELECT_SQL
+      );
+      for (const l of links) {
+        const list = built.get(l.ScrwNo) ?? [];
+        list.push({ wwjgNo: l.WwjgNo, userCode: l.UserCode });
+        built.set(l.ScrwNo, list);
+      }
+    }
+    scrwToWwjg = built;
+  }
+
+  let matched = 0;
+  let updated = 0;
+
+  for (const d of dispatches) {
+    const billNo = d.bill_no ?? d.id;
+    const tf = parseDispatchTemplateField(d.template_field);
+
+    // ① 单据字段直接携带 WWJG 号
+    let wwjgNo = extractWwjgNo(
+      d.erp_bill_no,
+      d.invoice_no,
+      d.production_order,
+      d.bill_no,
+      ...tf.extraNumbers
+    );
+    let materielCode = tf.materielCode ?? d.materiel_code ?? null;
+
+    // ② SCRW 工作令号 -> ERP 行级来源链 -> WWJG
+    if (!wwjgNo && d.work_no?.startsWith('SCRW')) {
+      const links = scrwToWwjg?.get(d.work_no) ?? [];
+      if (links.length === 0) {
+        pushUnmatched(billNo, `work_no ${d.work_no} 在 ERP 无委外加工单来源链`);
+        continue;
+      }
+      if (materielCode) {
+        const narrowed = links.filter((l) => l.userCode === materielCode);
+        const first = narrowed[0];
+        if (!first) {
+          pushUnmatched(billNo, `work_no ${d.work_no} 的委外链不含物料 ${materielCode}`);
+          continue;
+        }
+        wwjgNo = first.wwjgNo;
+      } else {
+        const distinct = [...new Set(links.map((l) => l.wwjgNo))];
+        const only = distinct[0];
+        if (distinct.length !== 1 || !only) {
+          pushUnmatched(billNo, `work_no ${d.work_no} 对应 ${distinct.length} 张委外单且无物料编码消歧`);
+          continue;
+        }
+        wwjgNo = only;
+      }
+    }
+    if (!wwjgNo) {
+      pushUnmatched(billNo, '单据未携带 WWJG 委外单号，且无 SCRW 来源链可用');
+      continue;
+    }
+
+    // 回厂日期：验收确认时间优先，其次完工时间（皆为 MES 真实字段）
+    const returnDate = toBizDate(d.check_date) ?? toBizDate(d.finished_date) ?? toBizDate(d.finish_end_date);
+    if (!returnDate && !tf.surfaceTreatment) {
+      pushUnmatched(billNo, '验收/完工日期与表面处理工艺均为空，无可回写值');
+      continue;
+    }
+
+    // 找 QMS 委外检验单：outsource_no = WWJG；有物料编码则按 material_code 消歧
+    let q = db
+      .selectFrom('inspectionOrders')
+      .select(['id', 'orderNo', 'materialCode', 'returnDate', 'processType'])
+      .where('orderType', 'in', ['OQC_SF', 'OQC_MACH', 'OQC_HEAT'])
+      .where('outsourceNo', '=', wwjgNo);
+    if (materielCode) q = q.where('materialCode', '=', materielCode);
+    const candidates = await q.execute();
+
+    if (candidates.length === 0) {
+      pushUnmatched(billNo, `QMS 无委外检验单 outsource_no=${wwjgNo}${materielCode ? ` 物料=${materielCode}` : ''}`);
+      continue;
+    }
+
+    matched += 1;
+    for (const order of candidates) {
+      const setFields: { returnDate?: string; processType?: string } = {};
+      if (returnDate && (order.returnDate === null || order.returnDate === '')) {
+        setFields.returnDate = returnDate;
+      }
+      if (tf.surfaceTreatment && (order.processType === null || order.processType === '')) {
+        setFields.processType = tf.surfaceTreatment;
+      }
+      if (Object.keys(setFields).length === 0) continue;
+      // 每列单独加「仍为空」谓词：select 与 update 之间被人工补录也不会覆盖
+      let upd = db
+        .updateTable('inspectionOrders')
+        .set(setFields)
+        .where('id', '=', order.id);
+      if (setFields.returnDate !== undefined) {
+        upd = upd.where((eb) => eb.or([eb('returnDate', 'is', null), eb('returnDate', '=', '')]));
+      }
+      if (setFields.processType !== undefined) {
+        upd = upd.where((eb) => eb.or([eb('processType', 'is', null), eb('processType', '=', '')]));
+      }
+      const res = await upd.executeTakeFirst();
+      updated += Number(res.numUpdatedRows ?? 0);
+    }
+  }
+
+  return {
+    read: dispatches.length,
+    matched,
+    updated,
+    unmatchedCount: unmatched.length,
+    unmatched: unmatched.slice(0, 20),
+  };
+}
+
 /**
- * 4. 统筹执行全部 MES 数据同步管道
+ * 5. 统筹执行全部 MES 数据同步管道
  */
 export async function syncMesAll(
   customDb?: Kysely<Database>,
@@ -547,6 +838,22 @@ export async function syncMesAll(
     const traceResult = await syncMesBatchTrace(db, limit);
     details.push(`炉批号追溯同步: 生成追溯节点 ${traceResult.syncedNodes} 个，构筑血缘关系 ${traceResult.syncedRelations} 条`);
 
+    // 4. 同步委外回厂/验收单 -> 委外检验单 return_date/process_type（只更新空列）
+    let outsourceUpdated = 0;
+    try {
+      const outsourceResult = await syncMesOutsourceReturns(db, limit);
+      outsourceUpdated = outsourceResult.updated;
+      details.push(
+        `委外回厂同步: 读取 ${outsourceResult.read} 份，匹配 ${outsourceResult.matched} 份，回填 ${outsourceResult.updated} 条` +
+        (outsourceResult.unmatchedCount > 0
+          ? `，未匹配 ${outsourceResult.unmatchedCount} 份（${outsourceResult.unmatched.map((u) => `${u.billNo}:${u.reason}`).join('；')}）`
+          : '')
+      );
+    } catch (err: any) {
+      // 委外回厂是增量字段回填，失败不拖垮主同步管道
+      details.push(`委外回厂同步异常: ${err?.message || String(err)}`);
+    }
+
     return {
       success: true,
       targetDatabase: STRICT_MES_TARGET_DB,
@@ -555,6 +862,7 @@ export async function syncMesAll(
       syncedInspectionOrders: inspectionResult.inserted,
       syncedTraceNodes: traceResult.syncedNodes,
       syncedTraceRelations: traceResult.syncedRelations,
+      syncedOutsourceReturns: outsourceUpdated,
       details,
     };
   } catch (err: any) {
@@ -567,6 +875,7 @@ export async function syncMesAll(
       syncedInspectionOrders: 0,
       syncedTraceNodes: 0,
       syncedTraceRelations: 0,
+      syncedOutsourceReturns: 0,
       details,
     };
   }

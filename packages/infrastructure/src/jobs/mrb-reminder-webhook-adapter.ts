@@ -1,3 +1,5 @@
+import { postJson } from './webhook-http.js';
+
 export interface MrbReminderAlertPayload {
   mrbId: string;
   mrbNo: string;
@@ -75,23 +77,13 @@ export class MrbReminderWebhookAdapter implements IMrbReminderNotifier {
       return;
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const response = await postJson(this.webhookUrl, alertBody, {
+      headers: this.headers,
+      timeoutMs: this.timeoutMs,
+    });
 
-    try {
-      const response = await fetch(this.webhookUrl, {
-        method: 'POST',
-        headers: this.headers,
-        body: JSON.stringify(alertBody),
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        const body = await response.text().catch(() => '');
-        throw new Error(`MRB_REMINDER_WEBHOOK_HTTP_${response.status}: ${response.statusText} | ${body}`);
-      }
-    } finally {
-      clearTimeout(timeout);
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`MRB_REMINDER_WEBHOOK_HTTP_${response.status}: ${response.statusText} | ${response.bodyText}`);
     }
   }
 }

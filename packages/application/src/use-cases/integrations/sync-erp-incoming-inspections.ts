@@ -32,6 +32,13 @@ export interface ErpIncomingInspectionLike {
   blockNo: string | null;
   qmReason: string | null;
   sourceVchCode: number;
+  /**
+   * 炉批号（预留带出通道，docs/52 §2）：ERP 实测无炉号列（§1.1），当前实现恒为空；
+   * 若 ERP 侧日后补列（自定义字段挂接炉号），读侧带出后经 `mapRowToCommand`
+   * 自动落 `inspection_orders.furnace_heat_batch_no`，IQC 建单即带值。
+   * 注意：`blockNo` 是 ERP 内部批号（LDW/SKW-日期-序号），**不是**炉号，严禁映射到本字段。
+   */
+  furnaceHeatNo?: string | null;
 }
 
 /** 来料检验数据源端口（读侧，单向）：由 ERP mssql 实现或本地 fixture 实现注入 */
@@ -104,6 +111,11 @@ function mapRowToCommand(
   if (row.btypeUserCode) command.supplierCode = row.btypeUserCode;
   if (row.number) command.inboundNo = row.number;
   if (row.date) command.inboundDate = row.date;
+  // docs/52 §2：ERP 行带炉批号则建单即落库（当前 ERP 无该列恒空，为预留带出通道）；
+  // 缺省来源由 IQC 录入表单必填兜底（§4 方案 B），不做任何猜测性回填
+  if (row.furnaceHeatNo !== undefined && row.furnaceHeatNo !== null && row.furnaceHeatNo.trim() !== '') {
+    command.furnaceHeatNo = row.furnaceHeatNo.trim();
+  }
 
   return { command };
 }

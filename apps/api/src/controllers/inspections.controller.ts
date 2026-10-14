@@ -978,6 +978,11 @@ export const inspectionsController: FastifyPluginAsync<{ container: ApiContainer
           // 038 证书模板与证书专用字段袋（docs/51）：与其它表头字段同一「显式传入才写」口径
           ...(body.certTemplate !== undefined ? { certTemplate: body.certTemplate } : {}),
           ...(body.certFields !== undefined ? { certFields: body.certFields } : {}),
+          // 委外检验台账三列：加工类型 / 回厂日期 / 加工商快照 —— ERP 同步不携带，
+          // 录入页手工补录走本接口落库；契约未声明的键到不了这里（zod 剥掉）
+          ...(body.processType !== undefined ? { processType: body.processType } : {}),
+          ...(body.returnDate !== undefined ? { returnDate: body.returnDate } : {}),
+          ...(body.vendorName !== undefined ? { vendorName: body.vendorName } : {}),
           operatorId: operator.userId,
           operatorName: operator.userName,
         },

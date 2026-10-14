@@ -966,6 +966,18 @@ export const UpdateInspectionHeaderRequestSchema = z.object({
     description: '炉批号（Heat No）；落 inspection_orders.furnace_heat_batch_no，空串表示清空',
     example: 'HT02-20231008-A',
   }),
+  processType: z.string().max(64).optional().openapi({
+    description: '加工类型/工艺分类（委外检验台账列，落 process_type）；空串表示清空',
+    example: '镀锌',
+  }),
+  returnDate: z.string().max(32).optional().openapi({
+    description: '回厂日期 YYYY-MM-DD（委外检验台账列，落 return_date）；空串表示清空',
+    example: '2026-07-06',
+  }),
+  vendorName: z.string().max(255).optional().openapi({
+    description: '加工商名称快照（委外检验台账列，落 vendor_name）；空串表示清空',
+    example: '江阴达克罗金属制品有限公司',
+  }),
   materialGrade: z.string().max(64).optional().openapi({ description: '材质牌号', example: 'ML40Cr' }),
   techStandard: z.string().max(128).optional().openapi({
     description: '执行产品技术标准',

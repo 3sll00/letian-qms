@@ -17,6 +17,7 @@ import {
 import { CertFieldsCard } from '../../../components/certificate/CertFieldsCard';
 import { loadCompanyProfile } from '../../../lib/companyProfile';
 import { api, errorMessage } from '../../../lib/api';
+import { iqcHeatNoRequirementMarker, validateIqcHeatNo } from '../../../lib/iqcHeatNoRequirement';
 import { useMatchedPlan } from '../../../hooks/useMatchedPlan';
 import {
   DECISION_LABEL,
@@ -305,6 +306,14 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
       setSubmitError('请先填写检验员（检验单落库的检验人）');
       return;
     }
+    // docs/52 §4 方案 B（客户已定稿）：IQC 炉号唯一真实来源是供应商质保书(MTC)，
+    // ERP 无炉号字段无法带出，故录入表单必填——判定一律经 iqcHeatNoRequirement 单点，
+    // 与出货检 oqcHeatNoRequirement 同款；客户若改口径只动那个模块。
+    const heatNoError = validateIqcHeatNo(heatNo);
+    if (heatNoError !== null) {
+      setSubmitError(heatNoError);
+      return;
+    }
     if (planRowsForSubmit.length === 0) {
       setSubmitError('本单未匹配到质检方案指标行，无法提交（请先确认该物料的已启用质检方案）');
       return;
@@ -527,7 +536,7 @@ export const IqcRecordForm: React.FC<IqcRecordFormProps> = ({ initialItem, onBac
             />
           </div>
           <div>
-            <label className="block text-slate-500 mb-1">原厂冶炼炉号 (Heat No)</label>
+            <label className="block text-slate-500 mb-1">原厂冶炼炉号 (Heat No) {iqcHeatNoRequirementMarker()}</label>
             <input
               type="text"
               value={heatNo}

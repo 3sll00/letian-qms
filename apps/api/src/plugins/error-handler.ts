@@ -310,6 +310,16 @@ const errorHandlerPluginAsync: FastifyPluginAsync = async (fastify) => {
   };
   fastify.setNotFoundHandler((request, reply) => {
     const pathname = request.url.split('?')[0] ?? '/';
+    // SPA 回退：静态托管开启时（@fastify/static 已注册 → reply.sendFile 可用），
+    // 非 /api 的 GET 未命中路由一律返回 index.html，前端路由刷新不 404。
+    if (
+      request.method === 'GET' &&
+      !pathname.startsWith('/api') &&
+      (process.env.SERVE_WEB === '1' || process.env.NODE_ENV === 'production') &&
+      typeof (reply as { sendFile?: unknown }).sendFile === 'function'
+    ) {
+      return (reply as { sendFile: (name: string) => FastifyReply }).sendFile('index.html');
+    }
     const allowed = allowedMethodsForPath(pathname);
     if (allowed.size === 0) {
       return reply
@@ -331,5 +341,5 @@ const errorHandlerPluginAsync: FastifyPluginAsync = async (fastify) => {
 
 export const errorHandlerPlugin = fp(errorHandlerPluginAsync, {
   name: 'fastify-rfc7807-error-handler',
-  fastify: '5.x',
+  fastify: '>=4',
 });

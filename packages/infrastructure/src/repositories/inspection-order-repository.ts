@@ -1070,6 +1070,11 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
       // certFields 传对象即整袋覆盖（空对象 = 清空为 NULL），与其它表头字段同一显式语义
       certTemplate?: 'QUALITY' | 'MANUFACTURING';
       certFields?: Record<string, string>;
+      // 委外检验台账三列（加工类型 / 回厂日期 / 加工商快照）：ERP 同步不携带，
+      // 录入页手工补录的唯一写入口；undefined = 不动该列，'' = 清空为 NULL
+      processType?: string;
+      returnDate?: string;
+      vendorName?: string;
     }
   ): Promise<void> {
     // 泛型签名保形：blankToNull(字面量联合) 必须仍返回该联合，否则收窄后的列类型
@@ -1110,6 +1115,15 @@ export class KyselyInspectionOrderRepository implements IInspectionOrderReposito
     if (fields.certFields !== undefined) {
       values.certFields =
         Object.keys(fields.certFields).length === 0 ? null : JSON.stringify(fields.certFields);
+    }
+    if (fields.processType !== undefined) {
+      values.processType = blankToNull(fields.processType);
+    }
+    if (fields.returnDate !== undefined) {
+      values.returnDate = blankToNull(fields.returnDate);
+    }
+    if (fields.vendorName !== undefined) {
+      values.vendorName = blankToNull(fields.vendorName);
     }
 
     await this.db.updateTable('inspectionOrders').set(values).where('id', '=', id).execute();

@@ -98,19 +98,17 @@ export const QualityCertificateTemplate: React.FC<QualityCertificateTemplateProp
       className="bg-white text-black mx-auto font-sans select-text print:w-full"
       style={{ width: '794px', maxWidth: '100%', fontSize: '10px', lineHeight: 1.75, padding: '10mm', position: 'relative' }}
     >
-      {/* 左上角：三角图标 + 字标（纵向排列，文字抬头下方） */}
-      <div style={{ position: 'absolute', top: '8mm', left: '10mm', width: '90px' }}>
-        <img
-          src={letianTriangle}
-          alt="LETIAN FASTENERS logo"
-          style={{ width: '64px', height: '64px', objectFit: 'contain', display: 'block' }}
-        />
-        <img
-          src={letianWordmark}
-          alt="LETIAN FASTENERS"
-          style={{ height: '12px', width: 'auto', marginTop: '4px', display: 'block' }}
-        />
-      </div>
+      {/* 左上角：三角图标 + 字标（按用户标注图定位：图形居红圈位、字标居红框位，纵向堆叠） */}
+      <img
+        src={letianTriangle}
+        alt="LETIAN FASTENERS logo"
+        style={{ position: 'absolute', top: '23px', left: '84px', width: '48px', height: '48px', objectFit: 'contain' }}
+      />
+      <img
+        src={letianWordmark}
+        alt="LETIAN FASTENERS"
+        style={{ position: 'absolute', top: '75px', left: '42px', height: '16px', width: 'auto' }}
+      />
       {/* 实验室抬头（企业档案；未维护即留白） */}
       <div className="text-center">
         <div className="font-bold" style={{ fontSize: '13px' }}>

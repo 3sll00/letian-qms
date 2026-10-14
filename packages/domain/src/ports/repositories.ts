@@ -154,6 +154,12 @@ export interface InspectionOrderRepository {
       inspectedDate?: string;
       heatSourceType?: string;
       heatSourceOrderNo?: string;
+      certTemplate?: 'QUALITY' | 'MANUFACTURING';
+      certFields?: Record<string, string>;
+      /** 委外检验台账三列：加工类型 / 回厂日期 / 加工商快照（手工补录写入口） */
+      processType?: string;
+      returnDate?: string;
+      vendorName?: string;
     }
   ): Promise<void>;
   /**

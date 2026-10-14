@@ -34,6 +34,26 @@ tools/contract/.schemathesis/
 # schemathesis 在仓库根目录直接运行时产生的状态目录
 .schemathesis/
 
+# 部署组装产物（scripts/deploy/assemble.cjs 与 pkg 输出；仅根目录组装包，scripts/deploy 源码保留）
+/deploy/
+/deploy.zip
+apps/api/public/
+
+# pkg 打包临时工作区
+.pkgtool/
+
+# 构建缓存（tsBuildInfoFile 使用 .v2 后缀，*.tsbuildinfo 规则匹配不到）
+*.tsbuildinfo.v2
+
+# 旧构建备份与排查遗留
+dist.old*/
+dist.broken-*/
+node_modules.broken/
+handle.exe
+install-exit.txt
+tediousdir.txt
+_writetest.txt
+
 # 编辑器与系统文件
 .DS_Store
 Thumbs.db

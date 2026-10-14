@@ -50,5 +50,5 @@ const zodValidatorPluginAsync: FastifyPluginAsync = async (fastify) => {
 
 export const zodValidatorPlugin = fp(zodValidatorPluginAsync, {
   name: 'fastify-zod-validator',
-  fastify: '5.x',
+  fastify: '>=4',
 });

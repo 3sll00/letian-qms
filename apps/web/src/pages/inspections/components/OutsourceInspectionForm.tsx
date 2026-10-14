@@ -783,6 +783,12 @@ export const OutsourceInspectionForm: React.FC<OutsourceInspectionFormProps> = (
         // 证书模板选择与字段袋随头落库（docs/51）：字段袋整包覆盖（空值即清空）
         certTemplate,
         certFields,
+        // 委外台账三列：加工类型 / 加工商 / 回厂日期 —— ERP 同步建单不带这三列，
+        // 本 PATCH 是存量单唯一的落库口（此前契约未声明，录入页补录填了也存不上）。
+        // 空串 = 显式清空（与 furnaceHeatNo 同一语义），检验员误填可改空
+        processType: processType.trim(),
+        vendorName: vendorName.trim(),
+        returnDate: returnDate.trim(),
         ...(materialGrade.trim() !== '' ? { materialGrade: materialGrade.trim() } : {}),
         ...(techStandard.trim() !== '' ? { techStandard: techStandard.trim() } : {}),
         ...(inspectDate.trim() !== '' ? { inspectedDate: inspectDate.trim() } : {}),
