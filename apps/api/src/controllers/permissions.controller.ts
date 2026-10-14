@@ -1,4 +1,5 @@
 import { FastifyPluginAsync } from 'fastify';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { MaterialPermission } from '@letian/contracts';
 import {
@@ -104,7 +105,7 @@ export const permissionsController: FastifyPluginAsync<{ container: ApiContainer
       }
 
       const newRule: MaterialPermission = {
-        id: crypto.randomUUID(),
+        id: randomUUID(),
         userId: body.userId,
         userName: body.userName ?? (await resolveUserName(body.userId)),
         roleCode: body.roleCode,

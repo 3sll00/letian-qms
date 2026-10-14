@@ -11,6 +11,7 @@
   testMesConnection,
 } from '@letian/infrastructure';
 import { FastifyPluginAsync } from 'fastify';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
   ErpSalesDispatchSyncRequestSchema,
@@ -297,7 +298,7 @@ export const integrationController: FastifyPluginAsync<{ container: ApiContainer
           employees.length;
       }
 
-      const syncLogId = crypto.randomUUID();
+      const syncLogId = randomUUID();
       const batchNo = `SYNC-${systemType}-${Date.now().toString().slice(-8)}`;
 
       const syncLog: IntegrationSyncLog = {

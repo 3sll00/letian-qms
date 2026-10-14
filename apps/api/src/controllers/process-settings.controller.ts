@@ -1,4 +1,5 @@
 import { FastifyPluginAsync } from 'fastify';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
   InspectionTypeEnum,
@@ -68,7 +69,7 @@ export const processSettingsController: FastifyPluginAsync<{ container: ApiConta
     async (request, reply) => {
       const body = request.body as z.infer<typeof CreateProcessTemplateSchema>;
 
-      const id = crypto.randomUUID();
+      const id = randomUUID();
       const now = new Date().toISOString();
 
       const newTemplate = {

@@ -1,4 +1,5 @@
 import { FastifyPluginAsync, type FastifyReply, type FastifyRequest } from 'fastify';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
   CreateMRBReviewRequestSchema,
@@ -358,7 +359,7 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
           : null;
 
       const record: MRBReview = {
-        id: crypto.randomUUID(),
+        id: randomUUID(),
         mrbNo: `MRB-${body.sourceType.slice(0, 3)}-${Date.now().toString().slice(-6)}-${Math.floor(
           Math.random() * 900 + 100
         )}`,
@@ -382,7 +383,7 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
         await ctx.locks.acquireXactLock(`LOCK_MRB_${body.batchNo}`);
         await ctx.mrbReviews.save(record);
         await ctx.outbox.append({
-          id: crypto.randomUUID(),
+          id: randomUUID(),
           aggregateType: 'MRBReview',
           aggregateId: record.id ?? '',
           eventType: 'MRBReviewCreated',
@@ -393,14 +394,14 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
             batchNo: record.batchNo,
             sourceType: record.sourceType,
           },
-          traceId: crypto.randomUUID(),
+          traceId: randomUUID(),
           occurredAt: new Date(),
           status: 'PENDING',
           retryCount: 0,
         });
         await ctx.auditLogs.insert({
-          id: crypto.randomUUID(),
-          traceId: crypto.randomUUID(),
+          id: randomUUID(),
+          traceId: randomUUID(),
           userId: operator.userId,
           userName: operator.userName,
           action: 'CREATE',
@@ -465,7 +466,7 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
       await ctx.locks.acquireXactLock(`LOCK_MRB_${existing.batchNo}`);
       await ctx.mrbReviews.save(signedRecord);
       await ctx.outbox.append({
-        id: crypto.randomUUID(),
+        id: randomUUID(),
         aggregateType: 'MRBReview',
         aggregateId: id,
         eventType: isApprove ? 'MRBNodeApproved' : 'MRBNodeRejected',
@@ -476,14 +477,14 @@ export const mrbController: FastifyPluginAsync<{ container: ApiContainer }> = as
           approverId: operator.userId,
           comment: body.comment,
         },
-        traceId: crypto.randomUUID(),
+        traceId: randomUUID(),
         occurredAt: new Date(),
         status: 'PENDING',
         retryCount: 0,
       });
       await ctx.auditLogs.insert({
-        id: crypto.randomUUID(),
-        traceId: crypto.randomUUID(),
+        id: randomUUID(),
+        traceId: randomUUID(),
         userId: operator.userId,
         userName: operator.userName,
         action: 'UPDATE',

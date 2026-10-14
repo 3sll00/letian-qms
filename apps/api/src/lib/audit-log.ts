@@ -1,4 +1,7 @@
 import type { FastifyRequest } from 'fastify';
+// Node 14 没有全局 crypto 对象（WebCrypto 全局是 Node 18+），randomUUID 必须显式导入，
+// 否则在客户 2008 R2 的 Node 14 运行时抛 ReferenceError（2026-10-14 设备管理上线实测踩中）
+import { randomUUID } from 'node:crypto';
 import type { AuditAction, AuditStatus } from '@letian/contracts';
 import type { IUnitOfWork } from '@letian/application';
 import { operatorOf } from './operator';
@@ -31,7 +34,7 @@ export async function appendDbAuditLog(
 
   await uow.execute(async (ctx) => {
     await ctx.auditLogs.insert({
-      id: crypto.randomUUID(),
+      id: randomUUID(),
       traceId: requestTraceId(request),
       userId: input.userId ?? operator.userId,
       userName: input.userName ?? operator.userName,

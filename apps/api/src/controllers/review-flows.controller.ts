@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { ApiContainer } from '../container';
 import { operatorOf } from '../lib/operator';
@@ -76,7 +77,7 @@ export const reviewFlowsController: FastifyPluginAsync<{ container: ApiContainer
       }
 
       await container.repositories.auditLogs.append({
-        id: crypto.randomUUID(),
+        id: randomUUID(),
         traceId: (request.headers['x-trace-id'] as string) || `trace_${Date.now()}`,
         userId: operator.userId,
         userName: operator.userName,
