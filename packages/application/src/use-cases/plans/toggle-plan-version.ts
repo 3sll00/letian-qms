@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { InspectionPlan as InspectionPlanDTO } from '@letian/contracts';
 import { InspectionPlan } from '@letian/domain';
 import { ApplicationError } from '../../errors/application-error.js';
@@ -66,7 +67,7 @@ export class TogglePlanVersionUseCase {
       await ctx.inspectionPlans.save(plan.toDTO());
 
       await ctx.outbox.append({
-        id: crypto.randomUUID(),
+        id: randomUUID(),
         aggregateType: 'InspectionPlan',
         aggregateId: plan.getId(),
         eventType:
@@ -79,7 +80,7 @@ export class TogglePlanVersionUseCase {
           action: cmd.action,
           operatorId: cmd.operatorId,
         },
-        traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+        traceId: securityCtx?.traceId ?? randomUUID(),
         occurredAt: new Date(),
         status: 'PENDING',
         retryCount: 0,

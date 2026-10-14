@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { ApplicationError } from '../../errors/application-error.js';
 import type { IExcelExporterPort, IPdfExporterPort, ExportResult } from '../../ports/export-port.js';
 import type { ISecurityContext } from '../../security/security-context.js';
@@ -110,8 +111,8 @@ export class ExportInspectionReportUseCase {
       }
 
       await ctx.auditLogs.insert({
-        id: crypto.randomUUID(),
-        traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+        id: randomUUID(),
+        traceId: securityCtx?.traceId ?? randomUUID(),
         userId: cmd.operatorId,
         userName: cmd.operatorName ?? '系统操作员',
         action: 'UPDATE',

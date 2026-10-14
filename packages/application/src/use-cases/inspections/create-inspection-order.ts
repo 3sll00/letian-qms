@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type {
   InspectionOrder as InspectionOrderDTO,
   CreateInspectionOrderRequest,
@@ -324,7 +325,7 @@ export class CreateInspectionOrderUseCase {
       }
 
       // 4. 构建检验单聚合根
-      const orderId = crypto.randomUUID();
+      const orderId = randomUUID();
       // 检验单号：调用方显式传入时以其为准（兼容 ERP/MES 下发的外部单号与存量历史数据）；
       // 未传时按领域编号规则 `{PREFIX}-{YYYYMMDD}-{NNNN}` 申请当日流水号
       // （出货检验 OQC_SH => `OQC-SH-20260706-0001`）。
@@ -468,8 +469,8 @@ export class CreateInspectionOrderUseCase {
           });
         }
         await ctx.auditLogs.insert({
-          id: crypto.randomUUID(),
-          traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+          id: randomUUID(),
+          traceId: securityCtx?.traceId ?? randomUUID(),
           userId: cmd.transferOverride.approverId,
           userName: cmd.transferOverride.approverName ?? '质量主管特批',
           action: 'STATUS_CHANGE',
@@ -491,7 +492,7 @@ export class CreateInspectionOrderUseCase {
         });
 
         await ctx.outbox.append({
-          id: crypto.randomUUID(),
+          id: randomUUID(),
           aggregateType: 'InspectionOrder',
           aggregateId: order.getId(),
           eventType: 'TRANSFER_GATE_OVERRIDDEN',
@@ -506,7 +507,7 @@ export class CreateInspectionOrderUseCase {
             approverId: cmd.transferOverride.approverId,
             approvalDocNo: cmd.transferOverride.approvalDocNo ?? null,
           },
-          traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+          traceId: securityCtx?.traceId ?? randomUUID(),
           occurredAt: new Date(),
           status: 'PENDING',
           retryCount: 0,
@@ -515,7 +516,7 @@ export class CreateInspectionOrderUseCase {
 
       // 7. 写入 Outbox 事件
       await ctx.outbox.append({
-        id: crypto.randomUUID(),
+        id: randomUUID(),
         aggregateType: 'InspectionOrder',
         aggregateId: order.getId(),
         eventType: 'INSPECTION_ORDER_CREATED',
@@ -527,7 +528,7 @@ export class CreateInspectionOrderUseCase {
           inspectionType: order.getInspectionType(),
           mandatoryGate: order.isMandatoryGate(),
         },
-        traceId: crypto.randomUUID(),
+        traceId: randomUUID(),
         occurredAt: new Date(),
         status: 'PENDING',
         retryCount: 0,
@@ -535,8 +536,8 @@ export class CreateInspectionOrderUseCase {
 
       // 8. 审计记录
       await ctx.auditLogs.insert({
-        id: crypto.randomUUID(),
-        traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+        id: randomUUID(),
+        traceId: securityCtx?.traceId ?? randomUUID(),
         userId: cmd.operatorId,
         userName: cmd.operatorName,
         action: 'CREATE',
@@ -576,10 +577,10 @@ export class CreateInspectionOrderUseCase {
     decision: TransferDecision,
     securityCtx?: ISecurityContext
   ): Promise<void> {
-    const traceId = securityCtx?.traceId ?? crypto.randomUUID();
+    const traceId = securityCtx?.traceId ?? randomUUID();
     await this.uow.execute(async (ctx) => {
       await ctx.auditLogs.insert({
-        id: crypto.randomUUID(),
+        id: randomUUID(),
         traceId,
         userId: cmd.operatorId,
         userName: cmd.operatorName,
@@ -607,7 +608,7 @@ export class CreateInspectionOrderUseCase {
       });
 
       await ctx.outbox.append({
-        id: crypto.randomUUID(),
+        id: randomUUID(),
         aggregateType: 'InspectionOrder',
         aggregateId: cmd.batchNo,
         // 退货 / 报废走 CHAIN_TERMINATED（下游系统据此冻结整条链），其余为普通传递阻断

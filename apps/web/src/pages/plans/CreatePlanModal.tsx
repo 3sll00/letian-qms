@@ -1,16 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ChevronDown, Eye, Ruler, X, Zap } from 'lucide-react';
+import { ChevronDown, ClipboardList, Plus, Trash2, X } from 'lucide-react';
 import { api, errorMessage } from '../../lib/api';
 import { INSPECTION_TYPES } from '../../lib/inspectionTypes';
-import {
-  ALL_PLAN_PRESETS,
-  DEFAULT_ENABLED_PLAN_CATEGORIES,
-  PLAN_CHECK_CATEGORIES,
-  parsePlanStandardValue,
-  type PlanCategoryKey,
-  type PlanPresetItem,
-} from '@letian/contracts';
-import type { InspectionPlan, InspectionType } from '@letian/contracts';
+import type { Equipment, InspectionPlan, InspectionType } from '@letian/contracts';
 
 /**
  * 新建质检方案弹窗（质检方案设计页「新建质检方案」入口）。
@@ -23,17 +15,17 @@ import type { InspectionPlan, InspectionType } from '@letian/contracts';
  *   契约字段映射：TITypeId->testItemCode、CheckWay->checkWay、CheckDevice->measurementTool、
  *     Summary->remark；
  *
- * 检验项目的填写方式（2026-10 交互改版）：
- *   不再是「下拉选字典 + 逐行手填」的表格，改为「选择检验类型卡片 + 预置检验项目勾选清单」：
- *     1. 三张类别卡片（外观检验 / 尺寸检验 / 性能检验）各带「启用」勾选，启用后才展开
- *        该类别的项目清单；
- *     2. 清单项按紧固件检验惯例预置（表面毛疵、对边 s、牙距 P、硬度 HRC/HV 等），
- *        勾选即纳入方案；右侧为可编辑的标准值输入框（默认预填该项的默认要求，可改）；
- *     3. 标准值口径决定判定方式（2026-10-08 二次改版）：输入数值口径（36±0.5 / 36+0.2/-0.1
- *        / 36）解析为公称值+上下公差，指标落 NUMERIC，判定器（tolerance-evaluator）按公差带
- *        自动判定；文字要求（如「按产品标准」「清理干净…」）落 remark 供检验员参考，
- *        dataType 保持 TEXT/QUALITATIVE、standardText 留空 —— 判定器对无基准的文本项返回
- *        PENDING 挂起人工确认，绝不把说明语当可接受值逐字比对（否则永远判不合格）。
+ * 检验项目的填写方式（2026-10 表格化改版）：
+ *   「检验项目」区为逐行表格，列依次为 项目名称 / 检验类型 / 检验设备 / 标准值 / 上限值 /
+ *   下限值 / 判定方式，按检验类型条件显隐：
+ *     - 双边公差：标准值 + 上限值 + 下限值（绝对值口径，提交时折算 tolerance 偏移），
+ *       落 NUMERIC，判定器按 [nominal-lower, nominal+upper] 公差带自动判定；
+ *     - 单边公差：标准值（门槛值）+ 判定方式（≥ ＞ ≤ ＜ ＝，必填），落 NUMERIC，
+ *       judgmentMethod 一并落库，判定器按操作符直接比较（忽略公差带）；
+ *     - 外观：标准值为文字描述（落 remark，供检验员参考；判定器对无基准文本项返回
+ *       PENDING 挂起人工确认），无上限/下限/判定方式。
+ *   检验设备列为选填下拉，选项来自「系统管理-检验设备」台账，取「设备编码 设备名称」
+ *   组合串直接落 measurementTool（ERP CheckDevice 口径，展示链路复用既有字段）。
  *   testItemCode 只在能与 ERP 检验项目字典（迁移 037）语义对上时回链（外观->00001、
  *   尺寸->00002、通止->00003、硬度->00004、拉伸->00005），对不上的预置项省略该字段
  *   （契约 optional），保证 ERP 同步与指标统计不被脏编码污染。
@@ -52,36 +44,47 @@ import type { InspectionPlan, InspectionType } from '@letian/contracts';
 /** 物料编码下拉的「分类通用」占位值：选中即不绑定单一物料（materialCode 空、categoryCode 已选） */
 const GENERIC_MATERIAL = '__GENERIC__';
 
-/**
- * 「选择检验类型」卡片配置：启用即展开该类别的预置项目清单。
- * 项目清单本身来自契约包（@letian/contracts 的 PLAN_CHECK_CATEGORIES），
- * 与【导入方案】Excel 模板共用同一份定义，杜绝两处漂移；此处只补 UI 的图标与说明。
- */
-interface CheckCategory {
-  key: PlanCategoryKey;
+/** 检验项目表格的行草稿：按「检验类型」条件显隐列，提交时折算成契约 InspectionPlanItem */
+type ToleranceKind = 'BILATERAL' | 'UNILATERAL' | 'APPEARANCE';
+
+interface DraftItemRow {
+  uid: number;
+  /** 项目名称（必填） */
   name: string;
-  desc: string;
-  icon: typeof Eye;
-  iconClass: string;
-  items: PlanPresetItem[];
+  kind: ToleranceKind;
+  /** 检验设备：『设备编码 设备名称』组合串（直接落 measurementTool），空 = 未选（选填） */
+  equipment: string;
+  /** 标准值：双边/单边为数字文本，外观为文字描述 */
+  standard: string;
+  /** 上限值 / 下限值：双边公差的绝对值口径，提交时折算成 tolerance 偏移 */
+  upper: string;
+  lower: string;
+  /** 判定方式：单边公差必填（≥ ＞ ≤ ＜ ＝） */
+  judgment: string;
 }
 
-const CHECK_CATEGORIES: CheckCategory[] = [
-  { key: 'APPEARANCE', name: '外观检验', desc: '表面毛疵、缺陷、螺纹完整性等', icon: Eye, iconClass: 'bg-amber-100 text-amber-500', items: PLAN_CHECK_CATEGORIES[0]!.items },
-  { key: 'DIMENSION', name: '尺寸检验', desc: '对边、对角、厚度、螺纹等', icon: Ruler, iconClass: 'bg-blue-100 text-blue-500', items: PLAN_CHECK_CATEGORIES[1]!.items },
-  { key: 'PERFORMANCE', name: '性能检验', desc: '硬度、强度、扭矩、表面处理等', icon: Zap, iconClass: 'bg-emerald-100 text-emerald-500', items: PLAN_CHECK_CATEGORIES[2]!.items },
+const TOLERANCE_KIND_OPTIONS: { value: ToleranceKind; label: string }[] = [
+  { value: 'BILATERAL', label: '双边公差' },
+  { value: 'UNILATERAL', label: '单边公差' },
+  { value: 'APPEARANCE', label: '外观' },
 ];
 
-/** 弹窗打开时的默认勾选态：启用 外观 + 尺寸，性能不启用（与交互稿一致） */
-const DEFAULT_ENABLED_CATEGORIES: PlanCategoryKey[] = [...DEFAULT_ENABLED_PLAN_CATEGORIES];
-const DEFAULT_CHECKED_ITEMS = CHECK_CATEGORIES.filter((category) =>
-  DEFAULT_ENABLED_CATEGORIES.includes(category.key)
-).flatMap((category) => category.items.map((item) => item.code));
+const JUDGMENT_METHOD_OPTIONS = ['≥', '＞', '≤', '＜', '＝'];
 
-/** 标准值输入框的默认值（各预置项的默认要求） */
-const DEFAULT_STANDARD_INPUTS: Record<string, string> = Object.fromEntries(
-  ALL_PLAN_PRESETS.map((item) => [item.code, item.hint])
-);
+let draftUidSeed = 0;
+function emptyDraftRow(): DraftItemRow {
+  draftUidSeed += 1;
+  return {
+    uid: draftUidSeed,
+    name: '',
+    kind: 'BILATERAL',
+    equipment: '',
+    standard: '',
+    upper: '',
+    lower: '',
+    judgment: '',
+  };
+}
 
 interface CategoryNode {
   id: string;
@@ -133,12 +136,10 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
   // 质检类型多选（039）：inspectionTypes[0] 为主类型（契约 inspectionType），全集落 inspection_types
   const [inspectionTypes, setInspectionTypes] = useState<InspectionType[]>(['IQC']);
   const [typeDropdownOpen, setTypeDropdownOpen] = useState(false);
-  /** 启用的检验类别（卡片勾选）：启用才展开对应清单，且其项目才会参与提交 */
-  const [enabledCategories, setEnabledCategories] = useState<PlanCategoryKey[]>([...DEFAULT_ENABLED_CATEGORIES]);
-  /** 勾选的预置检验项目 code 清单（跨类别全局收集，提交时按 类别->预置顺序 展开） */
-  const [checkedItems, setCheckedItems] = useState<string[]>([...DEFAULT_CHECKED_ITEMS]);
-  /** 各预置项的标准值输入（code -> 输入原文）：默认取预置 hint，用户可随时改写 */
-  const [standardInputs, setStandardInputs] = useState<Record<string, string>>(() => ({ ...DEFAULT_STANDARD_INPUTS }));
+  /** 检验项目表格行草稿：每行独立编辑，提交时按检验类型折算成契约指标 */
+  const [draftRows, setDraftRows] = useState<DraftItemRow[]>([emptyDraftRow()]);
+  /** 检验设备下拉选项（检验设备台账：「编码 名称」组合串） */
+  const [equipmentOptions, setEquipmentOptions] = useState<string[]>([]);
 
   const [categoryOptions, setCategoryOptions] = useState<{ value: string; label: string }[]>([]);
   const [materials, setMaterials] = useState<MaterialOption[]>([]);
@@ -155,19 +156,21 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
     setPlanNameTouched(false);
     setInspectionTypes(['IQC']);
     setTypeDropdownOpen(false);
-    setEnabledCategories([...DEFAULT_ENABLED_CATEGORIES]);
-    setCheckedItems([...DEFAULT_CHECKED_ITEMS]);
-    setStandardInputs({ ...DEFAULT_STANDARD_INPUTS });
+    setDraftRows([emptyDraftRow()]);
     setSubmitting(false);
 
     let cancelled = false;
     void (async () => {
-      const [categories, inventory] = await Promise.all([
+      const [categories, inventory, equipmentPage] = await Promise.all([
         api.get<CategoryNode[]>('/master-data/categories').catch(() => null),
         api
           .get<{ materialCode?: string; materialName?: string; categoryCode?: string; unit?: string }[]>(
             '/master-data/inventory'
           )
+          .catch(() => null),
+        // 检验设备选项域：检验设备台账（系统管理-检验设备），格式「编码 名称」；加载失败不阻断建方案
+        api
+          .get<{ items?: Equipment[]; list?: Equipment[] }>('/equipments', { page: 1, pageSize: 100 })
           .catch(() => null),
       ]);
       if (cancelled) return;
@@ -183,6 +186,11 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
                 ...(row.unit !== undefined ? { unit: String(row.unit) } : {}),
               }))
           : []
+      );
+      setEquipmentOptions(
+        (equipmentPage?.items ?? equipmentPage?.list ?? [])
+          .map((row) => `${row.equipmentCode} ${row.name ?? ''}`.trim())
+          .filter((label) => label !== '')
       );
       setMasterDataReady(Array.isArray(categories) && Array.isArray(inventory));
     })();
@@ -229,34 +237,12 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
     if (!planNameTouched && next.length > 0) setPlanName(suggestPlanName(selectedMaterial, next[0]!));
   };
 
-  /**
-   * 启用/停用一个检验类别：启用时默认勾选该类别全部预置项（用户可在清单里再挑），
-   * 停用时同步取消该类别全部勾选，保证「未启用的类别绝不混进提交数据」。
-   */
-  const handleCategoryToggle = (key: PlanCategoryKey) => {
-    const category = CHECK_CATEGORIES.find((entry) => entry.key === key);
-    if (!category) return;
-    const codes = category.items.map((item) => item.code);
-    if (enabledCategories.includes(key)) {
-      setEnabledCategories(enabledCategories.filter((entry) => entry !== key));
-      setCheckedItems(checkedItems.filter((code) => !codes.includes(code)));
-    } else {
-      setEnabledCategories([...enabledCategories, key]);
-      setCheckedItems([...new Set([...checkedItems, ...codes])]);
-    }
+  /** 行编辑：局部更新一行草稿（按 uid 定位） */
+  const updateRow = (uid: number, patch: Partial<DraftItemRow>) => {
+    setDraftRows((rows) => rows.map((row) => (row.uid === uid ? { ...row, ...patch } : row)));
   };
-
-  const handleItemCheck = (code: string) => {
-    setCheckedItems(
-      checkedItems.includes(code) ? checkedItems.filter((entry) => entry !== code) : [...checkedItems, code]
-    );
-  };
-
-  /** 提交用的指标清单：按 类别 -> 预置顺序 展开，只含已勾选项 */
-  const selectedPresets = useMemo(
-    () => CHECK_CATEGORIES.flatMap((category) => category.items.filter((item) => checkedItems.includes(item.code))),
-    [checkedItems]
-  );
+  const removeRow = (uid: number) => setDraftRows((rows) => rows.filter((row) => row.uid !== uid));
+  const addRow = () => setDraftRows((rows) => [...rows, emptyDraftRow()]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -276,9 +262,46 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
       alert('请至少选择一个质检类型');
       return;
     }
-    if (selectedPresets.length === 0) {
-      alert('请至少勾选一个检验项目');
+    if (draftRows.length === 0) {
+      alert('请至少添加一个检验项目');
       return;
+    }
+    // 行级校验：名称必填；数值口径校验数字与上下限关系；单边公差必选判定方式
+    for (let index = 0; index < draftRows.length; index += 1) {
+      const row = draftRows[index]!;
+      const no = index + 1;
+      if (row.name.trim() === '') {
+        alert(`第 ${no} 行：请填写项目名称`);
+        return;
+      }
+      if (row.kind !== 'APPEARANCE') {
+        if (row.standard.trim() === '' || !Number.isFinite(Number(row.standard))) {
+          alert(`第 ${no} 行【${row.name.trim()}】：标准值必须是数字`);
+          return;
+        }
+        if (row.kind === 'UNILATERAL' && row.judgment === '') {
+          alert(`第 ${no} 行【${row.name.trim()}】：单边公差必须选择判定方式（≥ ＞ ≤ ＜ ＝）`);
+          return;
+        }
+        if (row.kind === 'BILATERAL') {
+          if (row.upper.trim() !== '' && !Number.isFinite(Number(row.upper))) {
+            alert(`第 ${no} 行【${row.name.trim()}】：上限值必须是数字`);
+            return;
+          }
+          if (row.lower.trim() !== '' && !Number.isFinite(Number(row.lower))) {
+            alert(`第 ${no} 行【${row.name.trim()}】：下限值必须是数字`);
+            return;
+          }
+          if (
+            row.upper.trim() !== '' &&
+            row.lower.trim() !== '' &&
+            Number(row.upper) <= Number(row.lower)
+          ) {
+            alert(`第 ${no} 行【${row.name.trim()}】：上限值必须大于下限值`);
+            return;
+          }
+        }
+      }
     }
 
     setSubmitting(true);
@@ -296,35 +319,50 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
             samplingScheme: 'GB_T_2828',
             aqlLevel: 'II',
             strictness: 'NORMAL',
-            items: selectedPresets.map((preset, index) => {
-              const rawStandard = (standardInputs[preset.code] ?? '').trim();
-              const parsed = parsePlanStandardValue(rawStandard);
+            items: draftRows.map((row, index) => {
               const base = {
                 seq: index + 1,
-                itemCode: `ITEM-${preset.code}`,
-                name: preset.name,
-                metricCategory: preset.metricCategory,
-                ...(preset.testItemCode !== undefined ? { testItemCode: preset.testItemCode } : {}),
+                itemCode: `ITEM-${String(index + 1).padStart(2, '0')}`,
+                name: row.name.trim(),
+                // 检验设备（选填）：『编码 名称』组合串直接落 measurementTool（ERP CheckDevice 口径）
+                ...(row.equipment !== '' ? { measurementTool: row.equipment } : {}),
                 isMandatory: true,
               };
-              if (parsed) {
-                // 数值口径：按公差带自动判定（[nominal-lower, nominal+upper]），dif 承载公差原文（ERP Dif 口径）
+              // 外观：文字描述落 remark（判定器对无基准文本项返回 PENDING 挂起人工确认，
+              // 绝不把说明语当可接受值逐字比对）；无上限/下限/判定方式。
+              if (row.kind === 'APPEARANCE') {
+                return {
+                  ...base,
+                  dataType: 'QUALITATIVE' as const,
+                  metricCategory: 'APPEARANCE' as const,
+                  toleranceKind: 'APPEARANCE' as const,
+                  ...(row.standard.trim() !== '' ? { remark: row.standard.trim() } : {}),
+                };
+              }
+              const nominal = Number(row.standard);
+              // 单边公差：标准值即门槛值，判定方式落 judgmentMethod，判定器按操作符直接比较
+              if (row.kind === 'UNILATERAL') {
                 return {
                   ...base,
                   dataType: 'NUMERIC' as const,
-                  nominalValue: parsed.nominal,
-                  upperTolerance: parsed.upper,
-                  lowerTolerance: parsed.lower,
-                  ...(parsed.dif !== undefined ? { dif: parsed.dif } : {}),
+                  metricCategory: 'DIMENSION' as const,
+                  toleranceKind: 'UNILATERAL' as const,
+                  nominalValue: nominal,
+                  judgmentMethod: row.judgment,
                 };
               }
-              // 文字要求 / 留空：落 remark 供检验员参考，standardText 留空 ——
-              // 判定器对无基准的文本项返回 PENDING 挂起人工确认，
-              // 绝不把「按产品标准」这类说明语当可接受值逐字比对（否则录入永远判不合格）。
+              // 双边公差：上限值/下限值为绝对值口径，折算成公差偏移
+              //（nominal ± offset 与判定器/证书/台账的公差带口径一致）
+              const upperTolerance = row.upper.trim() !== '' ? Number(row.upper) - nominal : undefined;
+              const lowerTolerance = row.lower.trim() !== '' ? nominal - Number(row.lower) : undefined;
               return {
                 ...base,
-                dataType: preset.dataType,
-                ...(rawStandard !== '' ? { remark: rawStandard } : {}),
+                dataType: 'NUMERIC' as const,
+                metricCategory: 'DIMENSION' as const,
+                toleranceKind: 'BILATERAL' as const,
+                nominalValue: nominal,
+                ...(upperTolerance !== undefined ? { upperTolerance } : {}),
+                ...(lowerTolerance !== undefined ? { lowerTolerance } : {}),
               };
             }),
           },
@@ -521,120 +559,199 @@ export function CreatePlanModal({ isOpen, onClose, onSuccess }: CreatePlanModalP
             </p>
           )}
 
-          {/* 选择检验类型：三张类别卡片，启用即展开对应预置项目清单 */}
+          {/* 检验项目表格：列 = 项目名称 / 检验类型 / 检验设备 / 标准值 / 上限值 / 下限值 / 判定方式 / 操作 */}
           <div className="mt-6">
             <div className={sectionTitle}>
               <span className={sectionBar} />
-              <h3 className={sectionHeading}>选择检验类型</h3>
+              <h3 className={sectionHeading}>检验项目</h3>
+              <span className="ml-auto text-[12px] text-[#94A3B8]">已添加 {draftRows.length} 项</span>
+              <button
+                type="button"
+                onClick={addRow}
+                className="ml-3 inline-flex items-center gap-1 h-8 px-3 text-[12px] font-medium text-white bg-[#2B5AED] rounded-lg hover:bg-[#2450D4] transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                添加检验项目
+              </button>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              {CHECK_CATEGORIES.map((category) => {
-                const enabled = enabledCategories.includes(category.key);
-                const Icon = category.icon;
-                return (
-                  <button
-                    key={category.key}
-                    type="button"
-                    onClick={() => handleCategoryToggle(category.key)}
-                    className={`text-left rounded-xl border p-4 transition-colors cursor-pointer ${
-                      enabled
-                        ? 'border-[#2B5AED] bg-[#EEF3FE]'
-                        : 'border-[#E2E8F0] bg-white hover:border-[#C7D4F5]'
-                    }`}
-                  >
-                    <span
-                      className={`inline-flex items-center justify-center w-11 h-11 rounded-xl ${category.iconClass}`}
-                    >
-                      <Icon className="w-6 h-6" />
-                    </span>
-                    <div className="mt-3 text-[15px] font-bold text-[#1E293B]">{category.name}</div>
-                    <div className="mt-0.5 text-[12px] text-[#94A3B8]">{category.desc}</div>
-                    <label
-                      className="mt-3 flex items-center gap-2 text-[13px] text-[#334155]"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={enabled}
-                        onChange={() => handleCategoryToggle(category.key)}
-                        className="w-4 h-4 accent-[#2563EB] cursor-pointer"
-                      />
-                      启用
-                    </label>
-                  </button>
-                );
-              })}
+
+            <div className="rounded-xl border border-[#E2E8F0] bg-white overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-[12px] text-left border-collapse min-w-[980px]">
+                  <thead>
+                    <tr className="bg-[#F8FAFC] text-[#64748B] font-medium border-b border-[#E2E8F0]">
+                      <th className="py-2.5 px-3 w-10 text-center">#</th>
+                      <th className="py-2.5 px-2">项目名称 <span className="text-rose-500">*</span></th>
+                      <th className="py-2.5 px-2 w-28">检验类型</th>
+                      <th className="py-2.5 px-2 w-44">检验设备</th>
+                      <th className="py-2.5 px-2 w-28">标准值</th>
+                      <th className="py-2.5 px-2 w-24">上限值</th>
+                      <th className="py-2.5 px-2 w-24">下限值</th>
+                      <th className="py-2.5 px-2 w-24">判定方式</th>
+                      <th className="py-2.5 px-2 w-12 text-center">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#F1F5F9]">
+                    {draftRows.length === 0 && (
+                      <tr>
+                        <td colSpan={9} className="py-10 text-center text-[#94A3B8]">
+                          点击右上角「添加检验项目」新增一行
+                        </td>
+                      </tr>
+                    )}
+                    {draftRows.map((row, index) => {
+                      const isAppearance = row.kind === 'APPEARANCE';
+                      const isUnilateral = row.kind === 'UNILATERAL';
+                      const cellInput =
+                        'w-full h-8 px-2 text-[12px] bg-white border border-[#E2E8F0] rounded-md placeholder-[#94A3B8] focus:outline-none focus:border-[#2B5AED] transition-colors';
+                      const cellSelect = `${cellInput} cursor-pointer`;
+                      const dashCell = 'py-2.5 px-2 text-center text-[#CBD5E1] select-none';
+                      return (
+                        <tr key={row.uid} className="hover:bg-[#FAFBFE]">
+                          <td className="py-2.5 px-3 text-center text-[#94A3B8] font-mono">{index + 1}</td>
+                          <td className="py-2.5 px-2">
+                            <input
+                              type="text"
+                              value={row.name}
+                              onChange={(e) => updateRow(row.uid, { name: e.target.value })}
+                              placeholder="如：对边宽度 s"
+                              className={cellInput}
+                            />
+                          </td>
+                          <td className="py-2.5 px-2">
+                            <select
+                              value={row.kind}
+                              onChange={(e) => updateRow(row.uid, { kind: e.target.value as ToleranceKind })}
+                              className={cellSelect}
+                            >
+                              {TOLERANCE_KIND_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td className="py-2.5 px-2">
+                            <select
+                              value={row.equipment}
+                              onChange={(e) => updateRow(row.uid, { equipment: e.target.value })}
+                              className={cellSelect}
+                              title="选填；选项来自「系统管理-检验设备」台账，格式：设备编码 设备名称"
+                            >
+                              <option value="">不指定（选填）</option>
+                              {equipmentOptions.map((label) => (
+                                <option key={label} value={label}>
+                                  {label}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td className="py-2.5 px-2">
+                            {isAppearance ? (
+                              <input
+                                type="text"
+                                value={row.standard}
+                                onChange={(e) => updateRow(row.uid, { standard: e.target.value })}
+                                placeholder="文字描述，如：表面无毛刺、无裂纹"
+                                className={cellInput}
+                              />
+                            ) : (
+                              <input
+                                type="number"
+                                step="any"
+                                value={row.standard}
+                                onChange={(e) => updateRow(row.uid, { standard: e.target.value })}
+                                placeholder={isUnilateral ? '门槛值，如 650' : '如 36'}
+                                title={isUnilateral ? '单边公差：标准值即门槛值，与判定方式组合成 ≥650 等' : '双边公差：公称值，与上限值/下限值组成公差带'}
+                                className={`${cellInput} text-right font-mono`}
+                              />
+                            )}
+                          </td>
+                          {/* 上限值 / 下限值：仅双边公差可填（绝对值口径，提交时折算公差偏移） */}
+                          {isAppearance || isUnilateral ? (
+                            <>
+                              <td className={dashCell}>—</td>
+                              <td className={dashCell}>—</td>
+                            </>
+                          ) : (
+                            <>
+                              <td className="py-2.5 px-2">
+                                <input
+                                  type="number"
+                                  step="any"
+                                  value={row.upper}
+                                  onChange={(e) => updateRow(row.uid, { upper: e.target.value })}
+                                  placeholder="如 36.5"
+                                  title="绝对值口径（= 标准值 + 上偏差）"
+                                  className={`${cellInput} text-right font-mono`}
+                                />
+                              </td>
+                              <td className="py-2.5 px-2">
+                                <input
+                                  type="number"
+                                  step="any"
+                                  value={row.lower}
+                                  onChange={(e) => updateRow(row.uid, { lower: e.target.value })}
+                                  placeholder="如 35.5"
+                                  title="绝对值口径（= 标准值 - 下偏差）"
+                                  className={`${cellInput} text-right font-mono`}
+                                />
+                              </td>
+                            </>
+                          )}
+                          {/* 判定方式：仅单边公差可填（必填） */}
+                          {isAppearance ? (
+                            <td className={dashCell}>—</td>
+                          ) : isUnilateral ? (
+                            <td className="py-2.5 px-2">
+                              <select
+                                value={row.judgment}
+                                onChange={(e) => updateRow(row.uid, { judgment: e.target.value })}
+                                className={cellSelect}
+                                title="单边公差必填：判定器按 标准值 与该操作符直接比较"
+                              >
+                                <option value="">必选</option>
+                                {JUDGMENT_METHOD_OPTIONS.map((op) => (
+                                  <option key={op} value={op}>
+                                    {op}
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
+                          ) : (
+                            <td
+                              className="py-2.5 px-2 text-center text-[#94A3B8] select-none"
+                              title="双边公差按 [下限值, 上限值] 公差带自动判定，无需选择"
+                            >
+                              自动
+                            </td>
+                          )}
+                          <td className="py-2.5 px-2 text-center">
+                            <button
+                              type="button"
+                              onClick={() => removeRow(row.uid)}
+                              title="删除本行"
+                              className="inline-flex items-center justify-center w-7 h-7 rounded-md text-[#EF4444] hover:bg-red-50 transition-colors"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
 
           <p className="mt-3 text-[12px] text-[#94A3B8]">
-            检验项目右侧的标准值可直接修改：填数值口径（如 36±0.5、36+0.2/-0.1）保存后按公差自动判定；
-            文字要求（如「按产品标准」）在检验录入后由检验员人工确认。
+            <span className="inline-flex items-center gap-1">
+              <ClipboardList className="w-3.5 h-3.5" />
+              双边公差按 [下限值, 上限值] 自动判定；单边公差按「判定方式 + 标准值」比较（如 ≥650）；
+              外观项的标准值为文字要求，由检验员在录入时人工确认。
+            </span>
           </p>
-
-          {/* 各启用类别的预置检验项目勾选清单 */}
-          {CHECK_CATEGORIES.filter((category) => enabledCategories.includes(category.key)).map((category) => (
-            <div className="mt-6" key={category.key}>
-              <div className={sectionTitle}>
-                <span className={sectionBar} />
-                <h3 className={sectionHeading}>{category.name}项目</h3>
-                <span className="ml-auto text-[12px] text-[#94A3B8]">
-                  已选 {category.items.filter((item) => checkedItems.includes(item.code)).length}/{category.items.length}
-                </span>
-              </div>
-              <div className="rounded-xl bg-[#F8FAFC] p-2.5 space-y-2">
-                {category.items.map((preset) => {
-                  const checked = checkedItems.includes(preset.code);
-                  const rawStandard = standardInputs[preset.code] ?? '';
-                  const parsed = parsePlanStandardValue(rawStandard);
-                  const inputId = `preset-check-${preset.code}`;
-                  return (
-                    <div
-                      key={preset.code}
-                      className={`flex items-center gap-3 rounded-lg border bg-white px-4 py-2.5 transition-colors ${
-                        checked
-                          ? 'border-[#C7D4F5] hover:border-[#2B5AED]'
-                          : 'border-[#F1F5F9] hover:border-[#E2E8F0]'
-                      }`}
-                    >
-                      <input
-                        type="checkbox"
-                        id={inputId}
-                        checked={checked}
-                        onChange={() => handleItemCheck(preset.code)}
-                        className="w-[18px] h-[18px] accent-[#2563EB] rounded cursor-pointer shrink-0"
-                      />
-                      <label htmlFor={inputId} className="text-[14px] text-[#1E293B] cursor-pointer select-none">
-                        {preset.name}
-                      </label>
-                      <div className="ml-auto flex items-center gap-2 shrink-0">
-                        {parsed && (
-                          <span className="text-[11px] px-1.5 py-0.5 rounded bg-[#EEF3FE] text-[#2B5AED] whitespace-nowrap">
-                            自动判定
-                          </span>
-                        )}
-                        <input
-                          type="text"
-                          value={rawStandard}
-                          disabled={!checked}
-                          onChange={(e) =>
-                            setStandardInputs((prev) => ({ ...prev, [preset.code]: e.target.value }))
-                          }
-                          placeholder="标准值，如 36±0.5"
-                          title="数值口径（36±0.5 / 36+0.2/-0.1 / 36）保存后按公差自动判定；文字要求由检验员人工确认"
-                          className="w-56 h-8 px-2.5 text-[12px] text-right bg-white border border-[#E2E8F0] rounded-md placeholder-[#94A3B8] focus:outline-none focus:border-[#2B5AED] transition-colors disabled:bg-slate-50 disabled:text-[#94A3B8] disabled:cursor-not-allowed"
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-
-          {selectedPresets.length === 0 && (
-            <p className="mt-4 text-[12px] text-amber-600">请至少勾选一个检验项目（启用对应检验类型后在清单中勾选）。</p>
-          )}
 
           {/* Footer Actions */}
           <div className="flex items-center justify-end gap-3 pt-5 mt-5 border-t border-[#F1F5F9]">

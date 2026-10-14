@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { InspectionOrder, TraceNode } from '@letian/contracts';
 import type { IUnitOfWorkContext } from '../../tx/unit-of-work.js';
 import { ORDER_TYPE_STAGE, resolveInspectionSourceDocNo, toTraceNodeStatus } from './inspection-stage.js';
@@ -34,7 +35,7 @@ export function buildInspectionTraceNode(
   const occurredAt = order.completedAt ?? order.createdAt ?? new Date().toISOString();
 
   return {
-    nodeId: crypto.randomUUID(),
+    nodeId: randomUUID(),
     batchNo: order.batchNo,
     stageName: buildTraceStageName(order),
     materialName: order.materialName,

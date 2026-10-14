@@ -101,6 +101,8 @@ export {
   OverallDecisionEnum,
   DataTypeEnum,
   MetricCategoryEnum,
+  ToleranceKindEnum,
+  JudgmentMethodEnum,
   InspectionItemDecisionEnum,
   InspectionPlanItemSchema,
   PlanVersionStatusEnum,

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type {
   InspectionPlan as InspectionPlanDTO,
   InspectionPlanItem as InspectionPlanItemDTO,
@@ -97,7 +98,7 @@ export class UpgradePlanVersionUseCase {
       const aqlLevel = cmd.aqlLevel ?? source.aqlLevel;
       const strictness = cmd.strictness ?? source.strictness;
 
-      const versionId = crypto.randomUUID();
+      const versionId = randomUUID();
       try {
         plan.createDraftVersion({
           id: versionId,
@@ -120,7 +121,7 @@ export class UpgradePlanVersionUseCase {
       await ctx.inspectionPlans.save(plan.toDTO());
 
       await ctx.outbox.append({
-        id: crypto.randomUUID(),
+        id: randomUUID(),
         aggregateType: 'InspectionPlan',
         aggregateId: plan.getId(),
         eventType: 'INSPECTION_PLAN_UPGRADED',
@@ -131,7 +132,7 @@ export class UpgradePlanVersionUseCase {
           newVersionNo: versionNo,
           newVersionId: versionId,
         },
-        traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+        traceId: securityCtx?.traceId ?? randomUUID(),
         occurredAt: new Date(),
         status: 'PENDING',
         retryCount: 0,

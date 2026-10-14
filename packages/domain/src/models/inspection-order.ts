@@ -13,6 +13,24 @@ import { InspectionStateMachine } from '../state-machines/inspection-state-machi
 import { evaluateInspectionItem } from '../services/tolerance-evaluator';
 
 /**
+ * 生成检验指标项 UUID。
+ * 优先用全局 crypto.randomUUID（现代浏览器与 Node 18+ 内置）；Node 14（客户部署运行时）
+ * 没有全局 crypto 对象，而本包会被前端打包、不能静态 import node:crypto，故回落到
+ * 随机数 v4 形态 —— 指标 id 只作单据内行标识，不承担密码学安全性。
+ */
+function generateItemId(): string {
+  const globalCrypto = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (typeof globalCrypto?.randomUUID === 'function') {
+    return globalCrypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (ch) => {
+    const r = (Math.random() * 16) | 0;
+    const v = ch === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+/**
  * 检验单聚合根 (InspectionOrder)
  * 纯内存领域聚合，负责管理生命周期流转、方案版本快照深拷贝绑定、实测值录入、不解检标记与整单综合判定
  */
@@ -474,7 +492,7 @@ export class InspectionOrder {
     };
 
     this.items = this.planSnapshot.items.map((pItem, index) => ({
-      id: crypto.randomUUID(),
+      id: generateItemId(),
       seq: index + 1,
       itemCode: pItem.itemCode,
       name: pItem.name,
@@ -483,6 +501,8 @@ export class InspectionOrder {
       nominalValue: pItem.nominalValue,
       upperTolerance: pItem.upperTolerance,
       lowerTolerance: pItem.lowerTolerance,
+      toleranceKind: pItem.toleranceKind,
+      judgmentMethod: pItem.judgmentMethod,
       standardText: pItem.standardText,
       acceptableValues: pItem.acceptableValues ? [...pItem.acceptableValues] : undefined,
       unit: pItem.unit,

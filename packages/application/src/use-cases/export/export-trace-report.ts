@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { TraceabilityGraphResponse } from '@letian/contracts';
 import { ApplicationError } from '../../errors/application-error.js';
 import type { IPdfExporterPort, ExportResult } from '../../ports/export-port.js';
@@ -77,8 +78,8 @@ export class ExportTraceReportUseCase {
 
     await this.uow.execute(async (ctx) => {
       await ctx.auditLogs.insert({
-        id: crypto.randomUUID(),
-        traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+        id: randomUUID(),
+        traceId: securityCtx?.traceId ?? randomUUID(),
         userId: cmd.operatorId,
         userName: cmd.operatorName ?? '追溯系统',
         action: 'UPDATE',

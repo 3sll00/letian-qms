@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type {
   InspectionOrder as InspectionOrderDTO,
 } from '@letian/contracts';
@@ -83,7 +84,7 @@ export class CreateReinspectionUseCase {
       const reinspectionOrderNo = `${origOrder.orderNo}-R${nextRound}`;
 
       // 3. 构建新的复检单聚合根
-      const newOrderId = crypto.randomUUID();
+      const newOrderId = randomUUID();
       const reinspectionOrder = new InspectionOrder({
         id: newOrderId,
         orderNo: reinspectionOrderNo,
@@ -173,7 +174,7 @@ export class CreateReinspectionUseCase {
 
       // 7. 发送复检触发事件到 Outbox
       await ctx.outbox.append({
-        id: crypto.randomUUID(),
+        id: randomUUID(),
         aggregateType: 'InspectionOrder',
         aggregateId: reinspectionOrder.getId(),
         eventType: 'REINSPECTION_ORDER_CREATED',
@@ -186,7 +187,7 @@ export class CreateReinspectionUseCase {
           round: nextRound,
           reworkRecordNo: cmd.reworkRecordNo,
         },
-        traceId: crypto.randomUUID(),
+        traceId: randomUUID(),
         occurredAt: new Date(),
         status: 'PENDING',
         retryCount: 0,
@@ -194,8 +195,8 @@ export class CreateReinspectionUseCase {
 
       // 8. 记录不可变审计日志
       await ctx.auditLogs.insert({
-        id: crypto.randomUUID(),
-        traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+        id: randomUUID(),
+        traceId: securityCtx?.traceId ?? randomUUID(),
         userId: cmd.operatorId,
         userName: cmd.operatorName ?? cmd.operatorId,
         action: 'CREATE',

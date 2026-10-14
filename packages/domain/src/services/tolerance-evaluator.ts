@@ -13,8 +13,8 @@ import { InspectionItem, InspectionItemDecision } from '@letian/contracts';
  *    清单为空时回落到 standardText 按 [,，/|] 拆分出的候选值；两者都拿不到一律 PENDING，缺失或不匹配严禁默认放行；
  * 5. 无法匹配或实测数据未录入时，必须明确返回 'PENDING'，严禁静默返回 'PASSED'。
  */
-export function evaluateInspectionItem(item: Pick<InspectionItem, 
-  'dataType' | 'measuredVal' | 'measuredText' | 'nominalValue' | 'upperTolerance' | 'lowerTolerance' | 'standardText' | 'acceptableValues' | 'isExempt'
+export function evaluateInspectionItem(item: Pick<InspectionItem,
+  'dataType' | 'measuredVal' | 'measuredText' | 'nominalValue' | 'upperTolerance' | 'lowerTolerance' | 'standardText' | 'acceptableValues' | 'isExempt' | 'judgmentMethod'
 >): InspectionItemDecision {
   // 1. 过程检验“不解检”/免检判定优先拦截
   if (item.isExempt) {
@@ -33,14 +33,34 @@ export function evaluateInspectionItem(item: Pick<InspectionItem,
       return 'PENDING'; // 缺少标准基准，无法评定
     }
 
+    // 浮点数精度微调防护 (Epsilon: 1e-9)
+    const EPS = 1e-9;
+
+    // 2.1 单边公差（judgmentMethod 设定）：按 nominalValue 与操作符直接比较，忽略公差带。
+    //     需求口径（2026-10 表格化新增方案）：单边公差项「标准值」即门槛值，
+    //     判定方式 ∈ ≥ ＞ ≤ ＜ ＝；含等号用容差吸收浮点误差，不含等号要求严格跨越门槛。
+    if (item.judgmentMethod !== undefined) {
+      const diff = measuredVal - nominalValue;
+      switch (item.judgmentMethod) {
+        case '≥':
+          return diff >= -EPS ? 'PASSED' : 'FAILED';
+        case '＞':
+          return diff > EPS ? 'PASSED' : 'FAILED';
+        case '≤':
+          return diff <= EPS ? 'PASSED' : 'FAILED';
+        case '＜':
+          return diff < -EPS ? 'PASSED' : 'FAILED';
+        case '＝':
+          return Math.abs(diff) <= EPS ? 'PASSED' : 'FAILED';
+      }
+    }
+
     const upper = upperTolerance ?? 0;
     const lower = lowerTolerance ?? 0;
 
     const maxLimit = nominalValue + upper;
     const minLimit = nominalValue - lower;
 
-    // 浮点数精度微调防护 (Epsilon: 1e-9)
-    const EPS = 1e-9;
     if (measuredVal > maxLimit + EPS || measuredVal < minLimit - EPS) {
       return 'FAILED';
     }

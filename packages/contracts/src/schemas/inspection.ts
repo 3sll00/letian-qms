@@ -74,6 +74,20 @@ export const MetricCategoryEnum = z.enum([
   'TEXT_INTERVAL',          // 文本成分区间
 ]).openapi('MetricCategory');
 
+/**
+ * 检验类型（新增方案「检验项目」表格的「检验类型」列，2026-10 表格化改版）：
+ * BILATERAL=双边公差（标准值+上限值+下限值，公差带判定）
+ * UNILATERAL=单边公差（标准值+判定方式，操作符直接比较）
+ * APPEARANCE=外观（标准值为文字描述，无上下限与判定方式）
+ */
+export const ToleranceKindEnum = z.enum(['BILATERAL', 'UNILATERAL', 'APPEARANCE']).openapi('ToleranceKind');
+
+/**
+ * 判定方式（单边公差时必填）：比较运算符符号直接作为枚举值（全角），判定器按符号比较。
+ * 未设定时维持既有公差带判定（[nominal-lower, nominal+upper] 闭区间），历史方案不受影响。
+ */
+export const JudgmentMethodEnum = z.enum(['≥', '＞', '≤', '＜', '＝']).openapi('JudgmentMethod');
+
 export const InspectionItemDecisionEnum = z.enum([
   'PENDING',
   'PASSED',
@@ -100,9 +114,15 @@ export const InspectionPlanItemSchema = z.object({
   nominalValue: z.number().optional(),
   upperTolerance: z.number().optional(),
   lowerTolerance: z.number().optional(),
+  /** 检验类型（表格化录入口径）：双边/单边/外观；历史方案缺省，按 dataType 与 judgmentMethod 有无反推 */
+  toleranceKind: ToleranceKindEnum.optional(),
+  /** 判定方式（单边公差必填）：设定后数值判定按 nominalValue 与操作符直接比较，忽略公差带 */
+  judgmentMethod: JudgmentMethodEnum.optional(),
   sampleSize: z.number().int().optional(),
   unit: z.string().optional(),
-  measurementTool: z.string().optional(),
+  measurementTool: z.string().optional().openapi({
+    description: '检验设备。新增方案表格的「检验设备」列写入「设备编码 设备名称」组合串（选自设备管理台账）',
+  }),
   isMandatory: z.boolean().default(true),
   remark: z.string().optional(),
   // —— ERP 检验方案明细口径（T_Inf_PtypeCheckingSchemeDly）——
@@ -395,6 +415,10 @@ export const InspectionItemSchema = z.object({
   nominalValue: z.number().optional(),
   upperTolerance: z.number().optional(),
   lowerTolerance: z.number().optional(),
+  /** 建单时随方案快照固化的检验类型（双边/单边/外观） */
+  toleranceKind: ToleranceKindEnum.optional(),
+  /** 建单时随方案快照固化的判定方式；单边公差项按此操作符判定 */
+  judgmentMethod: JudgmentMethodEnum.optional(),
   sampleSize: z.number().int().optional(),
   measuredVal: z.number().optional(),
   measuredText: z.string().optional(),

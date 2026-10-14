@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type {
   ConcessionSignOff,
   MRBReview as MRBReviewDTO,
@@ -69,7 +70,7 @@ export class CustomerSignOffUseCase {
       await ctx.mrbReviews.save(updatedReview);
 
       await ctx.outbox.append({
-        id: crypto.randomUUID(),
+        id: randomUUID(),
         aggregateType: 'MRBReview',
         aggregateId: review.id,
         eventType: 'MRBCustomerSignedOff',
@@ -80,15 +81,15 @@ export class CustomerSignOffUseCase {
           agreed: cmd.agreed,
           documentUrl: cmd.signOffDocumentUrl,
         },
-        traceId: crypto.randomUUID(),
+        traceId: randomUUID(),
         occurredAt: new Date(),
         status: 'PENDING',
         retryCount: 0,
       });
 
       await ctx.auditLogs.insert({
-        id: crypto.randomUUID(),
-        traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+        id: randomUUID(),
+        traceId: securityCtx?.traceId ?? randomUUID(),
         userId: cmd.operatorId,
         userName: cmd.operatorName ?? '系统操作员',
         action: 'STATUS_CHANGE',

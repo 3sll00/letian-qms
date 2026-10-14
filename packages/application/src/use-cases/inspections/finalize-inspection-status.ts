@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   InspectionStatusEnum,
   OverallDecisionEnum,
@@ -247,8 +248,8 @@ export class FinalizeInspectionStatusUseCase {
         auto !== null ? (await ctx.inspectionOrders.findById(cmd.orderId)) ?? updated : updated;
 
       await ctx.auditLogs.insert({
-        id: crypto.randomUUID(),
-        traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+        id: randomUUID(),
+        traceId: securityCtx?.traceId ?? randomUUID(),
         userId: cmd.operatorId,
         userName: cmd.operatorName,
         action: 'STATUS_CHANGE',

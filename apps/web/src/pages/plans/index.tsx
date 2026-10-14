@@ -163,13 +163,49 @@ function applicableProductOf(plan: InspectionPlan): string {
   return plan.materialName ?? materialCode;
 }
 
+/**
+ * 指标标准值展示（2026-10 表格化新增方案口径）：
+ * 单边公差 → 操作符+门槛值（如 ≥650）；外观 → 文字备注；双边公差 → 公差带区间（下限 ~ 上限）。
+ */
+function standardDisplayOfItem(item: {
+  standardText?: string;
+  remark?: string;
+  nominalValue?: number;
+  upperTolerance?: number;
+  lowerTolerance?: number;
+  judgmentMethod?: string;
+  toleranceKind?: string;
+  dataType?: string;
+  unit?: string;
+}): string {
+  if (item.judgmentMethod !== undefined && item.nominalValue !== undefined) {
+    return `${item.judgmentMethod}${item.nominalValue}${item.unit ?? ''}`;
+  }
+  if (item.toleranceKind === 'APPEARANCE' || (item.dataType !== 'NUMERIC' && item.remark !== undefined)) {
+    return item.remark ?? item.standardText ?? '-';
+  }
+  if (item.standardText !== undefined && item.standardText !== '') {
+    return item.standardText;
+  }
+  if (item.nominalValue !== undefined) {
+    const trim = (num: number) => String(num).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+    const upper = item.upperTolerance ?? 0;
+    const lower = item.lowerTolerance ?? 0;
+    const unitSuffix = item.unit !== undefined && item.unit !== '' ? ` ${item.unit}` : '';
+    if (upper !== 0 || lower !== 0) {
+      return `${trim(item.nominalValue - lower)} ~ ${trim(item.nominalValue + upper)}${unitSuffix}`;
+    }
+    return `${item.nominalValue}${unitSuffix}`;
+  }
+  return '-';
+}
+
 function formatDateTime(value?: string): string {
   if (!value) return '-';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '-';
   const pad = (num: number) => String(num).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;}
 
 /** 分类树 → 下拉选项（仅取有编码的节点，父级在前） */
 function flattenCategories(nodes: CategoryNodeView[], depth = 0): { value: string; label: string }[] {
@@ -719,7 +755,7 @@ export function PlansPage() {
                   >
                     <span className="font-medium text-slate-700">{item.name}</span>
                     <span className="text-slate-500">
-                      {item.standardText ?? `${item.nominalValue ?? '-'} ${item.unit ?? ''}`}
+                      {standardDisplayOfItem(item)}
                     </span>
                   </div>
                 ))}

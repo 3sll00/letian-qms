@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type {
   MRBStatus,
   MRBReview as MRBReviewDTO,
@@ -93,7 +94,7 @@ export class AdvanceMrbStepUseCase {
       await ctx.mrbReviews.save(updatedReview);
 
       await ctx.outbox.append({
-        id: crypto.randomUUID(),
+        id: randomUUID(),
         aggregateType: 'MRBReview',
         aggregateId: review.id,
         eventType: cmd.action === 'APPROVE' ? 'MRBStepApproved' : 'MRBStepRejected',
@@ -106,15 +107,15 @@ export class AdvanceMrbStepUseCase {
           nextStepOrder,
           status: nextStatus,
         },
-        traceId: crypto.randomUUID(),
+        traceId: randomUUID(),
         occurredAt: new Date(),
         status: 'PENDING',
         retryCount: 0,
       });
 
       await ctx.auditLogs.insert({
-        id: crypto.randomUUID(),
-        traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+        id: randomUUID(),
+        traceId: securityCtx?.traceId ?? randomUUID(),
         userId: cmd.operatorId,
         userName: cmd.operatorName ?? cmd.operatorId,
         action: 'STATUS_CHANGE',

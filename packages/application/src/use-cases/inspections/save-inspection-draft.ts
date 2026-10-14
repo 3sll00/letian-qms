@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type {
   InspectionOrder as InspectionOrderDTO,
   BatchRecordInspectionItemsRequest,
@@ -125,8 +126,8 @@ export class SaveInspectionDraftUseCase {
       await ctx.inspectionOrders.save(updatedOrderDto);
 
       await ctx.auditLogs.insert({
-        id: crypto.randomUUID(),
-        traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+        id: randomUUID(),
+        traceId: securityCtx?.traceId ?? randomUUID(),
         userId: cmd.operatorId,
         userName: cmd.operatorName,
         action: 'UPDATE',

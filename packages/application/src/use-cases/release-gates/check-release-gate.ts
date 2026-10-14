@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type {
   InspectionOrder as InspectionOrderDTO,
   InspectionStatus,
@@ -75,7 +76,7 @@ export class CheckReleaseGateUseCase {
       // 与建单门禁共用同一把批次锁：避免「关卡校验」与「同批次建单」交错读到中间态
       await ctx.locks.acquireXactLock(`LOCK_ORDER_${cmd.batchNo}`);
 
-      const traceId = securityCtx?.traceId ?? crypto.randomUUID();
+      const traceId = securityCtx?.traceId ?? randomUUID();
       const gateType = cmd.gateType ?? 'OUTBOUND_SHIPMENT';
       const requiredStage = RELEASE_GATE_STAGE[gateType];
       const orders = await ctx.inspectionOrders.findByBatchNo(cmd.batchNo);
@@ -90,7 +91,7 @@ export class CheckReleaseGateUseCase {
           reason: result.reason,
         };
         await ctx.auditLogs.insert({
-          id: crypto.randomUUID(),
+          id: randomUUID(),
           traceId,
           userId: cmd.operatorId,
           userName: cmd.operatorName ?? '系统操作员',
@@ -102,7 +103,7 @@ export class CheckReleaseGateUseCase {
           createdAt: new Date().toISOString(),
         });
         await ctx.outbox.append({
-          id: crypto.randomUUID(),
+          id: randomUUID(),
           aggregateType: 'ReleaseGate',
           aggregateId: cmd.batchNo,
           eventType: result.allowed ? 'RELEASE_GATE_PASSED' : 'RELEASE_GATE_BLOCKED',
@@ -123,7 +124,7 @@ export class CheckReleaseGateUseCase {
         if (result.terminateChain) {
           // 链路终止单独成事件：ERP / 委外系统据此冻结发运与委外发出（TBD-07）
           await ctx.outbox.append({
-            id: crypto.randomUUID(),
+            id: randomUUID(),
             aggregateType: 'ReleaseGate',
             aggregateId: cmd.batchNo,
             eventType: 'CHAIN_TERMINATED',

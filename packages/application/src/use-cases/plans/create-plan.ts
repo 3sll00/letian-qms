@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type {
   InspectionPlan as InspectionPlanDTO,
   InspectionPlanItem as InspectionPlanItemDTO,
@@ -46,7 +47,7 @@ export class CreatePlanUseCase {
     }
 
     return await this.uow.execute(async (ctx) => {
-      const planId = crypto.randomUUID();
+      const planId = randomUUID();
       // 方案编码：调用方未指定时由服务端取号。取号在同一 UoW 事务内原子完成，
       // 并发建方案不重号、事务回滚则流水号一并回滚（见迁移 017）。
       // new Date() 只取一次：否则跨零点时"日期段"与"流水号键"会落到不同的日子上。
@@ -75,7 +76,7 @@ export class CreatePlanUseCase {
       // 创建首个版本并直接启用（产品口径：方案不再走「草稿 → 审批」链路，
       // 不合适的方案由用户在方案列表直接「停用」）。
       // activateVersion 内部含空指标项守门（PLAN_ACTIVE_EMPTY_ITEMS）与单激活态保证。
-      const versionId = crypto.randomUUID();
+      const versionId = randomUUID();
       const versionNo = cmd.initialVersionNo ?? 'V1.0';
       try {
         plan.createDraftVersion({
@@ -103,7 +104,7 @@ export class CreatePlanUseCase {
 
       // 写入 Outbox 事件
       await ctx.outbox.append({
-        id: crypto.randomUUID(),
+        id: randomUUID(),
         aggregateType: 'InspectionPlan',
         aggregateId: planId,
         eventType: 'INSPECTION_PLAN_CREATED',
@@ -113,7 +114,7 @@ export class CreatePlanUseCase {
           materialCode: cmd.materialCode,
           versionNo,
         },
-        traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+        traceId: securityCtx?.traceId ?? randomUUID(),
         occurredAt: new Date(),
         status: 'PENDING',
         retryCount: 0,
@@ -122,8 +123,8 @@ export class CreatePlanUseCase {
       // 写入不可变审计日志
       // （与其余用例一致：方案库的新增属于关键质量配置变更，必须进入 append-only 审计流）
       await ctx.auditLogs.insert({
-        id: crypto.randomUUID(),
-        traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+        id: randomUUID(),
+        traceId: securityCtx?.traceId ?? randomUUID(),
         userId: cmd.createdBy,
         userName: cmd.operatorName ?? cmd.createdBy,
         action: 'CREATE',

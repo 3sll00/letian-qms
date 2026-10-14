@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type {
   InspectionOrder as InspectionOrderDTO,
   BatchRecordInspectionItemsRequest,
@@ -165,7 +166,7 @@ export class RecordMeasurementsAndJudgeUseCase {
 
       // 5. 发送领域事件到 Outbox
       await ctx.outbox.append({
-        id: crypto.randomUUID(),
+        id: randomUUID(),
         aggregateType: 'InspectionOrder',
         aggregateId: order.getId(),
         eventType: decision === 'PASSED' ? 'INSPECTION_PASSED' : 'INSPECTION_FAILED',
@@ -184,7 +185,7 @@ export class RecordMeasurementsAndJudgeUseCase {
               ...(it.measuredVal !== undefined ? { measuredVal: it.measuredVal } : {}),
             })),
         },
-        traceId: crypto.randomUUID(),
+        traceId: randomUUID(),
         occurredAt: new Date(),
         status: 'PENDING',
         retryCount: 0,
@@ -192,8 +193,8 @@ export class RecordMeasurementsAndJudgeUseCase {
 
       // 6. 不可变审计日志
       await ctx.auditLogs.insert({
-        id: crypto.randomUUID(),
-        traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+        id: randomUUID(),
+        traceId: securityCtx?.traceId ?? randomUUID(),
         userId: cmd.operatorId,
         userName: cmd.operatorName,
         action: 'STATUS_CHANGE',

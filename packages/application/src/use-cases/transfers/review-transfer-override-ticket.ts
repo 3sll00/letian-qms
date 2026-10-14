@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { IUnitOfWork } from '../../tx/unit-of-work.js';
 import { ISecurityContext } from '../../security/security-context.js';
 import {
@@ -50,8 +51,8 @@ export class ReviewTransferOverrideTicketUseCase {
       });
 
       await ctx.auditLogs.insert({
-        id: crypto.randomUUID(),
-        traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+        id: randomUUID(),
+        traceId: securityCtx?.traceId ?? randomUUID(),
         userId: cmd.reviewerId,
         userName: cmd.reviewerName ?? securityCtx?.userName ?? '质量负责人',
         action: 'STATUS_CHANGE',

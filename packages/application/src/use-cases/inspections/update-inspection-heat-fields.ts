@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { CertTemplate } from '@letian/contracts';
 import { HeatBatchTraceService, type HeatTraceSourceType } from '@letian/domain';
 import { NotFoundError } from '../../errors/application-error.js';
@@ -116,8 +117,8 @@ export class UpdateInspectionHeatFieldsUseCase {
       });
 
       await ctx.auditLogs.insert({
-        id: crypto.randomUUID(),
-        traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+        id: randomUUID(),
+        traceId: securityCtx?.traceId ?? randomUUID(),
         userId: cmd.operatorId,
         userName: cmd.operatorName,
         action: 'UPDATE',

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 
 import type {
   MRBReview as MRBReviewDTO,
@@ -132,7 +133,7 @@ export async function triggerMrbReviewInTransaction(
   const firstStepApproverRole = reviewFlow?.nodes[0]?.roleCode ?? 'QUALITY_MANAGER';
 
   const mrbRecord: MRBReviewDTO = {
-    id: crypto.randomUUID(),
+    id: randomUUID(),
     mrbNo: reviewNo,
     sourceType,
     sourceOrderNo: orderDTO.orderNo,
@@ -164,7 +165,7 @@ export async function triggerMrbReviewInTransaction(
 
   // 写入 Outbox 事件
   await ctx.outbox.append({
-    id: crypto.randomUUID(),
+    id: randomUUID(),
     aggregateType: 'MRBReview',
     aggregateId: mrbRecord.id,
     eventType: 'MRBReviewTriggered',
@@ -177,7 +178,7 @@ export async function triggerMrbReviewInTransaction(
       preliminaryDisposition: disposition,
       currentApproverRole: firstStepApproverRole,
     },
-    traceId: crypto.randomUUID(),
+    traceId: randomUUID(),
     occurredAt: new Date(),
     status: 'PENDING',
     retryCount: 0,
@@ -185,8 +186,8 @@ export async function triggerMrbReviewInTransaction(
 
   // 记录不可变审计日志
   await ctx.auditLogs.insert({
-    id: crypto.randomUUID(),
-    traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+    id: randomUUID(),
+    traceId: securityCtx?.traceId ?? randomUUID(),
     userId: cmd.applicantId,
     userName: cmd.applicantName ?? '申请人',
     action: 'STATUS_CHANGE',

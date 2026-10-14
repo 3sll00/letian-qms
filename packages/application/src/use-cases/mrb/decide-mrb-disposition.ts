@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type {
   MRBDispositionDecisionRequest,
   MRBDisposition,
@@ -133,7 +134,7 @@ export class DecideMrbDispositionUseCase {
 
       // 产生 Outbox 领域事件
       await ctx.outbox.append({
-        id: crypto.randomUUID(),
+        id: randomUUID(),
         aggregateType: 'MRBReview',
         aggregateId: review.id,
         eventType: 'MRBDispositionDecided',
@@ -150,7 +151,7 @@ export class DecideMrbDispositionUseCase {
           terminateChain: terminated,
           frozenOrderNos,
         },
-        traceId: crypto.randomUUID(),
+        traceId: randomUUID(),
         occurredAt: new Date(),
         status: 'PENDING',
         retryCount: 0,
@@ -158,8 +159,8 @@ export class DecideMrbDispositionUseCase {
 
       // 不可变审计日志
       await ctx.auditLogs.insert({
-        ...(crypto.randomUUID ? { id: crypto.randomUUID() } : {}),
-        traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+        id: randomUUID(),
+        traceId: securityCtx?.traceId ?? randomUUID(),
         userId: cmd.operatorId,
         userName: cmd.operatorName ?? '系统操作员',
         action: 'DISPOSE',
@@ -263,8 +264,8 @@ async function terminateChainWriteBack(
       `链路已终止：MRB ${review.mrbNo} 判定 ${review.disposition ?? '终止'}，本单冻结待人工处理`
     );
     await ctx.auditLogs.insert({
-      id: crypto.randomUUID(),
-      traceId: crypto.randomUUID(),
+      id: randomUUID(),
+      traceId: randomUUID(),
       userId: operator.id,
       userName: operator.name,
       action: 'STATUS_CHANGE',
@@ -284,7 +285,7 @@ async function terminateChainWriteBack(
   }
 
   await ctx.outbox.append({
-    id: crypto.randomUUID(),
+    id: randomUUID(),
     aggregateType: 'MRBReview',
     aggregateId: review.id,
     eventType: 'CHAIN_TERMINATED',
@@ -296,7 +297,7 @@ async function terminateChainWriteBack(
       materialCode: review.materialCode,
       frozenOrderNos,
     },
-    traceId: crypto.randomUUID(),
+    traceId: randomUUID(),
     occurredAt: new Date(),
     status: 'PENDING',
     retryCount: 0,

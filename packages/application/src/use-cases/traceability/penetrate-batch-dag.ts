@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type {
   TraceabilityGraphResponse,
   TraceNode,
@@ -208,8 +209,8 @@ export class PenetrateBatchDagUseCase {
       // 5. 记录审计日志 (查询穿透)
       if (cmd.operatorId) {
         await ctx.auditLogs.insert({
-          id: crypto.randomUUID(),
-          traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+          id: randomUUID(),
+          traceId: securityCtx?.traceId ?? randomUUID(),
           userId: cmd.operatorId,
           userName: cmd.operatorName ?? '系统操作员',
           action: 'STATUS_CHANGE', // 统一审计动作

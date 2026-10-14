@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { IUnitOfWork } from '../../tx/unit-of-work.js';
 import { ISecurityContext } from '../../security/security-context.js';
 
@@ -76,8 +77,8 @@ export class BatchFreezeTerminatedChainsUseCase {
                 await ctx.inspectionOrders.appendNotes(orderId, freezeNote);
 
                 await ctx.auditLogs.insert({
-                  id: crypto.randomUUID(),
-                  traceId: securityCtx?.traceId ?? crypto.randomUUID(),
+                  id: randomUUID(),
+                  traceId: securityCtx?.traceId ?? randomUUID(),
                   userId: securityCtx?.userId ?? '00000000-0000-0000-0000-000000000000',
                   userName: securityCtx?.userName ?? '系统批处理',
                   action: 'STATUS_CHANGE',
