@@ -48,6 +48,7 @@ import * as widenChainKeyColsMigration from './045_widen_chain_key_columns.js';
 import * as materialCodeAliasMigration from './046_create_material_code_alias.js';
 import * as backgroundOpsJobFieldsMigration from './047_background_ops_job_fields.js';
 import * as employeePasswordHashMigration from './048_add_employee_password_hash.js';
+import * as createEquipmentsMigration from './049_create_equipments.js';
 
 class DynamicMigrationProvider implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -100,6 +101,7 @@ class DynamicMigrationProvider implements MigrationProvider {
       '046_create_material_code_alias': materialCodeAliasMigration,
       '047_background_ops_job_fields': backgroundOpsJobFieldsMigration,
       '048_add_employee_password_hash': employeePasswordHashMigration,
+      '049_create_equipments': createEquipmentsMigration,
     };
   }
 }

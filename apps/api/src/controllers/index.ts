@@ -13,3 +13,4 @@ export * from './export.controller';
 export * from './permissions.controller';
 
 export * from './report-templates.controller';export * from './review-flows.controller';
+export * from './equipment.controller';

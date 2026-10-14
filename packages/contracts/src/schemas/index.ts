@@ -9,6 +9,7 @@ export * from './inspection';
 export * from './inspection-groups';
 export * from './plan-presets';
 export * from './integration';
+export * from './equipment';
 export * from './report';
 export * from './query-dsl';
 export * from './transfer';

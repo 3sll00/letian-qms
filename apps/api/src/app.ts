@@ -21,6 +21,7 @@ import {
   exportController,
   reportTemplatesController,
   permissionsController,
+  equipmentController,
 } from './controllers';
 
 export interface BuildAppOptions {
@@ -122,6 +123,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
       // 系统管理 - 物料权限管理、角色字典与校验日志
       await v1.register(permissionsController, { prefix: '/permissions', container });
+
+      // 系统管理 - 设备管理台账（迁移 049：编码自动发号，字段全部可选）
+      await v1.register(equipmentController, { prefix: '/equipments', container });
     },
     { prefix: '/api/v1' }
   );

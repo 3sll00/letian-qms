@@ -37,6 +37,8 @@ tools/contract/.schemathesis/
 # 部署组装产物（scripts/deploy/assemble.cjs 与 pkg 输出；仅根目录组装包，scripts/deploy 源码保留）
 /deploy/
 /deploy.zip
+/deploy-stage/
+/deploy-npm-stage/
 apps/api/public/
 
 # pkg 打包临时工作区

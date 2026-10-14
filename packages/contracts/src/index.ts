@@ -160,6 +160,16 @@ export {
   TriggerSyncResponseSchema,
 } from './schemas/integration';
 
+// 设备管理契约（系统管理-设备管理，迁移 049）
+export * from './schemas/equipment';
+export {
+  EQUIPMENT_STATUS_OPTIONS,
+  EquipmentSchema,
+  CreateEquipmentRequestSchema,
+  EquipmentListQuerySchema,
+  EquipmentListResponseSchema,
+} from './schemas/equipment';
+
 export * from './schemas';
 export * from './dtos';
 export * from './errors';

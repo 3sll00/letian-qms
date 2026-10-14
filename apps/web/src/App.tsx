@@ -10,6 +10,7 @@ import { MrbPage } from './pages/mrb';
 import { PendingMRBPoolPage } from './pages/mrb/PendingMRBPoolPage';
 import { ReviewWorkflowView } from './pages/mrb/ReviewWorkflowView';
 import { MaterialCategoriesPage } from './pages/master-data/categories';
+import { EquipmentPage } from './pages/equipment';
 import { IntegrationPage } from './pages/integration';
 import { LoginPage } from './pages/login';
 import {
@@ -103,6 +104,8 @@ export function App() {
         return <IntegrationPage key={pageKey('permissions')} initialTab="permissions" />;
       case 'categories':
         return <MaterialCategoriesPage key={pageKey('categories')} />;
+      case 'equipment':
+        return <EquipmentPage key={pageKey('equipment')} />;
       case 'logs':
         return <IntegrationPage key={pageKey('logs')} initialTab="logs" />;
       default:

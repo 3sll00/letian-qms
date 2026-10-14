@@ -21,6 +21,7 @@ import reviewWorkflowIcon from '../assets/sidebar-icons/review_workflow.png';
 import permissionsIcon from '../assets/sidebar-icons/permissions.png';
 import categoriesIcon from '../assets/sidebar-icons/categories.png';
 import logsIcon from '../assets/sidebar-icons/logs.png';
+import equipmentIcon from '../assets/sidebar-icons/equipment.png';
 
 export type NavItemKey =
   | 'progress-overview'
@@ -37,7 +38,8 @@ export type NavItemKey =
   | 'review-workflow'
   | 'permissions'
   | 'categories'
-  | 'logs';
+  | 'logs'
+  | 'equipment';
 
 interface NavMenuItem {
   key: NavItemKey;
@@ -87,6 +89,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     groupName: '系统管理',
     items: [
+      { key: 'equipment', label: '设备管理', icon: equipmentIcon },
       { key: 'permissions', label: '物料权限管理', icon: permissionsIcon },
       { key: 'categories', label: '存货分类', icon: categoriesIcon },
       { key: 'logs', label: '操作日志', icon: logsIcon },

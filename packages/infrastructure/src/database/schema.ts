@@ -663,6 +663,36 @@ export interface TestItemsTable {
   updatedAt: Generated<Date>;
 }
 
+/**
+ * 设备管理台账（迁移 049，系统管理-设备管理）：equipment_code CHAR(6) 主码由
+ * qms_equipment_code_sequences 原子发号（000001 起）；业务字段全部可空。
+ * purchase_date 为 YYYY-MM-DD 文本（展示型日期，与检验单 dispatchDate 同口径）。
+ */
+export interface EquipmentsTable {
+  equipmentCode: string;
+  name: string | null;
+  model: string | null;
+  factorySerialNo: string | null;
+  equipmentType: string | null;
+  workshop: string | null;
+  status: string | null;
+  purchaseDate: string | null;
+  warrantyPeriod: string | null;
+  createdAt: Generated<Date>;
+  updatedAt: Generated<Date>;
+}
+
+/**
+ * 设备编码流水号池（迁移 049）：主键 code_key 同时是并发发号的排他锁点，
+ * 由 KyselyEquipmentRepository 以原子 upsert（last_seq + 1 RETURNING）取号，
+ * 与检验单号 / 方案编码流水池（迁移 012/017）同构。
+ */
+export interface EquipmentCodeSequencesTable {
+  codeKey: string;
+  lastSeq: Generated<number>;
+  updatedAt: Date | null;
+}
+
 export interface Database {
   warehouses: WarehousesTable;
   materials: MaterialsTable;
@@ -673,6 +703,8 @@ export interface Database {
   employees: EmployeesTable;
   companyProfile: CompanyProfileTable;
   testItems: TestItemsTable;
+  qmsEquipments: EquipmentsTable;
+  qmsEquipmentCodeSequences: EquipmentCodeSequencesTable;
   inspectionPlans: InspectionPlansTable;
   inspectionOrders: InspectionOrdersTable;
   reviewFlows: ReviewFlowsTable;
@@ -794,6 +826,9 @@ export type TransferOverrideTicketUpdate = Updateable<TransferOverrideTicketsTab
 export type QmsErpCodeMappingRow = Selectable<QmsErpCodeMappingTable>;
 export type QmsErpCodeMappingInsert = Insertable<QmsErpCodeMappingTable>;
 export type QmsErpCodeMappingUpdate = Updateable<QmsErpCodeMappingTable>;
+
+export type EquipmentRow = Selectable<EquipmentsTable>;
+export type EquipmentInsert = Insertable<EquipmentsTable>;
 
 
 export type MaterialInsert = Insertable<MaterialsTable>;

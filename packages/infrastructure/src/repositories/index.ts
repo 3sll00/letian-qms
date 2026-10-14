@@ -1,5 +1,6 @@
 export * from './pbac-sql-translator.js';
 export * from './master-data-repository.js';
+export * from './equipment-repository.js';
 export * from './inspection-plan-repository.js';
 export * from './inspection-order-repository.js';
 export * from './mrb-review-repository.js';

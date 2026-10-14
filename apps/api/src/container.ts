@@ -46,6 +46,7 @@ import {
   KyselyRoleRepository,
   KyselyAuthorizationLogRepository,
   KyselyReviewFlowRepository,
+  KyselyEquipmentRepository,
   StandardReportEngine,
   createDatabaseConnection,
   createUnitOfWork,
@@ -81,6 +82,7 @@ export interface ApiContainer {
     auditLogs: KyselyAuditLogRepository;
     traces: KyselyBatchTraceRepository;
     masterData: KyselyMasterDataRepository;
+    equipment: KyselyEquipmentRepository;
     integration: KyselyIntegrationRepository;
     dashboard: KyselyDashboardRepository;
     reviewFlows: KyselyReviewFlowRepository;
@@ -156,6 +158,7 @@ export function createApiContainer(options: CreateApiContainerOptions = {}): Api
     auditLogs: new KyselyAuditLogRepository(db),
     traces: new KyselyBatchTraceRepository(db),
     masterData: new KyselyMasterDataRepository(db),
+    equipment: new KyselyEquipmentRepository(db),
     integration: new KyselyIntegrationRepository(db),
     dashboard: new KyselyDashboardRepository(db),
     reviewFlows: new KyselyReviewFlowRepository(db),
