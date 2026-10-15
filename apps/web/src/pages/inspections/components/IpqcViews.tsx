@@ -15,9 +15,11 @@ import {
   ChevronLeft,
   ChevronRight,
   Sliders,
-  X
+  X,
+  Plus
 } from 'lucide-react';
 import { CertificatePrintModal } from '../../../components/certificate/CertificatePrintModal';
+import { NewInspectionModal, type NewInspectionFieldDef } from './NewInspectionModal';
 import { PlanMatchBanner } from '../../../components/common/PlanMatchBanner';
 import {
   buildIpqcCertificateData,
@@ -212,6 +214,52 @@ export function formatIpqcStatus(status: string): { label: string; tone: BadgeTo
 
 /** 过程检验台账三页代号：下料 / 滚丝 / 成品检 */
 type IpQcLedgerSub = 'blanking' | 'rolling' | 'finished';
+
+/**
+ * 「新增检验」弹窗字段：各台账页的建单录入列（检验单号 / 状态 / 操作为建单后派生列，不录入）。
+ * 固定七槽位四行：MES工单号（过程检验的「入库单号」槽位）· 批次号 → 物料编码 · 物料名称 →
+ * 规格型号 · 数量 → 检验人；
+ * 物料编码 / 批次号 / 数量是服务端建单硬约束（匹配质检方案与落库），标记必填；
+ * 「检验人」默认当前登录用户、可下拉改选，由 NewInspectionModal 内部统一承载。
+ */
+const NEW_IPQC_FIELD_SETS: Record<IpQcLedgerSub, { title: string; fields: NewInspectionFieldDef[] }> = {
+  blanking: {
+    title: '下料检验',
+    fields: [
+      { key: 'workOrderNo', label: 'MES工单号' },
+      { key: 'batchNo', label: '批次号', serverRequired: true },
+      { key: 'materialCode', label: '物料编码', serverRequired: true },
+      { key: 'materialName', label: '物料名称' },
+      { key: 'specification', label: '规格型号' },
+      { key: 'sampleQty', label: '数量', type: 'number', serverRequired: true },
+      { key: 'inspectorName', label: '检验人' },
+    ],
+  },
+  rolling: {
+    title: '滚丝检验',
+    fields: [
+      { key: 'workOrderNo', label: 'MES工单号' },
+      { key: 'batchNo', label: '批次号', serverRequired: true },
+      { key: 'materialCode', label: '物料编码', serverRequired: true },
+      { key: 'materialName', label: '物料名称' },
+      { key: 'specification', label: '规格型号' },
+      { key: 'sampleQty', label: '数量', type: 'number', serverRequired: true },
+      { key: 'inspectorName', label: '检验人' },
+    ],
+  },
+  finished: {
+    title: '成品检',
+    fields: [
+      { key: 'workOrderNo', label: 'MES工单号' },
+      { key: 'batchNo', label: '批次号', serverRequired: true },
+      { key: 'materialCode', label: '物料编码', serverRequired: true },
+      { key: 'materialName', label: '物料名称' },
+      { key: 'specification', label: '规格型号' },
+      { key: 'sampleQty', label: '数量', type: 'number', serverRequired: true },
+      { key: 'inspectorName', label: '检验人' },
+    ],
+  },
+};
 
 /** 台账列定义：表头与数据行共用同一份口径，杜绝「表头改了行没改」的口径漂移 */
 interface IpQcLedgerColumn {
@@ -478,6 +526,9 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
   /** 批量检视成功后的绿色结果提示（重新勾选 / 清空选择即清除，不弹 alert 打断台账浏览） */
   const [bulkNotice, setBulkNotice] = useState('');
 
+  // 「新增检验」弹窗（筛选栏入口）：字段集与检验类型按当前台账子页（下料 / 滚丝 / 成品检）切换
+  const [newInspectionOpen, setNewInspectionOpen] = useState(false);
+
   // 判定依据来源（口径：docs/17-检验录入界面说明与质检方案匹配口径.md §7）：按物料 + 检验类型匹配当前生效方案
   const inspectPlanMatch = useMatchedPlan(
     inspectingOrder?.materialCode ?? null,
@@ -588,6 +639,11 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
       fetchTableData();
     }
   }, [page, pageSize, fetchTableData, sub]);
+
+  /** 建单成功后刷新当前台账（IPQC 默认日期不限，新单直接可见） */
+  const handleInspectionCreated = useCallback(() => {
+    void fetchTableData();
+  }, [fetchTableData]);
 
   /**
    * 勾选清空时机（docs/40 §3.5）：换子页 / 翻页即清空 —— 勾选范围严格等于「当前页可见行」。
@@ -1198,6 +1254,13 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
     ? 'MES工序: 手工滚牙 · 螺纹牙型与公差配合 · 人员设备强追溯'
     : 'MES工序: 检测入库 · ★入库关卡必检物理阻断 · 终检组全项合格入库';
 
+  // 「新增检验」弹窗的当前子页配置（此处 sub 必为三台账之一，overview 已早退）
+  const newFieldSet = isBlanking
+    ? NEW_IPQC_FIELD_SETS.blanking
+    : isRolling
+    ? NEW_IPQC_FIELD_SETS.rolling
+    : NEW_IPQC_FIELD_SETS.finished;
+
   // 台账列表头与数据行共用同一份列定义（列集口径：docs/29 §2 下料 / docs/30 §2 滚丝·成品检）
   const ledgerColumns = buildIpqcLedgerColumns(sub, {
     onOpenDetail: handleOpenDetail,
@@ -1327,6 +1390,13 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
         </div>
 
         <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setNewInspectionOpen(true)}
+            className="px-3.5 py-1.5 rounded bg-emerald-600 text-white font-medium hover:bg-emerald-700 shadow-sm flex items-center gap-1"
+          >
+            <Plus className="w-3 h-3" /> 新增检验
+          </button>
           <button
             type="button"
             onClick={handleReset}
@@ -2150,6 +2220,16 @@ export const IpqcViews: React.FC<IpqcViewsProps> = ({ sub, onChangeSub }) => {
         type={certKind === 'MANUFACTURING' ? 'manufacturing' : 'quality'}
         qualityData={certData}
         manufacturingData={mfgData}
+      />
+
+      {/* 新增检验弹窗（筛选栏「新增检验」入口，按当前台账子页配置字段与检验类型） */}
+      <NewInspectionModal
+        isOpen={newInspectionOpen}
+        onClose={() => setNewInspectionOpen(false)}
+        onCreated={handleInspectionCreated}
+        moduleTitle={newFieldSet.title}
+        inspectionType={isBlanking ? 'IPQC_CT' : isRolling ? 'IPQC_RL' : 'IPQC_FN'}
+        fields={newFieldSet.fields}
       />
     </div>
   );

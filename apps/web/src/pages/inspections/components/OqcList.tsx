@@ -14,6 +14,7 @@ import { buildOqcCertificateData, buildManufacturingCertData } from '../../../li
 import { loadCompanyProfile } from '../../../lib/companyProfile';
 import { api } from '../../../lib/api';
 import type { TransferStateFields } from '../../../lib/transferGateFormat';
+import { NewInspectionModal, type NewInspectionFieldDef } from './NewInspectionModal';
 
 export interface OqcItem {
   id: string;
@@ -68,6 +69,23 @@ interface OqcListProps {
   onInspect: (item: any) => void;
   onNew?: () => void;
 }
+
+/**
+ * 「新增检验」弹窗字段：出货检验台账的建单录入列（检验单号 / 检验状态为建单后派生列，不录入）。
+ * 固定七槽位四行：销售出库单号（出货检验的「入库单号」槽位）· 批次号 → 成品编码 · 成品名称 →
+ * 规格型号 · 数量 → 检验人；
+ * 成品编码（物料编码）/ 批次号 / 数量是服务端建单硬约束，标记必填；
+ * 「检验人」默认当前登录用户、可下拉改选，由 NewInspectionModal 内部统一承载。
+ */
+const NEW_OQC_FIELDS: NewInspectionFieldDef[] = [
+  { key: 'salesOrderNo', label: '销售出库单号' },
+  { key: 'batchNo', label: '批次号', serverRequired: true },
+  { key: 'materialCode', label: '成品编码', serverRequired: true },
+  { key: 'materialName', label: '成品名称' },
+  { key: 'specification', label: '规格型号' },
+  { key: 'sampleQty', label: '数量', type: 'number', serverRequired: true },
+  { key: 'inspectorName', label: '检验人' },
+];
 
 /**
  * 界面中文「检验状态」-> 后端 `inspectionState` 语义筛选取值。
@@ -150,6 +168,21 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
   const [certKind, setCertKind] = useState<CertTemplateKind>('QUALITY');
   const [certData, setCertData] = useState<QualityCertificateData | null>(null);
   const [mfgData, setMfgData] = useState<ManufacturingCertData | null>(null);
+
+  // 「新增检验」弹窗（筛选栏入口）：建单写路径在弹窗内完成
+  const [newInspectionOpen, setNewInspectionOpen] = useState(false);
+
+  /**
+   * 建单成功后的台账刷新：出库日期范围重置为「不限」再查。
+   * 新建单的 dispatch_date 为空，而日期过滤（dispatchDate >= X）会排除空值行——
+   * 维持「本月」默认过滤会让刚建的单不可见，看起来像建单失败。
+   */
+  const handleInspectionCreated = useCallback(() => {
+    setDispatchDateFromQuery('');
+    setDispatchDateToQuery('');
+    setPage(1);
+    setAppliedFilters((prev) => ({ ...prev, dispatchDateFrom: '', dispatchDateTo: '' }));
+  }, []);
 
   // 加载数据
   const loadData = useCallback(async () => {
@@ -525,6 +558,13 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
         </div>
         <div className="flex items-center gap-2 ml-auto">
           <button
+            onClick={() => setNewInspectionOpen(true)}
+            className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white transition-colors font-medium text-sm shadow-sm flex items-center gap-1.5"
+          >
+            <Plus className="w-4 h-4" />
+            新增检验
+          </button>
+          <button
             onClick={handleReset}
             className="px-4 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 transition-colors font-medium text-sm"
           >
@@ -764,6 +804,16 @@ export const OqcList: React.FC<OqcListProps> = ({ onInspect, onNew }) => {
           manufacturingData={mfgData}
         />
       )}
+
+      {/* 新增检验弹窗（筛选栏「新增检验」入口） */}
+      <NewInspectionModal
+        isOpen={newInspectionOpen}
+        onClose={() => setNewInspectionOpen(false)}
+        onCreated={handleInspectionCreated}
+        moduleTitle="出货检验"
+        inspectionType="OQC_SH"
+        fields={NEW_OQC_FIELDS}
+      />
     </div>
   );
 };

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { RefreshCw, Search, RotateCcw, GitFork, X } from 'lucide-react';
+import { RefreshCw, Search, RotateCcw, GitFork, X, Plus } from 'lucide-react';
 import { CertificatePrintModal } from '../../../components/certificate/CertificatePrintModal';
+import { NewInspectionModal, type NewInspectionFieldDef } from './NewInspectionModal';
 import { DateInput } from '../../../components/common/DateInput';
 import { buildIqcCertificateData, buildManufacturingCertData } from '../../../lib/certificateDataService';
 import { loadCompanyProfile } from '../../../lib/companyProfile';
@@ -177,6 +178,23 @@ interface IqcListProps {
   onNavigateTrace?: (batchNo: string) => void;
 }
 
+/**
+ * 「新增检验」弹窗字段：来料检验台账的建单录入列（检验单号 / 检验状态为建单后派生列，不录入）。
+ * 固定七槽位四行：入库单号 · 批次号 → 物料编号 · 物料名称 → 规格型号 · 数量 → 检验人；
+ * 物料编号 / 批次号 / 数量是服务端建单硬约束（匹配质检方案与落库），标记必填；
+ * 「规格型号」选填，选物料编码时若为空由存货档案回填（落 inspection_orders.specification）；
+ * 「检验人」默认当前登录用户、可下拉改选，由 NewInspectionModal 内部统一承载。
+ */
+const NEW_IQC_FIELDS: NewInspectionFieldDef[] = [
+  { key: 'inboundNo', label: '入库单号' },
+  { key: 'batchNo', label: '批次号', serverRequired: true },
+  { key: 'materialCode', label: '物料编号', serverRequired: true },
+  { key: 'materialName', label: '物料名称' },
+  { key: 'specification', label: '规格型号' },
+  { key: 'sampleQty', label: '数量', type: 'number', serverRequired: true, placeholder: '到货 / 抽检数量' },
+  { key: 'inspectorName', label: '检验人' },
+];
+
 
 export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
   const [doc, setDoc] = useState('');
@@ -217,6 +235,21 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
   // 批次追溯弹窗
   const [traceBatchItem, setTraceBatchItem] = useState<IqcItem | null>(null);
   const [traceLoading, setTraceLoading] = useState(false);
+
+  // 「新增检验」弹窗（筛选栏入口）：建单写路径在弹窗内完成
+  const [newInspectionOpen, setNewInspectionOpen] = useState(false);
+
+  /**
+   * 建单成功后的台账刷新：入库日期范围重置为「不限」再查。
+   * 新建单的 inbound_date 为空，而日期过滤（inboundDate >= X）会排除空值行——
+   * 维持「本月」默认过滤会让刚建的单不可见，看起来像建单失败。
+   */
+  const handleInspectionCreated = () => {
+    setDateFrom('');
+    setDateTo('');
+    setPage(1);
+    setAppliedFilters((prev) => ({ ...prev, dateFrom: '', dateTo: '' }));
+  };
 
   /**
    * 行级证书（docs/35 §10 M9）：所有行可点，未录入的项留白。
@@ -555,6 +588,12 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
           </div>
           <div className="flex gap-2">
             <button
+              onClick={() => setNewInspectionOpen(true)}
+              className="px-3 py-1.5 text-xs bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 font-medium flex items-center gap-1"
+            >
+              <Plus className="w-3.5 h-3.5" /> 新增检验
+            </button>
+            <button
               onClick={handleReset}
               className="px-3 py-1.5 text-xs border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 flex items-center gap-1"
             >
@@ -878,6 +917,16 @@ export const IqcList: React.FC<IqcListProps> = ({ onInspect }) => {
         type={certKind === 'MANUFACTURING' ? 'manufacturing' : 'quality'}
         qualityData={currentCertData}
         manufacturingData={currentMfgData}
+      />
+
+      {/* 新增检验弹窗（筛选栏「新增检验」入口） */}
+      <NewInspectionModal
+        isOpen={newInspectionOpen}
+        onClose={() => setNewInspectionOpen(false)}
+        onCreated={handleInspectionCreated}
+        moduleTitle="来料检验"
+        inspectionType="IQC"
+        fields={NEW_IQC_FIELDS}
       />
     </div>
   );

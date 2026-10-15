@@ -12,6 +12,7 @@ function useSearchParams() {
 }
 import { DateInput } from '../../../components/common/DateInput';
 import { CertificatePrintModal } from '../../../components/certificate/CertificatePrintModal';
+import { NewInspectionModal, type NewInspectionFieldDef } from './NewInspectionModal';
 import {
   buildOqcCertificateData,
   convertOutsourceToManufacturingCert,
@@ -105,6 +106,52 @@ const CN_TO_STATUSES: Record<string, string> = {
  * （与来料检验台账 IqcList 的 MAX_DISPLAY_ROWS 同一口径），避免无界翻页拖垮后端。
  */
 const MAX_DISPLAY_ROWS = 10000;
+
+/**
+ * 「新增检验」弹窗字段：委外三页签台账的建单录入列（检验单号 / 状态 / 操作为建单后派生列，不录入）。
+ * 固定七槽位四行：委外加工单号（委外检验的「入库单号」槽位）· 批次号 → 物料编码 · 物料名称 →
+ * 规格型号 · 数量 → 检验人；
+ * 物料编码 / 批次号 / 数量是服务端建单硬约束，标记必填；
+ * 「检验人」默认当前登录用户、可下拉改选，由 NewInspectionModal 内部统一承载。
+ */
+const NEW_OUTSOURCE_FIELD_SETS: Record<'surface' | 'machining' | 'heat', { title: string; fields: NewInspectionFieldDef[] }> = {
+  surface: {
+    title: '委外检验 · 表面处理检验',
+    fields: [
+      { key: 'outsourceNo', label: '委外加工单号' },
+      { key: 'batchNo', label: '批次号', serverRequired: true },
+      { key: 'materialCode', label: '物料编码', serverRequired: true },
+      { key: 'materialName', label: '物料名称' },
+      { key: 'specification', label: '规格型号' },
+      { key: 'sampleQty', label: '数量', type: 'number', serverRequired: true },
+      { key: 'inspectorName', label: '检验人' },
+    ],
+  },
+  machining: {
+    title: '委外检验 · 机加工检验',
+    fields: [
+      { key: 'outsourceNo', label: '委外加工单号' },
+      { key: 'batchNo', label: '批次号', serverRequired: true },
+      { key: 'materialCode', label: '物料编码', serverRequired: true },
+      { key: 'materialName', label: '物料名称' },
+      { key: 'specification', label: '规格型号' },
+      { key: 'sampleQty', label: '数量', type: 'number', serverRequired: true },
+      { key: 'inspectorName', label: '检验人' },
+    ],
+  },
+  heat: {
+    title: '委外检验 · 热处理检验',
+    fields: [
+      { key: 'outsourceNo', label: '委外加工单号' },
+      { key: 'batchNo', label: '批次号', serverRequired: true },
+      { key: 'materialCode', label: '物料编码', serverRequired: true },
+      { key: 'materialName', label: '物料名称' },
+      { key: 'specification', label: '规格型号' },
+      { key: 'sampleQty', label: '数量', type: 'number', serverRequired: true },
+      { key: 'inspectorName', label: '检验人' },
+    ],
+  },
+};
 
 /**
  * 默认「回厂日期」区间 = 本月（月初 ~ 月末），与「默认显示本月」口径一致。
@@ -204,6 +251,9 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
   const [listLoading, setListLoading] = useState(false);
   const [page, setPage] = useState(1);
   const pageSize = 10;
+
+  // 「新增检验」弹窗（筛选栏入口）：字段集与检验类型按当前页签（表面 / 机加 / 热处理）切换
+  const [newInspectionOpen, setNewInspectionOpen] = useState(false);
 
   // 切换 Tab 同步 URL 查询参数
   const handleTabChange = (newTab: 'surface' | 'machining' | 'heat') => {
@@ -313,6 +363,12 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
   useEffect(() => {
     loadList(page);
   }, [loadList, page]);
+
+  /** 建单成功后刷新当前页签台账（回厂日期默认不限，新单直接可见） */
+  const handleInspectionCreated = useCallback(() => {
+    setPage(1);
+    void loadList(1);
+  }, [loadList]);
 
   // 筛选已全部下沉到后端（inspectionType / outsourceNo / statuses / processType / partner /
   // returnDateFrom / returnDateTo），前端不再二次过滤：列表直接渲染服务端返回的当前页数据，
@@ -568,6 +624,13 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
         <div className="ml-auto flex items-center gap-2">
           <button
             type="button"
+            onClick={() => setNewInspectionOpen(true)}
+            className="px-3.5 py-1.5 rounded bg-emerald-600 text-white font-medium hover:bg-emerald-700 shadow-sm cursor-pointer flex items-center gap-1"
+          >
+            <span aria-hidden="true" className="text-[14px] leading-none">+</span> 新增检验
+          </button>
+          <button
+            type="button"
             onClick={handleReset}
             className="px-3.5 py-1.5 rounded border border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer"
           >
@@ -758,6 +821,16 @@ export const OutsourceList: React.FC<OutsourceListProps> = ({ onInspect, initial
         type={certKind === 'QUALITY' ? 'quality' : 'manufacturing'}
         manufacturingData={currentCertData}
         qualityData={currentQualityData}
+      />
+
+      {/* 新增检验弹窗（筛选栏「新增检验」入口，按当前页签配置字段与检验类型） */}
+      <NewInspectionModal
+        isOpen={newInspectionOpen}
+        onClose={() => setNewInspectionOpen(false)}
+        onCreated={handleInspectionCreated}
+        moduleTitle={NEW_OUTSOURCE_FIELD_SETS[tab].title}
+        inspectionType={tab === 'machining' ? 'OQC_MACH' : tab === 'heat' ? 'OQC_HEAT' : 'OQC_SF'}
+        fields={NEW_OUTSOURCE_FIELD_SETS[tab].fields}
       />
     </div>
   );

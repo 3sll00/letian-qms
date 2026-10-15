@@ -30,6 +30,7 @@ import {
   InspectionOrderSchema,
   CreateInspectionOrderRequestSchema,
   UpdateInspectionHeaderRequestSchema,
+  FurnaceHeatTraceResponseSchema,
   MRBReviewSchema,
   DisposeMRBResponseSchema,
   PendingDefectItemSchema,
@@ -480,6 +481,223 @@ export const handlers = [
     });
   }),
 
+  // 过程检验工序级概览看板：与真实后端 getIpqcOverviewStats 同一口径
+  // （PENDING/DRAFT→待检，INSPECTING/RE_INSPECTING→检验中，PASSED/COMPLETED→已合格，
+  //   FAILED/IN_MRB_REVIEW→不合格，passRate = 已判中合格占比，未判按 100）。
+  // 必须注册在 /:id 之前 —— 否则 'ipqc-overview' 被当成工单 id 命中 404。
+  http.get('/api/v1/inspections/ipqc-overview', () => {
+    const calcGroup = (type: string) => {
+      const rows = inspectionOrdersList.filter((r) => r.inspectionType === type);
+      let pending = 0;
+      let inspecting = 0;
+      let passed = 0;
+      let failed = 0;
+      for (const r of rows) {
+        const st = String(r.status);
+        if (st === 'PENDING' || st === 'DRAFT') pending++;
+        else if (st === 'INSPECTING' || st === 'RE_INSPECTING') inspecting++;
+        else if (st === 'PASSED' || st === 'COMPLETED') passed++;
+        else if (st === 'FAILED' || st === 'IN_MRB_REVIEW') failed++;
+      }
+      const decided = passed + failed;
+      return {
+        total: rows.length,
+        pending,
+        inspecting,
+        passed,
+        failed,
+        passRate: decided > 0 ? Math.round((passed / decided) * 100) : 100,
+      };
+    };
+    const blanking = calcGroup('IPQC_CT');
+    const rolling = calcGroup('IPQC_RL');
+    const finished = calcGroup('IPQC_FN');
+    const totalPassed = blanking.passed + rolling.passed + finished.passed;
+    const totalFailed = blanking.failed + rolling.failed + finished.failed;
+    const totalDecided = totalPassed + totalFailed;
+    return HttpResponse.json({
+      blanking,
+      rolling,
+      finished,
+      summary: {
+        total: blanking.total + rolling.total + finished.total,
+        pending: blanking.pending + rolling.pending + finished.pending,
+        inspecting: blanking.inspecting + rolling.inspecting + finished.inspecting,
+        passed: totalPassed,
+        failed: totalFailed,
+        passRate: totalDecided > 0 ? Math.round((totalPassed / totalDecided) * 100) : 100,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  }),
+
+  // 炉批号历史数据追溯：与 HeatBatchTraceService.resolveHeatBatchData 同一口径（docs/47 §3）——
+  // 归一化匹配（去空白/全角空格/-/_ 后转大写）、L1 委外热处理 → L2 来料逐级回退不合并、
+  // 同物料优先、跨物料命中标 GLOBAL、白名单指标带出、上游异常只提示不带值不阻断。
+  // 必须注册在 /:id 之前 —— 否则 'heat-batch-trace' 被当成工单 id 命中 404。
+  http.get('/api/v1/inspections/heat-batch-trace', ({ request }) => {
+    const url = new URL(request.url);
+    const raw = (url.searchParams.get('heatBatchNo') ?? '').trim();
+    const requestedMaterial = (url.searchParams.get('materialCode') ?? '').trim();
+    const excludeOrderId = (url.searchParams.get('excludeOrderId') ?? '').trim();
+    const normalizeHeat = (v: string | undefined | null) =>
+      (v ?? '').replace(/[\s\-_　]/g, '').toUpperCase();
+    const normalized = normalizeHeat(raw);
+    const DECIDED = new Set(['PASSED', 'COMPLETED']);
+
+    const warningFor = (orders: readonly InspectionOrder[], carried: boolean) => {
+      const failed: string[] = [];
+      const underMrb: string[] = [];
+      const inspecting: string[] = [];
+      for (const o of orders) {
+        if (o.status === 'IN_MRB_REVIEW') underMrb.push(o.orderNo);
+        else if (o.overallDecision === 'FAILED' || o.status === 'FAILED') failed.push(o.orderNo);
+        else if (!DECIDED.has(o.status)) inspecting.push(o.orderNo);
+      }
+      const code = failed.length
+        ? 'UPSTREAM_FAILED'
+        : underMrb.length
+          ? 'UPSTREAM_UNDER_MRB'
+          : inspecting.length
+            ? 'UPSTREAM_INSPECTING'
+            : undefined;
+      if (code === undefined) return undefined;
+      const orderNos = (
+        code === 'UPSTREAM_FAILED' ? failed : code === 'UPSTREAM_UNDER_MRB' ? underMrb : inspecting
+      )
+        .sort((a, b) => a.localeCompare(b))
+        .slice(0, 10);
+      const base =
+        code === 'UPSTREAM_FAILED'
+          ? `该炉批号上游存在不合格记录（${orderNos.join('、')}）`
+          : code === 'UPSTREAM_UNDER_MRB'
+            ? `该炉批号上游存在 MRB 评审未结案的记录（${orderNos.join('、')}）`
+            : `该炉批号上游存在尚未终判的检验记录（${orderNos.join('、')}）`;
+      const tail = carried
+        ? '；本次带出的数据来自最近终判合格的记录（请核对炉次归属）'
+        : code === 'UPSTREAM_FAILED'
+          ? '，未带出该炉数据，请按 MRB 处置结论核对'
+          : code === 'UPSTREAM_UNDER_MRB'
+            ? '，未带出该炉数据，待 MRB 结论'
+            : '，未带出该炉数据，待上游终判';
+      return { code, orderNos, message: `${base}${tail}` };
+    };
+
+    const emptyRecord = (warning?: ReturnType<typeof warningFor>) =>
+      FurnaceHeatTraceResponseSchema.parse({
+        heatBatchNo: raw,
+        sourceType: 'NONE',
+        matchScope: 'GLOBAL',
+        inheritedItems: [],
+        ...(warning !== undefined ? { upstreamWarning: warning } : {}),
+      });
+
+    if (normalized === '') return HttpResponse.json(emptyRecord());
+
+    const sameHeatAll = inspectionOrdersList.filter(
+      (o) => normalizeHeat(o.furnaceHeatNo) === normalized && o.id !== excludeOrderId
+    );
+    const warning = warningFor(
+      requestedMaterial === ''
+        ? sameHeatAll
+        : sameHeatAll.filter((o) => o.materialCode === requestedMaterial),
+      true
+    );
+    const candidates = sameHeatAll.filter(
+      (o) => DECIDED.has(o.status) && o.overallDecision !== 'FAILED'
+    );
+
+    const timeOf = (iso: string | undefined) => {
+      const parsed = Date.parse(iso ?? '');
+      return Number.isNaN(parsed) ? 0 : parsed;
+    };
+    const pickLatest = (pool: readonly InspectionOrder[]) =>
+      [...pool].sort((a, b) => {
+        const byUpdated = timeOf(b.updatedAt) - timeOf(a.updatedAt);
+        if (byUpdated !== 0) return byUpdated;
+        const byCreated = timeOf(b.createdAt) - timeOf(a.createdAt);
+        if (byCreated !== 0) return byCreated;
+        return b.orderNo.localeCompare(a.orderNo);
+      })[0];
+
+    const INHERITABLE = new Set([
+      'MECHANICAL_PERFORMANCE',
+      'HARDNESS',
+      'TENSILE_STRENGTH',
+      'CHEMICAL_COMPOSITION',
+    ]);
+
+    for (const tier of [
+      { inspectionType: 'OQC_HEAT', sourceType: 'OUTSOURCE_HEAT_TREATMENT' },
+      { inspectionType: 'IQC', sourceType: 'IQC_RAW_MATERIAL' },
+    ] as const) {
+      const inTier = candidates.filter((o) => o.inspectionType === tier.inspectionType);
+      if (inTier.length === 0) continue;
+      const sameMaterial =
+        requestedMaterial === ''
+          ? []
+          : inTier.filter((o) => o.materialCode === requestedMaterial);
+      const best = pickLatest(sameMaterial.length > 0 ? sameMaterial : inTier);
+      if (best === undefined) continue;
+
+      const seen = new Set<string>();
+      const inheritedItems = (best.items ?? [])
+        .filter(
+          (item) =>
+            INHERITABLE.has(item.metricCategory) &&
+            (item.measuredVal !== undefined || (item.measuredText ?? '') !== '')
+        )
+        .filter((item) => {
+          if (item.itemCode === '') return true;
+          if (seen.has(item.itemCode)) return false;
+          seen.add(item.itemCode);
+          return true;
+        })
+        .map((item) => ({
+          itemCode: item.itemCode,
+          name: item.name,
+          metricCategory: item.metricCategory,
+          ...(item.measuredVal !== undefined ? { measuredVal: item.measuredVal } : {}),
+          ...(item.measuredText !== undefined && item.measuredText !== ''
+            ? { measuredText: item.measuredText }
+            : {}),
+          ...(item.unit !== undefined && item.unit !== '' ? { unit: item.unit } : {}),
+        }));
+
+      return HttpResponse.json(
+        FurnaceHeatTraceResponseSchema.parse({
+          heatBatchNo: raw,
+          sourceType: tier.sourceType,
+          matchScope:
+            requestedMaterial !== '' && best.materialCode === requestedMaterial
+              ? 'MATERIAL'
+              : 'GLOBAL',
+          sourceOrderNo: best.orderNo,
+          ...(best.id !== undefined ? { sourceOrderId: best.id } : {}),
+          ...(best.materialCode !== undefined && best.materialCode !== ''
+            ? { sourceMaterialCode: best.materialCode }
+            : {}),
+          ...(best.inspectedDate ?? best.updatedAt ?? best.createdAt
+            ? { inspectedAt: best.inspectedDate ?? best.updatedAt ?? best.createdAt }
+            : {}),
+          inheritedItems,
+          ...(warning !== undefined ? { upstreamWarning: warning } : {}),
+        })
+      );
+    }
+
+    return HttpResponse.json(
+      emptyRecord(
+        warningFor(
+          requestedMaterial === ''
+            ? sameHeatAll
+            : sameHeatAll.filter((o) => o.materialCode === requestedMaterial),
+          false
+        )
+      )
+    );
+  }),
+
   http.get('/api/v1/inspections/:id', ({ params }) => {
     const record = inspectionOrdersList.find((r) => r.id === params.id);
     if (!record) {
@@ -553,6 +771,17 @@ export const handlers = [
       batchNo: validatedDto.batchNo,
       supplierCode: validatedDto.supplierCode,
       customerCode: validatedDto.customerCode,
+      // 各台账「单据号」槽位与检验人列：与真实后端 POST /inspections 同口径透传，
+      // 否则离线 Mock 新建单的「入库单号 / MES工单号 / 销售出库单号 / 数量(totalQty) / 检验人」全为空
+      ...(validatedDto.inboundNo !== undefined ? { inboundNo: validatedDto.inboundNo } : {}),
+      ...(validatedDto.inboundDate !== undefined ? { inboundDate: validatedDto.inboundDate } : {}),
+      ...(validatedDto.workOrderNo !== undefined ? { workOrderNo: validatedDto.workOrderNo } : {}),
+      ...(validatedDto.salesOrderNo !== undefined ? { salesOrderNo: validatedDto.salesOrderNo } : {}),
+      ...(validatedDto.dispatchDate !== undefined ? { dispatchDate: validatedDto.dispatchDate } : {}),
+      ...(validatedDto.totalQty !== undefined ? { totalQty: validatedDto.totalQty } : {}),
+      ...(validatedDto.inspectorId !== undefined ? { inspectorId: validatedDto.inspectorId } : {}),
+      ...(validatedDto.inspectorName !== undefined ? { inspectorName: validatedDto.inspectorName } : {}),
+      ...(validatedDto.supplierName !== undefined ? { supplierName: validatedDto.supplierName } : {}),
       // 委外台账字段与 030 录入页字段（docs/36）：与真实后端 POST /inspections 同口径透传，
       // 否则离线 Mock 新建的委外单在台账上「委外加工单号 / 加工类型 / 加工商 / 回厂日期」全为空
       ...(validatedDto.outsourceNo !== undefined ? { outsourceNo: validatedDto.outsourceNo } : {}),
@@ -571,7 +800,6 @@ export const handlers = [
       isMandatoryGate: validatedDto.isMandatoryGate ?? false,
       status: 'PENDING',
       overallDecision: undefined,
-      inspectorId: undefined,
       inspectionNotes: '新建质检工单',
       planVersionId,
       planSnapshot: {

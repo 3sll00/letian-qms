@@ -163,11 +163,10 @@ function applicableProductOf(plan: InspectionPlan): string {
   return plan.materialName ?? materialCode;
 }
 
-/**
- * 指标标准值展示（2026-10 表格化新增方案口径）：
- * 单边公差 → 操作符+门槛值（如 ≥650）；外观 → 文字备注；双边公差 → 公差带区间（下限 ~ 上限）。
- */
-function standardDisplayOfItem(item: {
+/** 详情弹窗指标项列展示所需的最小字段集（契约 InspectionPlanItem 的子集） */
+interface DetailItemView {
+  name?: string;
+  itemCode?: string;
   standardText?: string;
   remark?: string;
   nominalValue?: number;
@@ -177,27 +176,27 @@ function standardDisplayOfItem(item: {
   toleranceKind?: string;
   dataType?: string;
   unit?: string;
-}): string {
-  if (item.judgmentMethod !== undefined && item.nominalValue !== undefined) {
-    return `${item.judgmentMethod}${item.nominalValue}${item.unit ?? ''}`;
+  measurementTool?: string;
+}
+
+/** 数值去尾零（36.500 → 36.5；36.000 → 36），详情表格的标准值/上下限复用 */
+function trimNumber(num: number): string {
+  return String(num).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+}
+
+/**
+ * 指标项 → 「检验类型」列文案（与新建弹窗的三选一同一口径）：
+ * toleranceKind 为准；缺失时按 judgmentMethod / 文本项特征回退推导（兼容旧数据行）。
+ */
+function itemKindLabel(item: DetailItemView): string {
+  if (item.toleranceKind === 'UNILATERAL') return '单边公差';
+  if (item.toleranceKind === 'APPEARANCE') return '外观';
+  if (item.toleranceKind === 'BILATERAL') return '双边公差';
+  if (item.judgmentMethod !== undefined && item.judgmentMethod !== '') return '单边公差';
+  if (item.dataType !== 'NUMERIC' && (item.remark !== undefined || item.standardText !== undefined)) {
+    return '外观';
   }
-  if (item.toleranceKind === 'APPEARANCE' || (item.dataType !== 'NUMERIC' && item.remark !== undefined)) {
-    return item.remark ?? item.standardText ?? '-';
-  }
-  if (item.standardText !== undefined && item.standardText !== '') {
-    return item.standardText;
-  }
-  if (item.nominalValue !== undefined) {
-    const trim = (num: number) => String(num).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
-    const upper = item.upperTolerance ?? 0;
-    const lower = item.lowerTolerance ?? 0;
-    const unitSuffix = item.unit !== undefined && item.unit !== '' ? ` ${item.unit}` : '';
-    if (upper !== 0 || lower !== 0) {
-      return `${trim(item.nominalValue - lower)} ~ ${trim(item.nominalValue + upper)}${unitSuffix}`;
-    }
-    return `${item.nominalValue}${unitSuffix}`;
-  }
-  return '-';
+  return '双边公差';
 }
 
 function formatDateTime(value?: string): string {
@@ -716,7 +715,7 @@ export function PlansPage() {
       {/* 方案详情弹窗 */}
       {detailPlan && (
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full p-6 space-y-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-4xl w-full p-6 space-y-4">
             <div className="flex items-center justify-between border-b pb-3">
               <h3 className="text-sm font-bold text-slate-900">
                 质检方案详情 — {detailPlan.planName} ({detailPlan.planCode})
@@ -747,21 +746,91 @@ export function PlansPage() {
                 </span>
               </div>
               <div className="font-semibold text-slate-900 pt-2">版本与指标项：</div>
-              <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-60 overflow-y-auto">
-                {(effectiveVersion(detailPlan)?.items ?? []).map((item, index) => (
-                  <div
-                    key={`${item.itemCode}-${index}`}
-                    className="p-2.5 flex items-center justify-between text-sm"
-                  >
-                    <span className="font-medium text-slate-700">{item.name}</span>
-                    <span className="text-slate-500">
-                      {standardDisplayOfItem(item)}
-                    </span>
-                  </div>
-                ))}
-                {(effectiveVersion(detailPlan)?.items ?? []).length === 0 && (
-                  <div className="p-3 text-center text-slate-400">该方案版本尚未配置指标项</div>
-                )}
+              {/* 指标项列式表：列与「新建质检方案」弹窗同一口径（项目名称/检验类型/检验设备/
+                  标准值/上限值/下限值/判定方式），只读展示，不提供行编辑 */}
+              <div className="border border-slate-200 rounded-lg overflow-hidden">
+                <div className="overflow-x-auto max-h-72 overflow-y-auto">
+                  <table className="w-full text-left text-[12px] border-collapse min-w-[860px]">
+                    <thead>
+                      <tr className="bg-[#F8FAFC] text-[#64748B] font-medium border-b border-[#E2E8F0]">
+                        <th className="py-2.5 px-3 w-10 text-center">#</th>
+                        <th className="py-2.5 px-2">项目名称</th>
+                        <th className="py-2.5 px-2 w-24">检验类型</th>
+                        <th className="py-2.5 px-2 w-40">检验设备</th>
+                        <th className="py-2.5 px-2 w-28">标准值</th>
+                        <th className="py-2.5 px-2 w-24">上限值</th>
+                        <th className="py-2.5 px-2 w-24">下限值</th>
+                        <th className="py-2.5 px-2 w-20">判定方式</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#F1F5F9] text-slate-700">
+                      {(effectiveVersion(detailPlan)?.items ?? []).map((item, index) => {
+                        const kind = itemKindLabel(item);
+                        const isAppearance = kind === '外观';
+                        const isBilateral = kind === '双边公差';
+                        const dashCell = 'py-2.5 px-2 text-center text-[#CBD5E1] select-none';
+                        return (
+                          <tr key={`${item.itemCode}-${index}`} className="hover:bg-[#FAFBFE]">
+                            <td className="py-2.5 px-3 text-center text-[#94A3B8] font-mono">
+                              {index + 1}
+                            </td>
+                            <td className="py-2.5 px-2 font-medium text-slate-800">{item.name}</td>
+                            <td className="py-2.5 px-2 text-slate-600">{kind}</td>
+                            <td className="py-2.5 px-2 text-slate-600">
+                              {item.measurementTool !== undefined && item.measurementTool !== '' ? (
+                                item.measurementTool
+                              ) : (
+                                <span className="text-[#CBD5E1]">不指定</span>
+                              )}
+                            </td>
+                            <td className="py-2.5 px-2 font-mono">
+                              {isAppearance
+                                ? item.remark ?? item.standardText ?? '-'
+                                : item.nominalValue !== undefined
+                                  ? trimNumber(item.nominalValue)
+                                  : item.standardText ?? '-'}
+                            </td>
+                            {isBilateral && item.nominalValue !== undefined ? (
+                              <>
+                                <td className="py-2.5 px-2 font-mono">
+                                  {item.upperTolerance !== undefined
+                                    ? trimNumber(item.nominalValue + item.upperTolerance)
+                                    : '-'}
+                                </td>
+                                <td className="py-2.5 px-2 font-mono">
+                                  {item.lowerTolerance !== undefined
+                                    ? trimNumber(item.nominalValue - item.lowerTolerance)
+                                    : '-'}
+                                </td>
+                              </>
+                            ) : (
+                              <>
+                                <td className={dashCell}>—</td>
+                                <td className={dashCell}>—</td>
+                              </>
+                            )}
+                            <td className="py-2.5 px-2 text-center text-slate-600">
+                              {isAppearance ? (
+                                <span className="text-[#CBD5E1]">—</span>
+                              ) : isBilateral ? (
+                                '自动'
+                              ) : (
+                                item.judgmentMethod ?? '-'
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      {(effectiveVersion(detailPlan)?.items ?? []).length === 0 && (
+                        <tr>
+                          <td colSpan={8} className="py-10 text-center text-slate-400">
+                            该方案版本尚未配置指标项
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               </div>
               <div className="text-slate-400">
                 版本：

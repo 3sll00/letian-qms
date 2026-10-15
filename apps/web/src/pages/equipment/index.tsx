@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Plus, RefreshCw, Search, X, Cog } from 'lucide-react';
 import { api, errorMessage } from '../../lib/api';
 import { DateInput } from '../../components/common';
@@ -58,6 +58,8 @@ export function EquipmentPage() {
   // 新增设备弹窗
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
+  /** 同步防重复提交闸门：state 置位到重渲染之间存在窗口，连点会让两次提交都通过 creating 检查 */
+  const creatingRef = useRef(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [form, setForm] = useState({
     name: '',
@@ -133,6 +135,8 @@ export function EquipmentPage() {
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (creatingRef.current) return;
+    creatingRef.current = true;
     setCreating(true);
     setFormError(null);
     try {
@@ -156,6 +160,7 @@ export function EquipmentPage() {
     } catch (err) {
       setFormError(errorMessage(err));
     } finally {
+      creatingRef.current = false;
       setCreating(false);
     }
   };
@@ -168,7 +173,7 @@ export function EquipmentPage() {
       {/* Header */}
       <div className="flex items-start justify-between">
         <div>
-          <h2 className="text-base font-bold text-slate-800">设备管理</h2>
+          <h2 className="text-base font-bold text-slate-800">检验设备</h2>
           <p className="text-xs text-slate-400 mt-0.5">
             设备台账：编码由系统自动发号（000001 起），其余字段均可选填
           </p>

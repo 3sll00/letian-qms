@@ -98,16 +98,16 @@ export const QualityCertificateTemplate: React.FC<QualityCertificateTemplateProp
       className="bg-white text-black mx-auto font-sans select-text print:w-full"
       style={{ width: '794px', maxWidth: '100%', fontSize: '10px', lineHeight: 1.75, padding: '10mm', position: 'relative' }}
     >
-      {/* 左上角：三角图标 + 字标（按用户标注图定位：图形居红圈位、字标居红框位，纵向堆叠） */}
+      {/* 左上角：小三角图标在上，放大后的字标与居中英文抬头同行（实测对齐：英文行中心 Y≈71） */}
       <img
         src={letianTriangle}
         alt="LETIAN FASTENERS logo"
-        style={{ position: 'absolute', top: '23px', left: '84px', width: '48px', height: '48px', objectFit: 'contain' }}
+        style={{ position: 'absolute', top: '14px', left: '88px', width: '40px', height: '40px', objectFit: 'contain' }}
       />
       <img
         src={letianWordmark}
         alt="LETIAN FASTENERS"
-        style={{ position: 'absolute', top: '75px', left: '42px', height: '16px', width: 'auto' }}
+        style={{ position: 'absolute', top: '60px', left: '30px', height: '20px', width: 'auto' }}
       />
       {/* 实验室抬头（企业档案；未维护即留白） */}
       <div className="text-center">
