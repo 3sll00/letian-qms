@@ -1,5 +1,5 @@
 /**
- * 乐天QMS 桌面客户端主进程。
+ * 云亿QMS 桌面客户端主进程。
  *
  * 职责：
  * 1. 启动一个仅监听 127.0.0.1 的内置静态服务器，托管 @letian/web 构建产物
@@ -10,7 +10,7 @@
  * 3. 提供应用菜单（服务器设置 / 开发者工具 / 缩放）与单实例锁。
  *
  * 运行模式（命令行参数）：
- *   --dev    连接本机 Vite 开发服务器 (http://127.0.0.1:5200)，不依赖 web-dist；
+ *   --dev    连接本机 Vite 开发服务器 (http://127.0.0.1:31100)，不依赖 web-dist；
  *   --smoke  冒烟测试：加载完成后截图到 smoke-output/screenshot.png 并退出。
  */
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron';
@@ -25,7 +25,7 @@ const IS_SMOKE_SETTINGS = process.argv.includes('--smoke-settings');
 
 /** 内置静态服务器优先使用的固定端口（端口稳定则 http 源与 Service Worker 注册保持不变） */
 const PREFERRED_PORT = 5917;
-const VITE_DEV_URL = 'http://127.0.0.1:5200';
+const VITE_DEV_URL = 'http://127.0.0.1:31100';
 
 /** 应用根目录（dev：apps/desktop；打包后：asar 内应用根） */
 const APP_ROOT = path.join(__dirname, '..');
@@ -175,7 +175,7 @@ function createMainWindow(loadUrl: string): void {
     minHeight: 760,
     show: !IS_SMOKE,
     backgroundColor: '#020617',
-    title: '乐天质量管理系统',
+    title: '云亿质量管理系统',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -209,7 +209,7 @@ function createErrorWindow(html: string): void {
 
 function showMissingDistError(): void {
   createErrorWindow(`<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>乐天QMS 桌面客户端</title></head>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>云亿QMS 桌面客户端</title></head>
 <body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#020617;color:#e2e8f0;font-family:system-ui,sans-serif;">
   <div style="max-width:520px;padding:32px;border:1px solid #334155;border-radius:12px;background:#0f172a;">
     <h1 style="font-size:18px;margin:0 0 12px;color:#f8fafc;">前端产物缺失</h1>
@@ -293,12 +293,12 @@ function buildMenu(): Menu {
       label: '帮助',
       submenu: [
         {
-          label: '关于 乐天QMS工作台',
+          label: '关于 云亿QMS工作台',
           click: () => {
             void dialog.showMessageBox({
               type: 'info',
               title: '关于',
-              message: `乐天QMS工作台 v${app.getVersion()}`,
+              message: `云亿QMS工作台 v${app.getVersion()}`,
               detail: [
                 `Electron ${process.versions.electron}`,
                 `Chromium ${process.versions.chrome}`,

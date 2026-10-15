@@ -708,7 +708,7 @@ function styleTableHeader(row: ExcelJS.Row, cellCount: number): void {
 /** 生成导入模板工作簿（「方案导入」数据页 + 「填写说明」规则页 + 「物料参照」编码页） */
 export async function buildPlanImportTemplate(masterData: PlanImportMasterData): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook();
-  workbook.creator = 'Letian QMS';
+  workbook.creator = 'Yunyi QMS';
   workbook.created = new Date();
 
   // ---- Sheet 1：方案导入（数据页，只有表头，示例放在说明页防止误导入） ----

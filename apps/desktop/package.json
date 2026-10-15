@@ -2,7 +2,7 @@
   "name": "@letian/desktop",
   "version": "1.0.0",
   "private": true,
-  "description": "乐天QMS 桌面客户端 (Electron 壳：加载 @letian/web 工作台，运行时可配置服务器地址)",
+  "description": "云亿QMS 桌面客户端 (Electron 壳：加载 @letian/web 工作台，运行时可配置服务器地址)",
   "author": "Letian Fastener",
   "main": "out/main.cjs",
   "scripts": {
@@ -13,7 +13,7 @@
     "dev": "electron . --dev",
     "smoke": "electron . --smoke && electron . --smoke-settings",
     "package": "electron-builder --win nsis portable",
-    "package:demo": "electron-builder --win nsis portable -c.artifactName=LetianQMS-Demo-${version}.${ext}"
+    "package:demo": "electron-builder --win nsis portable -c.artifactName=YunyiQMS-Demo-${version}.${ext}"
   },
   "devDependencies": {
     "@types/node": "^20.12.12",

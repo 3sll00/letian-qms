@@ -131,7 +131,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   );
 
   // 6.5 生产态托管前端静态文件（客户内网单进程部署：API + 静态 Web 同端口）。
-  //     开发态不启用（SERVE_WEB 未设置且 NODE_ENV != production），前端仍走 Vite 5200 代理。
+  //     开发态不启用（SERVE_WEB 未设置且 NODE_ENV != production），前端仍走 Vite 31100 代理。
   //     注意：SPA 回退不在此处注册 —— 根级 setNotFoundHandler 已被 errorHandlerPlugin 占用，
   //     重复注册会抛 FST_ERR_DUPLICATED_NOT_FOUND_HANDLER；回退逻辑并入该插件（见 error-handler.ts）。
   if (process.env.SERVE_WEB === '1' || process.env.NODE_ENV === 'production') {

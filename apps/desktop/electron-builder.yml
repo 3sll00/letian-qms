@@ -1,5 +1,5 @@
 appId: com.letian.qms.desktop
-productName: 乐天QMS工作台
+productName: 云亿QMS工作台
 copyright: Copyright © 2026 Letian Fastener
 electronDist: node_modules/electron/dist
 directories:
@@ -13,12 +13,12 @@ win:
     - dir
     - nsis
     - portable
-  artifactName: LetianQMS-Desktop-${version}.${ext}
+  artifactName: YunyiQMS-Desktop-${version}.${ext}
 nsis:
   oneClick: false
   perMachine: true
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
-  shortcutName: 乐天QMS工作台
+  shortcutName: 云亿QMS工作台
 portable:
-  artifactName: LetianQMS-Portable-${version}.${ext}
+  artifactName: YunyiQMS-Portable-${version}.${ext}

@@ -8,7 +8,7 @@
       * scripts/db/local-db.ps1 start  -> 启动本地 PostgreSQL（幂等，已运行则跳过）
       * pnpm db:migrate                 -> 跑到目前为止的迁移
       * pnpm --filter @letian/api run dev  -> 后台拉起 API（端口取自 .env.API_PORT，默认 3100）
-      * pnpm --filter @letian/web run dev  -> 后台拉起 Web（端口取自 .env.WEB_PORT，默认 5200）
+      * pnpm --filter @letian/web run dev  -> 后台拉起 Web（端口取自 .env.WEB_PORT，默认 31100）
 
     子进程通过 Start-Process 脱离当前会话，日志分别写入 logs\dev-start-api.log /
     logs\dev-start-web.log。按 Ctrl-C 触发 Stop-AllChildren 干净回收所有子进程。
@@ -199,7 +199,7 @@ if (-not (Test-Path $envFile)) {
 
 Import-DotEnv
 $apiPort = if ($env:API_PORT) { [int]$env:API_PORT } else { 3100 }
-$webPort = if ($env:WEB_PORT) { [int]$env:WEB_PORT } else { 5200 }
+$webPort = if ($env:WEB_PORT) { [int]$env:WEB_PORT } else { 31100 }
 $dbPort  = if ($env:DB_PORT)  { [int]$env:DB_PORT  } else { 5432 }
 Write-Ok "端口口径: API=$apiPort  Web=$webPort  DB=$dbPort"
 

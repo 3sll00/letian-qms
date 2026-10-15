@@ -55,15 +55,6 @@ interface NavGroup {
 
 export const NAV_GROUPS: NavGroup[] = [
   {
-    groupName: '质量总览',
-    items: [
-      { key: 'progress-overview', label: '进度总览', icon: dashboardIcon },
-      { key: 'dashboard', label: '检验进度总览', icon: dashboardIcon },
-      { key: 'history', label: '检验进度明细', icon: historyIcon },
-      { key: 'traceability', label: '质量追溯看板', icon: traceabilityIcon },
-    ],
-  },
-  {
     groupName: '检验管理',
     items: [
       { key: 'iqc', label: '来料检验(IQC)', icon: iqcIcon },
@@ -87,9 +78,18 @@ export const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    groupName: '质量总览',
+    items: [
+      { key: 'progress-overview', label: '进度总览', icon: dashboardIcon },
+      { key: 'dashboard', label: '检验进度总览', icon: dashboardIcon },
+      { key: 'history', label: '检验进度明细', icon: historyIcon },
+      { key: 'traceability', label: '质量追溯看板', icon: traceabilityIcon },
+    ],
+  },
+  {
     groupName: '系统管理',
     items: [
-      { key: 'equipment', label: '设备管理', icon: equipmentIcon },
+      { key: 'equipment', label: '检验设备', icon: equipmentIcon },
       { key: 'permissions', label: '物料权限管理', icon: permissionsIcon },
       { key: 'categories', label: '存货分类', icon: categoriesIcon },
       { key: 'logs', label: '操作日志', icon: logsIcon },
@@ -202,9 +202,9 @@ export function AppLayout({ currentKey, onSelectKey, user, onLogout, children }:
         {/* Brand Logo Header */}
         <div className={cn('relative h-[58px] flex items-center border-b border-slate-800/80 shrink-0', sidebarCollapsed ? 'justify-center px-2' : 'px-4 gap-2.5')}>
           <span className={cn('w-7 h-7 rounded-[7px] bg-gradient-to-br from-[#325CEE] to-[#5D64F0] shadow-sm flex items-center justify-center text-white text-[15px] font-bold leading-none select-none', sidebarCollapsed && 'hidden')}>
-            L
+            Y
           </span>
-          <span className={cn('text-white text-[15px] font-semibold tracking-wide', sidebarCollapsed && 'hidden')}>乐天QMS</span>
+          <span className={cn('text-white text-[15px] font-semibold tracking-wide', sidebarCollapsed && 'hidden')}>云亿QMS</span>
           <button
             type="button"
             onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}

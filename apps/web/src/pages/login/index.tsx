@@ -75,8 +75,9 @@ function writeLastUsername(value: string): void {
 export function LoginPage({ onLoggedIn }: LoginPageProps) {
   const isMockBuild = import.meta.env.VITE_USE_MOCK === 'true';
   const isDesktop = typeof window !== 'undefined' && window.desktop !== undefined;
-  // 生产登录 UI 只在桌面客户端出现（「桌面客户端才能用生产后端」）
-  const isProduction = isDesktop && !isMockBuild;
+  // 生产登录 UI = 非 mock 构建（桌面客户端与浏览器直连部署同一口径）；
+  // 「服务器设置」入口是桌面专属，单独由 isDesktop 控制
+  const isProduction = !isMockBuild;
   // 展示实际生效的 API 基址：桌面「服务器设置」配置优先，其次构建期固化值
   const serverUrl = isDesktop ? (window.desktop?.getServerUrl?.() ?? '') : '';
   const [userName, setUserName] = useState<string>(() => readLastUsername());
@@ -237,12 +238,14 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
           <div>
             <div className="flex items-center gap-2.5">
               <span className="w-9 h-9 rounded-[9px] bg-gradient-to-br from-[#325CEE] to-[#5D64F0] shadow-sm flex items-center justify-center text-white text-[19px] font-bold leading-none select-none">
-                L
+                Y
               </span>
-              <span className="text-lg font-semibold tracking-wide">乐天QMS</span>
+              <span className="text-lg font-semibold tracking-wide">云亿QMS</span>
             </div>
             <p className="text-[13px] text-slate-300/90 mt-6 leading-relaxed">
-              {isProduction ? '质量管理系统 · 桌面客户端' : '质量管理系统 · 物料权限演示'}
+              {isProduction
+                ? `质量管理系统${isDesktop ? ' · 桌面客户端' : ''}`
+                : '质量管理系统 · 物料权限演示'}
             </p>
           </div>
           <div className="space-y-4 text-[12px] text-slate-300/80">
@@ -254,7 +257,10 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
               {isProduction ? (
                 <>
                   <Server className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
-                  <p>当前连接生产后端，数据写入实时生效；服务器地址可在「服务器设置」中查看或切换。</p>
+                  <p>
+                    当前连接生产后端，数据写入实时生效
+                    {isDesktop ? '；服务器地址可在「服务器设置」中查看或切换。' : '。'}
+                  </p>
                 </>
               ) : (
                 <>
@@ -266,7 +272,7 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
           </div>
           <p className="text-[11px] text-slate-400/70 leading-relaxed">
             {isProduction
-              ? '生产后端仅允许桌面客户端接入；账号口令由后端统一校验，登录状态 24 小时内有效。'
+              ? '账号口令由后端统一校验，登录状态 24 小时内有效。'
               : '仅限开发 / 演示环境使用：生产环境由统一身份认证（SSO）接管，本页面不会注册登录接口。'}
           </p>
         </div>
@@ -470,8 +476,8 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
           </form>
           )}
 
-          {/* 生产形态（桌面客户端）：显示实际生效的服务器地址 + 「服务器设置」入口 */}
-          {isProduction && pendingUser === null && (
+          {/* 生产形态且桌面客户端：显示实际生效的服务器地址 + 「服务器设置」入口（浏览器直连无此入口） */}
+          {isProduction && isDesktop && pendingUser === null && (
             <div className="mt-4 pt-4 border-t border-slate-100 space-y-2.5">
               <div className="flex items-center gap-2 rounded border border-slate-200 bg-slate-50 px-3 py-2">
                 <Server className="w-3.5 h-3.5 text-slate-400 shrink-0" />
