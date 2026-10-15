@@ -1,7 +1,7 @@
 /**
  * 七大业务流程前端走查（Chrome DevTools Protocol 驱动）
  *
- * 前置：Web dev server 已启动（默认自动探测 5200 -> 5201 -> 5202，或由 WEB_BASE 指定）。
+ * 前置：Web dev server 已启动（默认自动探测 31100 -> 31101 -> 31102，或由 WEB_BASE 指定）。
  * 若 9222 上没有可连接的 Chrome，本脚本会自行以无头模式拉起一个再跑（用完关闭）。
  *
  * 退出码：0 = 7 项用例全部通过且无未捕获运行时异常；1 = 存在失败项或致命异常；2 = 环境不可用。
@@ -31,7 +31,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const WEB_CANDIDATES = process.env.WEB_BASE
   ? [process.env.WEB_BASE]
-  : ['http://127.0.0.1:5200/', 'http://127.0.0.1:5201/', 'http://127.0.0.1:5202/'];
+  : ['http://127.0.0.1:31100/', 'http://127.0.0.1:31101/', 'http://127.0.0.1:31102/'];
 
 /** 端口探测：只看状态码（首页返回 HTML，不能按 JSON 解析） */
 function probeHttp(url) {

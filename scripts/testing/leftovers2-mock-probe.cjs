@@ -5,7 +5,7 @@
  *   （见 docs/实施进度 §47），故不再有页面调用方，本探针只断侧边栏菜单已消失与 GET 路由仍生效。
  *
  * 前置：`$env:VITE_API_TARGET="http://127.0.0.1:5999"; pnpm --filter @letian/web run dev:mock`
- *   （前端 :5200，不需要数据库；5999 是**未监听**端口 —— 未 mock 的接口若打到真实后端会 401，
+ *   （前端 :31100，不需要数据库；5999 是**未监听**端口 —— 未 mock 的接口若打到真实后端会 401，
  *     前端安全登出会把人踢回登录页，走查结论随即失真）
  * 用法：`pnpm verify:leftovers2:mock`
  * 产物：scripts/logs/leftovers2-mock-probe.log
@@ -19,7 +19,7 @@ const path = require('node:path');
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const OUT_DIR = path.join(__dirname, '..', 'logs');
 const PORT = 9342;
-const WEB = 'http://127.0.0.1:5200/';
+const WEB = 'http://127.0.0.1:31100/';
 const LOG = path.join(OUT_DIR, 'leftovers2-mock-probe.log');
 fs.writeFileSync(LOG, '');
 const log = (...a) => { const line = a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' '); fs.appendFileSync(LOG, line + '\n'); console.log(line); };
@@ -60,7 +60,7 @@ const results = [];
 const check = (name, ok, detail) => { results.push(ok); log(`${ok ? 'PASS' : 'FAIL'} :: ${name}${detail === undefined ? '' : ' :: ' + JSON.stringify(detail)}`); };
 
 (async () => {
-  // 前置检查：dev:mock 必须在 :5200 上，否则给出明确提示，而不是让 Chrome 空等到超时
+  // 前置检查：dev:mock 必须在 :31100 上，否则给出明确提示，而不是让 Chrome 空等到超时
   if (!(await httpReachable(WEB))) {
     console.error(`PROBE ERROR: ${WEB} 不可达 —— 请先运行 pnpm --filter @letian/web run dev:mock`);
     process.exit(3);

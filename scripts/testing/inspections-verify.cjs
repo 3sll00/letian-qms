@@ -25,10 +25,10 @@ fs.mkdirSync(OUT_DIR, { recursive: true });
 const PORT = 9335;
 const WEB_CANDIDATES = process.env.WEB_BASE
   ? [process.env.WEB_BASE]
-  : ['http://127.0.0.1:5200/', 'http://127.0.0.1:5201/', 'http://127.0.0.1:5202/'];
+  : ['http://127.0.0.1:31100/', 'http://127.0.0.1:31101/', 'http://127.0.0.1:31102/'];
 const API_BASE = process.env.API_BASE || 'http://127.0.0.1:3100/api/v1';
 
-/** 多会话环境下 vite dev 端口会自增（5200 -> 5201 -> 5202），故自动探测，避免跑错实例 */
+/** 多会话环境下 vite dev 端口会自增（31100 -> 31101 -> 31102），故自动探测，避免跑错实例 */
 /** 端口探测：只看 HTTP 状态码（首页返回 HTML，不能按 JSON 解析） */
 function probeHttp(url) {
   return new Promise((resolve, reject) => {

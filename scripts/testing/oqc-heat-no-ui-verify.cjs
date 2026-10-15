@@ -24,7 +24,7 @@ fs.mkdirSync(OUT_DIR, { recursive: true });
 const PORT = Number(process.env.CDP_PORT || 9440);
 const WEB_CANDIDATES = process.env.WEB_BASE
   ? [process.env.WEB_BASE]
-  : ['http://127.0.0.1:5200/', 'http://127.0.0.1:5201/', 'http://127.0.0.1:5202/'];
+  : ['http://127.0.0.1:31100/', 'http://127.0.0.1:31101/', 'http://127.0.0.1:31102/'];
 const API_BASE = process.env.API_BASE || 'http://127.0.0.1:3100/api/v1';
 
 const TARGET_ORDER_NO = 'OQC-SH-20260923-9001';

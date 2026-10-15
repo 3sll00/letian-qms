@@ -1,14 +1,14 @@
 # 乐天质量管理系统 (Letian QMS) —— 自动化走查与界面验收截图
 
 本目录的截图由 `scripts/testing/cdp-runner.js`（基于 Chrome DevTools Protocol 的无头浏览器走查脚本）
-在**真实前后端联动**环境下自动捕获：前端 `vite dev`（`:5200`，`/api` 反向代理到 `:3100`）+ 真实 Fastify API + 真实 PostgreSQL。
+在**真实前后端联动**环境下自动捕获：前端 `vite dev`（`:31100`，`/api` 反向代理到 `:3100`）+ 真实 Fastify API + 真实 PostgreSQL。
 
 ```bash
-# 前置：Web dev server 与 API 均已启动（脚本会自动探测 5200 / 5201 / 5202）
+# 前置：Web dev server 与 API 均已启动（脚本会自动探测 31100 / 31101 / 31102）
 node scripts/testing/cdp-runner.js
 
 # 指定前端地址与调试端口
-WEB_BASE=http://127.0.0.1:5201/ CDP_PORT=9222 node scripts/testing/cdp-runner.js
+WEB_BASE=http://127.0.0.1:31101/ CDP_PORT=9222 node scripts/testing/cdp-runner.js
 ```
 
 脚本会依次执行 7 项走查并覆盖本目录下对应的 PNG 资产，**退出码 0 = 7 项全部通过且无未捕获运行时异常**，

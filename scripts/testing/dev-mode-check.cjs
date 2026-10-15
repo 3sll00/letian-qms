@@ -2,9 +2,9 @@
  * 真库形态自检（dev-mode check）—— 我起的这个前端，是「真连后端写库」还是「离线 Mock 演示」？
  *
  * 为什么需要：本机有两种前端启动方式，界面长得一模一样，但「保存」的去向完全不同：
- *   pnpm dev:all / pnpm dev             -> Vite :5200 把 /api 反代到真实 API :3100 -> 写真库（MSW 关闭）
+ *   pnpm dev:all / pnpm dev             -> Vite :31100 把 /api 反代到真实 API :3100 -> 写真库（MSW 关闭）
  *   pnpm dev:mock（vite --mode mock）   -> 载入 apps/web/.env.mock（VITE_USE_MOCK=true）-> MSW 拦截 -> 只写浏览器内存
- * 两者**端口相同**（.env.mock 里 VITE_PORT 也是 5200），因此端口号不能作为判据；docs/35 §R7 记过一次真实事故：
+ * 两者**端口相同**（.env.mock 里 VITE_PORT 也是 31100），因此端口号不能作为判据；docs/35 §R7 记过一次真实事故：
  * 探针打到了"看起来一样"的真实后端代理实例，把库里一条 MRB 从 UNDER_REVIEW 改成了 DISPOSED。
  *
  * 本脚本**只读**（不写库、不改业务数据、不点保存），四条结论全部来自运行期证据，而不是读配置文件：
@@ -13,10 +13,10 @@
  *   ② MSW：同一个模块里 isMockEnabled() 的判据值（VITE_USE_MOCK 缺失或非 'true' 即不会启用 MSW）；
  *   ③ 代理：经前端同源发 GET /api/v1/inspections（不带令牌）→ 必须是真实后端的 401 + application/problem+json；
  *   ④ 落库：登录后取接口返回的单号集合，与 PostgreSQL 直查的单号集合对账（接口返回的单号必须都在库里）。
- * 另附加：扫描 :5200/:5201/:5202 上**所有**在跑的前端实例并逐个标注形态 —— 误起 Mock 时立刻能看见。
+ * 另附加：扫描 :31100/:31101/:31102 上**所有**在跑的前端实例并逐个标注形态 —— 误起 Mock 时立刻能看见。
  *
  * 用法：pnpm verify:dev-mode
- *      $env:WEB_BASE="http://127.0.0.1:5201"; pnpm verify:dev-mode     # 指定实例
+ *      $env:WEB_BASE="http://127.0.0.1:31101"; pnpm verify:dev-mode     # 指定实例
  * 退出码：0 = 所选实例为真库形态且 ①②③④ 全通过；1 = 存在 FAIL（例如这就是 Mock 实例）；3 = 没有前端 dev server 在跑。
  */
 const fs = require('node:fs');
@@ -33,7 +33,7 @@ const log = (...args) => {
   console.log(line);
 };
 
-const PORTS = [5200, 5201, 5202];
+const PORTS = [31100, 31101, 31102];
 const TIMEOUT_MS = 6000;
 const DB_URL =
   process.env.DATABASE_URL || 'postgresql://letian_user:letian_secure_pass_2026@127.0.0.1:5433/letian_qms_db';
@@ -166,7 +166,7 @@ function verdictOf(instance) {
 
   const live = instances.filter((x) => x.reachable);
   if (live.length === 0) {
-    log('没有找到任何前端 dev server。正确启动方式：pnpm dev:all（API :3100 + 前端 :5200）');
+    log('没有找到任何前端 dev server。正确启动方式：pnpm dev:all（API :3100 + 前端 :31100）');
     process.exit(3);
   }
 
@@ -230,7 +230,7 @@ function verdictOf(instance) {
   log(`=== ${failures === 0 ? 'PASS' : 'FAIL'}：${checks - failures}/${checks} 通过 ===`);
   const targetIsMock = target.useMock === 'true' || target.mode === 'mock';
   if (targetIsMock) {
-    log('提示：受检实例是 MOCK —— 请改用 pnpm dev:all（前端 :5200 + API :3100，真连 PostgreSQL）。');
+    log('提示：受检实例是 MOCK —— 请改用 pnpm dev:all（前端 :31100 + API :3100，真连 PostgreSQL）。');
     log('     离线 Mock 只用于后端未启动时的界面走查，保存不会落库。');
     log('     注意：③④ 在这里通过**不代表页面会写库** —— MSW 只在浏览器里拦截，');
     log('     服务端（本脚本）经 Vite 代理仍会打到真实后端，所以判据只能是 ①② 的模块形态。');

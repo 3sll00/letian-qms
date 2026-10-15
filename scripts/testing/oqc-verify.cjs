@@ -17,13 +17,13 @@ const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const OUT_DIR = path.join(__dirname, '..', 'logs');
 fs.mkdirSync(OUT_DIR, { recursive: true });
 const PORT = 9334;
-const WEB = 'http://127.0.0.1:5200/';
+const WEB = 'http://127.0.0.1:31100/';
 const API = 'http://127.0.0.1:3100/api/v1';
-// 多会话环境下 vite dev 端口可能自增（5200 -> 5201 -> 5202），
+// 多会话环境下 vite dev 端口可能自增（31100 -> 31101 -> 31102），
 // 且 API 端口也可能被改动，故支持环境变量覆盖 + 自动探测，避免"跑错了实例"。
 const WEB_CANDIDATES = process.env.WEB_BASE
   ? [process.env.WEB_BASE]
-  : ['http://127.0.0.1:5200/', 'http://127.0.0.1:5201/', 'http://127.0.0.1:5202/'];
+  : ['http://127.0.0.1:31100/', 'http://127.0.0.1:31101/', 'http://127.0.0.1:31102/'];
 const API_BASE = process.env.API_BASE || API;
 
 /** 端口探测：只看 HTTP 状态码（首页返回 HTML，不能按 JSON 解析） */

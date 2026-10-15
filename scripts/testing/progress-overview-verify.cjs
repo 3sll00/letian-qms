@@ -1,7 +1,7 @@
 /**
  * 「进度总览」投屏页 UI 验收（CDP 驱动，离线 Mock 兼容）。
  *
- * 前置：Web dev server 已启动（默认探测 5200/5201/5202，或 WEB_BASE 指定）。
+ * 前置：Web dev server 已启动（默认探测 31100/31101/31102，或 WEB_BASE 指定）。
  * 退出码：0 = 全部断言通过；1 = 页面断言失败；2 = 环境不可用。
  */
 const { spawn } = require('node:child_process');
@@ -58,7 +58,7 @@ function probe(url) {
 async function resolveWebBase() {
   const candidates = process.env.WEB_BASE
     ? [process.env.WEB_BASE]
-    : ['http://127.0.0.1:5200/', 'http://127.0.0.1:5201/', 'http://127.0.0.1:5202/'];
+    : ['http://127.0.0.1:31100/', 'http://127.0.0.1:31101/', 'http://127.0.0.1:31102/'];
   for (const candidate of candidates) {
     try {
       await probe(new URL('/', candidate).href);

@@ -8,7 +8,7 @@
  *   M7  委外「新建委外检验单」入口可达 + 物料编码选择器（选中即回填物料名称）
  *   M9  四个台账行级「证书」入口 + 证书弹窗缺失提示条（不打印提示）
  *
- * 前置：API :3100、由真后端代理的前端（自动探测 :5200 -> :5201 -> :5202，并跳过离线 Mock 实例）、
+ * 前置：API :3100、由真后端代理的前端（自动探测 :31100 -> :31101 -> :31102，并跳过离线 Mock 实例）、
  *       数据库已按最新种子播种（pnpm db:seed）。
  * 用法：`pnpm verify:leftovers2`（等价 node scripts/testing/leftovers2-probe.cjs）
  * 复位：本探针**会真实写库**（企业档案 / 签核 / 提交回执），跑完必须再跑一次 `pnpm db:seed`。
@@ -24,7 +24,7 @@ const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const OUT_DIR = path.join(__dirname, '..', 'logs');
 fs.mkdirSync(OUT_DIR, { recursive: true });
 const PORT = 9341;
-const WEB_CANDIDATES = ['http://127.0.0.1:5200/', 'http://127.0.0.1:5201/', 'http://127.0.0.1:5202/'];
+const WEB_CANDIDATES = ['http://127.0.0.1:31100/', 'http://127.0.0.1:31101/', 'http://127.0.0.1:31102/'];
 const API_BASE = process.env.API_BASE || 'http://127.0.0.1:3100/api/v1';
 const DB_URL = process.env.DATABASE_URL || 'postgresql://letian_user:letian_secure_pass_2026@127.0.0.1:5433/letian_qms_db';
 

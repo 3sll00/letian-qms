@@ -25,12 +25,12 @@ const OUT_DIR = path.join(__dirname, '..', 'logs');
 const PORT = 9336;
 /** CDP 监听地址候选：先 IPv4，再 IPv6 回环（Chrome 只绑 `[::1]` 的环境见下方探测注释） */
 const CDP_HOSTS = ['127.0.0.1', '[::1]'];
-// 多会话环境下 vite dev 端口会自增（5200/5201/5202），故自动探测，避免指向无人监听的端口而卡死。
+// 多会话环境下 vite dev 端口会自增（31100/31101/31102），故自动探测，避免指向无人监听的端口而卡死。
 // 但「探测到的实例是不是离线 Mock」不能靠端口猜：进入应用后由运行目标自检（mockServiceWorker）判定，
 // 不是离线 Mock 就 exit 3，绝不拿真实库的数据去满足 Mock 断言。
 const WEB_CANDIDATES = process.env.WEB_BASE
   ? [process.env.WEB_BASE]
-  : ['http://127.0.0.1:5201/', 'http://127.0.0.1:5200/', 'http://127.0.0.1:5202/'];
+  : ['http://127.0.0.1:31101/', 'http://127.0.0.1:31100/', 'http://127.0.0.1:31102/'];
 const LOG = path.join(OUT_DIR, 'mrb-mock-verify.log');
 fs.writeFileSync(LOG, '');
 const log = (...a) => {
@@ -218,7 +218,7 @@ const check = (name, ok, detail) => {
     log('  serviceWorker 注册项: ' + JSON.stringify(swScripts));
     log('  正确做法（先起 dev:mock，再用 WEB_BASE 显式指向它）：');
     log('    $env:VITE_API_TARGET="http://127.0.0.1:5999"; pnpm dev:mock   # 5999 = 未监听端口');
-    log('    $env:WEB_BASE="http://127.0.0.1:5200/"; pnpm verify:mrb');
+    log('    $env:WEB_BASE="http://127.0.0.1:31100/"; pnpm verify:mrb');
     log('  真实库的权威门禁是：pnpm verify:mrb-wiring（需 API :3101 + pnpm db:seed）');
     log('');
     chrome.kill();

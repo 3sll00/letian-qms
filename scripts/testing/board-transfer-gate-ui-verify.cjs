@@ -33,9 +33,9 @@ const log = (...a) => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const WEB_CANDIDATES = [
-  'http://127.0.0.1:5200',
-  'http://[::1]:5200',
-  'http://localhost:5200',
+  'http://127.0.0.1:31100',
+  'http://[::1]:31100',
+  'http://localhost:31100',
 ];
 
 const CHROME_PATHS = [
