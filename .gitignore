@@ -39,6 +39,8 @@ tools/contract/.schemathesis/
 /deploy.zip
 /deploy-stage/
 /deploy-npm-stage/
+# 服务器交付包工作目录（含 Node 运行时与数据库备份，勿入库）
+/server-update-*/
 apps/api/public/
 
 # pkg 打包临时工作区

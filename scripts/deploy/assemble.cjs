@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // assemble.cjs — 生成本地可移植部署目录 deploy/
 //
-// 目标环境：客户服务器 Windows Server 2008 R2（只能运行 Node 14.21.3）。
+// 目标环境：客户服务器 Windows Server 2008 R2（只能运行 Node 14.17.6——
+// 14.18.0 起官方构建静态导入 WS2_32.dll 的 GetHostNameW，2008 R2 无此导出，
+// 见 get-node.ps1 注释；node: 前缀由 deploy/node14-prefix-shim.cjs 垫片兼容）。
 // 部署包必须完全自包含：node.exe + VC++ 运行库 + dist + public + 无链接的 node_modules。
 //
 // node_modules 的生成方式（重要，历经三个方案的取舍）：
@@ -135,7 +137,7 @@ function npmStageInstall(deps, byName) {
       {
         name: 'letian-qms-deploy-stage',
         private: true,
-        engines: { node: '>=14.21' },
+        engines: { node: '>=14.17' },
         dependencies: deps,
         overrides,
       },
@@ -214,6 +216,17 @@ function main() {
   fs.rmSync(NPM_STAGE, { recursive: true, force: true });
 
   placeWorkspacePackages();
+
+  // Node 14.17.6 兼容垫片：剥掉 require('node:xxx') 前缀（14.18.0 才支持该写法，
+  // 而 14.18.0+ 在 2008 R2 上无法启动，见 get-node.ps1 注释）。
+  fs.copyFileSync(path.join(ROOT, 'scripts/deploy/node14-prefix-shim.cjs'), path.join(DEPLOY, 'node14-prefix-shim.cjs'));
+  log('node14-prefix-shim.cjs 已放入 deploy/（start.bat / migrate.bat 通过 -r 加载）');
+  for (const bat of ['start.bat', 'migrate.bat']) {
+    const batPath = path.join(DEPLOY, bat);
+    if (fs.existsSync(batPath) && !fs.readFileSync(batPath, 'utf8').includes('node14-prefix-shim')) {
+      console.warn(`  ⚠ deploy/${bat} 未引用 node14-prefix-shim.cjs（-r 参数缺失会导致 Cannot find module 'node:xxx'）`);
+    }
+  }
 
   if (process.env.SKIP_NODE14_CHECK !== '1') {
     log('运行 Node 14 兼容性审计（设 SKIP_NODE14_CHECK=1 可跳过）...');

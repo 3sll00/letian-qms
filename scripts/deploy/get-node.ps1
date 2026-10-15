@@ -2,16 +2,23 @@
 #
 # 适用：客户服务器为 Windows Server 2008 R2 及以上 64 位。
 # 说明：
-#   - 默认下载 Node 16（适用于 Windows Server 2012 R2 及更新系统）。
-#   - 若客户服务器「确为」Windows Server 2008 R2，请改用变量 $Version = "14.21.3"
-#     （Node 14 是最后一个支持 Win7/2008 R2 的版本；Node 15+ 需要 Windows 8.1+）。
+#   - 2008 R2 必须用 $Version = "14.17.6"（默认值）。这不是随口一说的"Node 14 都行"：
+#     官方 win-x64 构建从 v14.18.0 起静态导入 WS2_32.dll 的 GetHostNameW
+#     （Windows 8 / Server 2012+ 才有该导出），在 2008 R2 上运行 node.exe 会弹
+#     「无法定位程序输入点 GetHostNameW 于动态链接库 WS2_32.dll 上。」
+#     2026-10-14 经 PE 导入表二分实测：12.22.12 / 14.0.0 / 14.17.6 干净，
+#     14.18.0 / 14.18.1 / 14.19.3 / 14.21.1+ 均带该导入；16.20.2 意外干净
+#     （libuv 后期改动态解析），但 Node 16 官方不支持 2008 R2，不要用。
+#   - 14.17.6 不支持 require('node:xxx') 前缀（14.18.0 才引入），部署包靠
+#     node14-prefix-shim.cjs 垫片解决（start.bat / migrate.bat 已带 -r 参数）。
+#   - Windows Server 2012 R2 及更新系统才可改用 Node 16（16.20.2）。
 #   - 使用 BITS 传输，遇到网络抖动会自动重试/断点续传。
 #
 # 运行（在仓库根目录，需要 PowerShell 5.1+）：
 #   powershell -ExecutionPolicy Bypass -File scripts/deploy/get-node.ps1
 
 param(
-  [string]$Version = "16.20.2",
+  [string]$Version = "14.17.6",
   [string]$DestDir = "deploy"
 )
 

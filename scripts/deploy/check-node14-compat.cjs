@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // check-node14-compat.cjs — 扫描部署产物，拦截 Node 15/16/18+ 独有的语法与 API
 //
-// 背景：客户服务器为 Windows Server 2008 R2，只能运行 Node 14.21.3（V8 8.4）。
+// 背景：客户服务器为 Windows Server 2008 R2，只能运行 Node 14.17.6（V8 8.4）。
+// （14.18.0+ 的官方构建静态导入 WS2_32.dll 的 GetHostNameW，2008 R2 上无法启动；
+//   require('node:xxx') 前缀由部署包内 node14-prefix-shim.cjs 垫片兼容，属合法写法。）
 // 该脚本扫描 deploy/dist 与 deploy/node_modules 中的 JS 文件，发现以下两类问题：
 //   1. 语法级（加载即 SyntaxError）：??= / &&= / ||=（ES2021 逻辑赋值）、static {} 初始化块
 //   2. API 级（调用时才报错）：structuredClone、replaceAll、Object.hasOwn、
